@@ -1,0 +1,54 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release (-O3, native)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug (assertions on)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "LOB_NATIVE": "OFF" }
+    },
+    {
+      "name": "asan",
+      "displayName": "ASan + UBSan",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "LOB_NATIVE": "OFF",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=all"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "ThreadSanitizer",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "LOB_NATIVE": "OFF",
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-sanitize-recover=all"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release" },
+    { "name": "debug",   "configurePreset": "debug"   },
+    { "name": "asan",    "configurePreset": "asan"    },
+    { "name": "tsan",    "configurePreset": "tsan"    }
+  ],
+  "testPresets": [
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "debug",   "configurePreset": "debug",   "output": { "outputOnFailure": true } },
+    { "name": "asan",    "configurePreset": "asan",    "output": { "outputOnFailure": true } },
+    { "name": "tsan",    "configurePreset": "tsan",    "output": { "outputOnFailure": true } }
+  ]
+}

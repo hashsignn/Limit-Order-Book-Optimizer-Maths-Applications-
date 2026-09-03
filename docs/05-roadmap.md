@@ -137,29 +137,46 @@ measurement last. Then you can't tell whether a change helped.
 
 ---
 
-## Phase 6 — The live path
+## Phase 6 — Shadow mode
+
+**No orders are sent to any venue in this phase, or in this project.** The point is to run
+the full pipeline against a live public feed and record what it *would* have done, so the
+simulator can be validated against real-time conditions rather than replayed history.
 
 **Build**
-- Order gateway for one venue; pre-trade risk **on the critical path** (position limits,
-  order value, message rate, price collar, self-match prevention, duplicate ClOrdID).
-- Kill switch: automatic on inventory breach, message-rate breach, feed gap beyond
-  threshold, or markout deterioration beyond a bound. Manual, one keystroke, always.
+- Connect the feed handler to a free live public feed (a crypto venue's public WebSocket
+  is the obvious choice — no account, no entitlement, no credentials).
+- Run book → features → policy end to end in real time. **Emit intended orders to the
+  journal only.** There is deliberately no order gateway and no venue credentials
+  anywhere in the codebase.
+- Shadow fill estimation: when the public tape shows a trade at or through your intended
+  quote, record a *candidate* fill and mark it with the uncertainty (see the caveat below).
 - Full journaling; live→replay determinism test.
-- Paper trade, then trade minimum size on the cheapest venue you can get real fills on.
+- The risk logic from the design docs is still worth building — position limits, message
+  budgets, kill switch — because it is part of what a correct system looks like and it
+  constrains the simulator. It simply has nothing live to gate.
 
 **Done when**
-- Replaying a live session reproduces the live decisions bit-for-bit.
-- Live measured tick-to-trade matches the simulated latency model within its CI.
-- Live markouts match backtest markouts within the bootstrap CI. **If they don't, the
-  simulator is wrong and Phase 3 isn't finished** — that comparison is the whole point of
-  building the simulator and the live path against the same code.
+- Replaying a shadow session reproduces the decisions bit-for-bit.
+- Measured end-to-end processing latency under live event rates matches the simulator's
+  latency model within its CI — and the system keeps up during bursts without the ring
+  buffers backing up.
+- Shadow-estimated fill rates match the simulator's predicted fill rates within the
+  bootstrap CI. **If they don't, the simulator is wrong and Phase 3 isn't finished.**
+
+**The honest caveat.** Shadow mode cannot measure queue position, because you never joined
+the queue. You can bound it — assume you are last in the queue for a pessimistic estimate,
+first for an optimistic one — and the gap between those two bounds is itself a useful
+measurement of how much queue position matters for that instrument. What shadow mode
+*cannot* tell you is your true fill rate or your true adverse selection. Treat those as
+modelled, never as measured, and say so in any result you write up.
 
 ---
 
 ## Ordering principles
 
 1. **Measurement before optimisation**, always.
-2. **The same code in backtest and live**, or the comparison in Phase 6 is meaningless.
+2. **The same code in backtest and shadow mode**, or the comparison in Phase 6 is meaningless.
 3. **Beat the dumb baseline before adding a model.** Constant-spread quoting is
    surprisingly hard to beat once fees and adverse selection are honest.
 4. **One instrument, one venue, end to end** before any breadth. Two half-finished venues
@@ -167,8 +184,17 @@ measurement last. Then you can't tell whether a change helped.
 5. **The fill model is where every backtest lies.** Spend the effort there, not on the
    twentieth feature.
 
-## Deliberately out of scope for now
+## Permanently out of scope
 
-Multi-venue routing and cross-impact; options market making (different problem: greeks,
-vol surface, quoting a whole chain); FPGA; colocation; anything requiring exchange
-membership. Revisit once Phase 6 is genuinely working on one venue.
+**Sending real orders, in any form, on any venue.** No order gateway, no API keys, no
+credentials, no paper-trading account that could be switched to live by changing a flag.
+The deliverable is a model and its measurements.
+
+Also out of scope, because each costs money: paid market data subscriptions and exchange
+entitlements; colocation; kernel-bypass NICs and their licences; FPGA hardware; PTP
+grandmaster clocks. These appear in the design docs because the literature and the
+engineering practice assume them, and you should understand what the models describe — but
+nothing in the build plan requires buying any of it.
+
+Out of scope for now on complexity grounds: multi-venue routing and cross-impact; options
+market making (a different problem — greeks, vol surface, quoting a whole chain).

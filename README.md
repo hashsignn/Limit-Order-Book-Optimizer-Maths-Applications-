@@ -4,10 +4,60 @@ An industry-grade market-making limit order book optimizer: quote placement, que
 modelling, and a first-class measurement plane for time delays, distributions and
 latency.
 
-**Status: research and design phase.** This repository currently contains the literature
-survey, data/protocol analysis, measurement specification, and architecture that the
-implementation will be built against. No code yet — by design; see
-[`docs/05-roadmap.md`](docs/05-roadmap.md) for why the measurement plane is Phase 0.
+**Status: Phase 0 complete — the measurement plane.** The design documents are in
+`docs/`; the code so far is the instrumentation everything else will be measured with.
+Nothing about order books yet, deliberately: you cannot claim a latency improvement you
+cannot measure, so the measuring comes first. See [`docs/05-roadmap.md`](docs/05-roadmap.md).
+
+## Build and run
+
+```bash
+cmake --preset release && cmake --build build/release
+ctest --preset release            # 5 suites, ~90 assertions
+
+./build/release/latency_demo      # per-stage attribution + HDR percentile curve
+./build/release/jitter_probe 10   # this machine's jitter floor
+./build/release/bench_measure     # cost of each primitive
+./tools/jitter_baseline.sh 10     # full machine baseline, for docs/BASELINE.md
+```
+
+Presets: `release`, `debug`, `asan` (ASan+UBSan), `tsan`. Tests pass under all four,
+on GCC 13 and Clang 18.
+
+## What Phase 0 built
+
+| Component | Header | What it is for |
+|---|---|---|
+| Fixed-point price/qty types | `lob/core/types.hpp` | Prices are integer ticks. Never floating point — a price that depends on rounding mode makes the backtest irreproducible. |
+| Arena + object pool | `lob/core/arena.hpp` | Allocate once at startup; the hot path bumps a pointer or pops a free list. Exhaustion returns `nullptr` rather than silently falling back to the heap. |
+| TSC clock | `lob/measure/tsc.hpp` | ~17 ns per read versus ~25 ns for `clock_gettime`. Calibrated against `CLOCK_MONOTONIC_RAW` at startup, and refuses to claim trustworthiness without `constant_tsc` + `nonstop_tsc`. |
+| HDR histogram | `lob/measure/histogram.hpp` | Full latency distributions at constant relative precision in fixed memory, ~3.7 ns per record. Includes coordinated-omission correction. No third-party dependency. |
+| Per-stage recorder | `lob/measure/recorder.hpp` | One histogram per pipeline stage, so a tick-to-trade figure can be attributed rather than merely observed. |
+| Append-only journal | `lob/measure/journal.hpp` | Every decision written with its sequence number and timestamps. Replay must reproduce it byte for byte — that property is what makes a backtest measure the system you actually run. |
+
+Measured on this machine (see [`docs/BASELINE.md`](docs/BASELINE.md) for the full record
+and its caveats):
+
+```
+tsc::now (rdtsc)          16.72 ns/op    35.1 cycles
+tsc::now_serialized       28.03 ns/op    58.9 cycles
+Histogram::record          3.65 ns/op     7.7 cycles
+Arena::allocate(64)        1.14 ns/op     2.4 cycles
+Pool acquire+release       0.72 ns/op     1.5 cycles
+```
+
+> ### Scope: this is a model, not a trading operation
+>
+> The goal is a working, measurable simulation of market making — order book, queue
+> dynamics, fill modelling, quote optimisation. **No live trading, no real capital, no
+> paid data, no paid infrastructure.** Every phase below can be completed with free data
+> and a normal machine.
+>
+> Where the literature or the engineering assumes a funded desk — colocation, kernel-bypass
+> NICs, exchange entitlements, real fills — those are recorded as context for what the
+> models are describing, and explicitly marked as out of scope. The final phase is
+> **shadow mode only**: the strategy runs against a live public feed and logs what it
+> *would* have done. Nothing connects to an order entry endpoint.
 
 ---
 
@@ -20,7 +70,8 @@ implementation will be built against. No code yet — by design; see
 | [`docs/02-data-and-protocols.md`](docs/02-data-and-protocols.md) | Why L3/MBO is a hard requirement, ITCH / MDP 3.0 / SBE / OUCH / iLink, where to get data, PCAP and the timestamp hierarchy, storage, reference data |
 | [`docs/03-metrics-and-estimators.md`](docs/03-metrics-and-estimators.md) | **The measurement specification.** Clocks, latency taxonomy, how to measure latency without fooling yourself, the market's delay distributions, queue metrics, markouts, distribution fitting and goodness-of-fit, P&L attribution, statistical validity |
 | [`docs/04-toolchain.md`](docs/04-toolchain.md) | C++ libraries, kernel bypass ladder, OS tuning, timing infrastructure, profiling, Python research stack, open-source prior art worth reading |
-| [`docs/05-roadmap.md`](docs/05-roadmap.md) | Six phases, each with explicit "done when" criteria |
+| [`docs/05-roadmap.md`](docs/05-roadmap.md) | Seven phases, each with explicit "done when" criteria |
+| [`docs/BASELINE.md`](docs/BASELINE.md) | This machine's measured jitter floor and primitive costs — the numbers every later claim is relative to |
 
 ## The short version
 

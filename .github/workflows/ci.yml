@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }} / ${{ matrix.preset }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            preset: release
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            preset: release
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            preset: asan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+      # The measurement layer is the deliverable, so prove it runs — CI machines
+      # are noisy and shared, so this checks that it works, not that it is fast.
+      - name: Smoke-run the demo
+        if: matrix.preset == 'release'
+        run: |
+          ./build/${{ matrix.preset }}/latency_demo 20000
+          ./build/${{ matrix.preset }}/jitter_probe 2
+          ./build/${{ matrix.preset }}/bench_measure

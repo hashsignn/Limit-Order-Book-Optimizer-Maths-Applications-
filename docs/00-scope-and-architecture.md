@@ -88,7 +88,12 @@ the *failed* snipes and cancels that conventional LOB data never shows) and foun
 resolve on a **microsecond timescale**. That is the bar in equities. If you are
 targeting crypto, your competition is at ~1 ms and the software engineering matters far
 less than the colocation and the model — which is a perfectly good place to start, and
-much cheaper to get real fills in.
+and the one you can actually reach on a normal machine with free data.
+
+**For this project the relevant rows are the bottom two.** The microsecond rows require
+colocation and hardware this project is not buying; they are listed so you know what the
+latency literature in `01-literature.md` §G is describing, and so the simulator's latency
+model is parameterised against realistic numbers rather than invented ones.
 
 **Corollary:** build the measurement plane before the optimisation. You cannot claim a
 latency improvement you cannot measure, and most "optimisations" in this space are noise

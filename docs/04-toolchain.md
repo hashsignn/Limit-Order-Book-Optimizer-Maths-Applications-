@@ -60,14 +60,18 @@ to choose from.
 
 Climb only as far as you need. Each rung is a big jump in complexity.
 
-| Rung | Approach | Typical userspace-visible latency |
-|---|---|---|
-| 0 | Standard sockets, `epoll` | 20–100 µs, terrible tail |
-| 1 | `SO_BUSY_POLL` + `SO_REUSEPORT` + tuned kernel | 10–30 µs |
-| 2 | **`AF_XDP` / XDP** | 5–15 µs, stays in-tree |
-| 3 | **[DPDK](https://www.dpdk.org/)** | 2–10 µs, full kernel bypass, you now own the driver |
-| 4 | **Solarflare/AMD OpenOnload** (`LD_PRELOAD`, no code change) or **`ef_vi`** (raw API) | 1–5 µs. Onload is the best effort-to-reward ratio in this whole list. |
-| 5 | FPGA (Exablaze/Cisco Nexus SmartNIC, Xilinx/AMD Alveo) | 20–100 ns wire-to-wire, but now you're writing HDL |
+**Rungs 0–2 are free and are all this project needs.** Rungs 3–5 need specific hardware
+and, in places, licences; they are listed so the latency numbers in the design docs have
+context, not as things to buy.
+
+| Rung | Cost | Approach | Typical userspace-visible latency |
+|---|---|---|---|
+| 0 | free | Standard sockets, `epoll` | 20–100 µs, terrible tail |
+| 1 | free | `SO_BUSY_POLL` + `SO_REUSEPORT` + tuned kernel | 10–30 µs |
+| 2 | free | **`AF_XDP` / XDP** | 5–15 µs, stays in-tree |
+| 3 | needs a supported NIC | [DPDK](https://www.dpdk.org/) | 2–10 µs, full kernel bypass, you now own the driver |
+| 4 | NIC + licence | Solarflare/AMD OpenOnload (`LD_PRELOAD`) or `ef_vi` (raw API) | 1–5 µs |
+| 5 | FPGA hardware | Exablaze/Cisco Nexus SmartNIC, Xilinx/AMD Alveo | 20–100 ns wire-to-wire, but now you're writing HDL |
 
 Also relevant: NVIDIA/Mellanox **VMA** (their Onload equivalent), and hardware
 timestamping via `SO_TIMESTAMPING` on any of the above.
