@@ -61,20 +61,31 @@ much worse it is on a venue where you have both.
 | Most others | **FIX 4.2/4.4/5.0 SP2** — verbose, slower to encode; use a binary alternative where offered |
 | Crypto | REST + WebSocket, increasingly FIX (Binance, OKX, Coinbase, Deribit all offer FIX now) |
 
-## 3. Where to get the data
+## 3. Where to get the data — free sources only
 
-| Source | What | Notes |
-|---|---|---|
-| **[Databento](https://databento.com/)** | Nasdaq TotalView-ITCH (`XNAS.ITCH`), CME Globex MDP 3.0 (`GLBX.MDP3`), ICE, and ~15 US equity exchanges | **Best starting point.** MBO/MBP-10/MBP-1 schemas, usage-based pricing, official C++/Python/Rust clients, and their own binary **DBN** format. Captured at Equinix NY4 with **FPGA hardware timestamping, PTP-synced** — so their timestamps are trustworthy for latency work. Also sells **raw PCAPs** if you want to test your own decoder against the wire format. Free sample files per dataset. |
-| **[LOBSTER](https://lobsterdata.com/)** | Reconstructed Nasdaq LOB from ITCH, 2007→present, all Nasdaq tickers | Two CSVs per ticker-day: a **message file** (event-by-event) and an **orderbook file** (level snapshots), nanosecond timestamps. Academic pricing. The standard dataset in the literature — use it so your results are comparable. ([LOBSTER paper, SSRN](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1977207)) |
-| **Exchange direct** | Nasdaq, CME, Cboe historical data products | Cheapest per byte at volume, most work. You need colocation or a vendor to get the real-time version anyway. |
-| **Crypto exchanges (free)** | Binance/OKX/Bybit/Deribit WebSocket L2 + trades; Binance publishes historical dumps | **Start here if you want to iterate this week.** No entitlement cost, no colocation, real fills achievable with small capital. Crypto perps are large-tick and deep — a good fit for the queue-position problem. Caveat: most crypto venues publish **L2 diffs, not MBO**, so true queue position must be inferred. Deribit and a few others do better. |
-| **[Tardis.dev](https://tardis.dev/)** | Historical crypto L2/L3 + tick data, normalised across venues | Commercial, saves a lot of scraping. |
-| **FI-2010** | Benchmark LOB dataset (Nasdaq Nordic, 10 days, 5 stocks) | Only useful for comparing ML models to the literature. Too small and too old for anything else — and see [arXiv:2308.01915](https://arxiv.org/abs/2308.01915) on how badly models trained on it generalise. |
+**This project uses free data only.** The paid rows are listed for completeness and
+because the literature uses them, but nothing in the roadmap requires buying data.
 
-**Recommended path:** develop against **free crypto L2 + a Databento MBO sample** in
-parallel. The crypto feed gives you a live loop and real fills; the Databento MBO sample
-gives you a correct L3 book to build the queue logic against.
+| Source | Cost | What | Notes |
+|---|---|---|---|
+| **Crypto exchange public feeds** | **Free** | Binance/OKX/Bybit/Deribit public WebSocket L2 + trades, live; Binance publishes free historical dumps | **Start here.** No account, no entitlement, no credentials — public market data endpoints are open. Crypto perps are large-tick and deep, a good fit for the queue-position problem. Caveat: most publish **L2 diffs, not MBO**, so queue position must be inferred. Deribit and a few others do better. |
+| **[Databento](https://databento.com/) free samples** | **Free** | Sample files for each dataset, including **MBO** for Nasdaq TotalView-ITCH and CME MDP 3.0 | **The L3 data this project needs.** Enough real market-by-order data to build and validate the book, the queue tracking and the fill model. Captured at Equinix NY4 with FPGA hardware timestamping, PTP-synced, so the timestamps are trustworthy. Download without a subscription. |
+| **[LOBSTER](https://lobsterdata.com/) sample data** | **Free** | Sample message + orderbook CSVs for a few Nasdaq tickers and days | Nanosecond timestamps, and the format the literature reports against — useful for checking your reconstruction against published results. ([LOBSTER paper, SSRN](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1977207)) |
+| **FI-2010** | **Free** | Benchmark ML dataset, 10 days, 5 Nasdaq Nordic stocks | Only for comparing against published ML numbers. |
+| ~~Databento full history~~ | Paid | Usage-based | Out of scope. Noted so you know where the samples come from. |
+| ~~LOBSTER full history~~ | Paid | Academic pricing | Out of scope. |
+| ~~Exchange direct / real-time~~ | Paid + colocation | Nasdaq, CME, Cboe | Out of scope. Real-time direct feeds require entitlements and infrastructure this project is not buying. |
+| ~~[Tardis.dev](https://tardis.dev/)~~ | Paid | Normalised historical crypto L2/L3 | Out of scope. Saves scraping effort if that ever becomes the bottleneck. |
+
+On FI-2010 specifically: it is free, but too small and too old for anything except
+reproducing published ML numbers — and see [arXiv:2308.01915](https://arxiv.org/abs/2308.01915)
+on how badly models trained on it generalise. Do not use it to validate the book or the
+fill model; it has no order-level data.
+
+**Recommended path:** develop against **free crypto L2 + a free Databento MBO sample** in
+parallel. The crypto feed gives you a live event loop for shadow mode; the MBO sample gives
+you correct L3 data to build and verify the queue logic against. Between them, every phase
+of the roadmap is reachable at zero cost.
 
 ## 4. PCAP and the timestamp hierarchy
 
@@ -97,9 +108,19 @@ The **differences between adjacent rows are the diagnosis**:
 - `ts_kernel − ts_wire` = network stack queueing. Large ⇒ you need kernel bypass.
 - `ts_app − ts_kernel` = your scheduling latency. Large ⇒ core isolation / busy-poll problem.
 
-**Clock discipline is a prerequisite, not a detail.** Run PTP (`linuxptp`: `ptp4l` +
-`phc2sys`) with a grandmaster, or a GPS/PPS-disciplined card. Cross-machine latency
-measurements without PTP are measuring clock drift, not latency.
+**Clock discipline, scaled to what you're doing.** The rule is: *any latency measured
+across two machines needs PTP, or it is measuring clock drift rather than latency.*
+
+For this project that mostly doesn't arise. Everything runs on one machine, so
+`CLOCK_MONOTONIC_RAW` and the TSC are internally consistent and cost nothing — no PTP
+daemon, no grandmaster, no GPS card. The one case where it does arise is comparing
+*your* receive timestamp against the *exchange's* timestamp inside the message: those
+clocks are unrelated, so that difference is not a latency measurement and should not be
+reported as one. Measure it if you like, label it as an offset of unknown sign.
+
+If this ever became a colocated system, PTP (`linuxptp`: `ptp4l` + `phc2sys`) against a
+grandmaster or a GPS/PPS-disciplined card is the correct answer. Recorded here so the
+gap is a known one, not an oversight.
 
 ## 5. Storage
 

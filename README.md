@@ -9,6 +9,19 @@ survey, data/protocol analysis, measurement specification, and architecture that
 implementation will be built against. No code yet — by design; see
 [`docs/05-roadmap.md`](docs/05-roadmap.md) for why the measurement plane is Phase 0.
 
+> ### Scope: this is a model, not a trading operation
+>
+> The goal is a working, measurable simulation of market making — order book, queue
+> dynamics, fill modelling, quote optimisation. **No live trading, no real capital, no
+> paid data, no paid infrastructure.** Every phase below can be completed with free data
+> and a normal machine.
+>
+> Where the literature or the engineering assumes a funded desk — colocation, kernel-bypass
+> NICs, exchange entitlements, real fills — those are recorded as context for what the
+> models are describing, and explicitly marked as out of scope. The final phase is
+> **shadow mode only**: the strategy runs against a live public feed and logs what it
+> *would* have done. Nothing connects to an order entry endpoint.
+
 ---
 
 ## The documents
