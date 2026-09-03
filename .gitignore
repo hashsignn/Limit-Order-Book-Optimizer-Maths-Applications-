@@ -1,0 +1,6 @@
+build/
+compile_commands.json
+data/
+*.hgrm
+*.journal
+.cache/
