@@ -4,10 +4,11 @@ An industry-grade market-making limit order book optimizer: quote placement, que
 modelling, and a first-class measurement plane for time delays, distributions and
 latency.
 
-**Status: Phase 3 in progress — the simulator.** The design documents are in
+**Status: Phase 4 — baseline strategies and P&L attribution.** The design documents are in
 `docs/`; the code is the measurement plane (Phase 0), the market-by-order book it
 measures (Phase 1), the feature engine that reads the book (Phase 2a), and the matching engine,
-latency model and simulator loop (Phase 3). See [`docs/05-roadmap.md`](docs/05-roadmap.md).
+latency model and simulator loop (Phase 3), and the baseline strategies with their
+P&L attribution (Phase 4). See [`docs/05-roadmap.md`](docs/05-roadmap.md).
 
 ## Build and run
 
@@ -21,6 +22,7 @@ ctest --preset release            # 5 suites, ~90 assertions
 ./build/release/replay 1000000 --verify   # stream events through the book, check invariants
 ./build/release/bench_book           # cost of each book operation
 ./build/release/sim_demo            # what latency costs a market maker
+./build/release/backtest            # compare the five baseline strategies
 ./tools/jitter_baseline.sh 10        # full machine baseline, for docs/BASELINE.md
 ```
 
@@ -91,6 +93,60 @@ has already moved, so some land crossing and **take** liquidity instead of provi
 Being slow silently converts a market maker into a liquidity taker, and it pays the spread
 every time. The strategy never asked for that, and a zero-latency backtest would never
 show it.
+
+## What Phase 4 built
+
+| Component | Header | What it is for |
+|---|---|---|
+| Quoting strategies | `lob/strat/quoting.hpp` | Constant spread → Ho–Stoll inventory skew → Avellaneda–Stoikov → GLFT → GLFT + imbalance tilt. Each adds one idea to the last, so the comparison answers *does this component pay for itself?* |
+| P&L attribution | `lob/strat/pnl.hpp` | Markouts at five horizons, the spread-capture / adverse-selection decomposition, and a block bootstrap over fills. |
+
+The identity that makes the decomposition exact, for a fill of `qty` at price `P` with
+mid `M0` at the fill and `M1` at horizon τ, `s = +1` for a buy:
+
+```
+spread_capture    = s · (M0 − P) · qty
+adverse_selection = s · (M0 − M1) · qty
+markout           = s · (M1 − P) · qty  =  spread_capture − adverse_selection
+```
+
+Those are not two estimates of one quantity — they are the two halves a fill decomposes
+into, and the tests assert they sum exactly.
+
+### The most interesting thing the run found
+
+```
+avellaneda-stoikov  0.662 ticks  (optimal total spread 1.324)
+glft (flat inv)     0.076 ticks
+tick floor          1 tick
+```
+
+**The A–S optimum is below one tick.** The grid clamps it to exactly the quote the naive
+rule produces, so those two rows of the results table are identical by construction. That
+is not a parameter accident: on a large-tick instrument the optimal spread is routinely
+sub-tick, the price optimiser has nothing left to say, and **queue position becomes the
+entire game** — which is [Dayri & Rosenbaum's](https://arxiv.org/abs/1207.6325) point,
+arrived at from the other direction.
+
+### And what it cannot show
+
+Every bootstrap in the current run reports **UNUSABLE** — 2–3 blocks, from 70–110 fills
+across 400k events. That is the harness working correctly: a bootstrap over three blocks
+resamples nearly the same data every draw, and the interval it produces is not a
+confidence interval. The tool says so rather than printing a number that would be read as
+one.
+
+Beyond sample size, three things make any profitability reading meaningless today, each
+sufficient on its own:
+
+1. **`A` and `k` are uncalibrated.** A–S and GLFT are the optimal response to a fill
+   intensity `λ(δ) = A·e^{−kδ}`. Both parameters are hand-set. Optimal quotes against the
+   wrong intensity are not optimal quotes.
+2. **The flow is zero-intelligence** and does not produce an exponential fill curve, so
+   part of what a comparison measures is whether the generator happens to match the
+   models' assumptions. It does not.
+3. **No adverse selection in the flow.** The synthetic aggressors are uninformed, so the
+   single largest cost a real market maker faces is absent by construction.
 
 **Own orders live in the same FIFO as everyone else's.** That is the decision the project
 turns on: queue position falls out of the structure rather than needing a parallel

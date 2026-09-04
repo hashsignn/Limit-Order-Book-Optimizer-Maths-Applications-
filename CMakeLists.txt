@@ -63,10 +63,13 @@ target_link_libraries(replay PRIVATE lob)
 add_executable(sim_demo apps/sim_demo/main.cpp)
 target_link_libraries(sim_demo PRIVATE lob)
 
+add_executable(backtest apps/backtest/main.cpp)
+target_link_libraries(backtest PRIVATE lob)
+
 # ---- tests ----------------------------------------------------------------
 if(LOB_BUILD_TESTS)
   enable_testing()
-  foreach(t types arena histogram tsc journal book book_differential features matching simulator)
+  foreach(t types arena histogram tsc journal book book_differential features matching simulator strategies pnl)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE lob)
     add_test(NAME ${t} COMMAND test_${t})
