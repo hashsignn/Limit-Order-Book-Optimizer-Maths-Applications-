@@ -256,6 +256,8 @@ BookError OrderBook::apply(const BookEvent& e) noexcept {
     case EventType::Execute: return execute(e.order_id, e.qty);
     case EventType::Replace: return replace(e.order_id, e.new_id, e.price, e.qty);
     case EventType::Clear:   clear(); return BookError::Ok;
+    // Routed through the matching engine by the simulator, not applied here.
+    case EventType::Aggress: return BookError::Ok;
     case EventType::Count:   break;
   }
   return BookError::Ok;
@@ -271,6 +273,12 @@ Qty OrderBook::qty_at(Side s, Ticks price) const noexcept {
 Qty OrderBook::qty_of(OrderId id) const noexcept {
   const std::uint32_t slot = map_.find(id);
   return slot == OrderMap::kEmpty ? 0 : pool_[slot].qty;
+}
+
+OrderId OrderBook::front_order_at(Side s, Ticks price) const noexcept {
+  if (!in_window(price)) return 0;
+  const Level& lv = side_levels(s)[to_index(price)];
+  return lv.head == kNullOrder ? 0 : pool_[lv.head].id;
 }
 
 std::uint32_t OrderBook::orders_at(Side s, Ticks price) const noexcept {

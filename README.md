@@ -4,9 +4,10 @@ An industry-grade market-making limit order book optimizer: quote placement, que
 modelling, and a first-class measurement plane for time delays, distributions and
 latency.
 
-**Status: Phase 2a complete — the incremental feature engine.** The design documents are in
+**Status: Phase 3 in progress — the simulator.** The design documents are in
 `docs/`; the code is the measurement plane (Phase 0), the market-by-order book it
-measures (Phase 1), and the feature engine that reads the book (Phase 2a). See [`docs/05-roadmap.md`](docs/05-roadmap.md).
+measures (Phase 1), the feature engine that reads the book (Phase 2a), and the matching engine,
+latency model and simulator loop (Phase 3). See [`docs/05-roadmap.md`](docs/05-roadmap.md).
 
 ## Build and run
 
@@ -19,6 +20,7 @@ ctest --preset release            # 5 suites, ~90 assertions
 ./build/release/bench_measure        # cost of each measurement primitive
 ./build/release/replay 1000000 --verify   # stream events through the book, check invariants
 ./build/release/bench_book           # cost of each book operation
+./build/release/sim_demo            # what latency costs a market maker
 ./tools/jitter_baseline.sh 10        # full machine baseline, for docs/BASELINE.md
 ```
 
@@ -59,6 +61,36 @@ which is the first-order approximation to Stoikov's micro-price. The real estima
 fitted object — the fixed point of a transition matrix estimated from data — and it lands
 in Phase 2b with the rest of the calibration. The two differ most in exactly the states a
 market maker cares about, so the code names it for what it is.
+
+## What Phase 3 built
+
+| Component | Header | What it is for |
+|---|---|---|
+| Matching engine | `lob/sim/matching.hpp` | Price-time priority, front of queue first, with self-match prevention. The book *consumes* an already-matched feed; a simulator has to do the matching, and this is where the honesty of a backtest is decided. |
+| Latency model | `lob/sim/latency.hpp` | Lognormal by default, empirical when given samples. Separate inbound and outbound legs — a feed hop and a gateway hop are not the same. |
+| Simulator | `lob/sim/simulator.hpp` | Discrete-event loop over two books: what the exchange holds, and what the agent knows. The gap between them is the cost of being slow. |
+
+**The agent sees a stale book.** That is the entire point of the file. Two books are kept
+deliberately — `true_book` where matching happens, `view_book` lagging by the inbound
+latency — because a simulator that hands the agent the real state optimises a strategy
+that cannot exist.
+
+### What latency costs, measured
+
+Same naive agent, same flow, same seed. It quotes passively at the touch and *never asks
+to cross*:
+
+```
+                passive fills   aggressive fills   late cancels
+zero latency         61                 0                48
+1 ms latency        559                56               928
+```
+
+Read the aggressive column. Under latency the agent's quotes are decided on a book that
+has already moved, so some land crossing and **take** liquidity instead of providing it.
+Being slow silently converts a market maker into a liquidity taker, and it pays the spread
+every time. The strategy never asked for that, and a zero-latency backtest would never
+show it.
 
 **Own orders live in the same FIFO as everyone else's.** That is the decision the project
 turns on: queue position falls out of the structure rather than needing a parallel

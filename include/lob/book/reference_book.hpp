@@ -87,6 +87,7 @@ class ReferenceBook {
       case EventType::Execute: return execute(e.order_id, e.qty);
       case EventType::Replace: return replace(e.order_id, e.new_id, e.price, e.qty);
       case EventType::Clear:   clear(); return BookError::Ok;
+      case EventType::Aggress: return BookError::Ok;
       case EventType::Count:   break;
     }
     return BookError::Ok;

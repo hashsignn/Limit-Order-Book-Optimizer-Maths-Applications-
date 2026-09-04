@@ -107,6 +107,11 @@ class OrderBook {
   [[nodiscard]] Qty qty_at(Side s, Ticks price) const noexcept;
   // Remaining size of one resting order, or 0 if it is no longer in the book.
   [[nodiscard]] Qty qty_of(OrderId id) const noexcept;
+  // Id of the order at the FRONT of a level's queue — the one that fills next.
+  // Returns 0 if the level is empty. This is the matcher's only window into the
+  // FIFO, so price-time priority stays the book's business rather than the
+  // matching engine's.
+  [[nodiscard]] OrderId front_order_at(Side s, Ticks price) const noexcept;
   [[nodiscard]] std::uint32_t orders_at(Side s, Ticks price) const noexcept;
   // Walks up to `n` live levels outward from the touch. Returns how many filled.
   std::uint32_t depth(Side s, std::uint32_t n, Ticks* prices, Qty* qtys) const noexcept;
