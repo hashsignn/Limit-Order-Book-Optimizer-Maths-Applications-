@@ -6,7 +6,8 @@ latency.
 
 **Status: hardening — fuzzing and property tests.** The design documents are in
 `docs/`; the code is the measurement plane (Phase 0), the market-by-order book it
-measures (Phase 1), the feature engine that reads the book (Phase 2a), and the matching engine,
+measures (Phase 1) together with the Bitstamp L3 decoder that feeds it real data, the
+feature engine that reads the book (Phase 2a), and the matching engine,
 latency model and simulator loop (Phase 3), and the baseline strategies with their
 P&L attribution (Phase 4). See [`docs/05-roadmap.md`](docs/05-roadmap.md).
 
@@ -50,6 +51,28 @@ on GCC 13 and Clang 18.
 | Reference book | `lob/book/reference_book.hpp` | Deliberately naive `std::map` + `std::list`. Its only job is to be a second opinion in the differential test. |
 | Order map | `lob/book/order_map.hpp` | Open addressing with backward-shift deletion, so a day of balanced adds and cancels does not accumulate tombstones. |
 | Synthetic flow | `lob/sim/flow.hpp` | Zero-intelligence generator. Drives the book hard enough to prove it correct; becomes the Phase 3 simulator's interface once a calibrated model sits behind it. |
+
+## Real data
+
+Free, genuine L3 — order-by-order over the whole book, no account and no API key.
+Bitstamp is the source; see [`docs/02`](docs/02-data-and-protocols.md) §3 for why the
+obvious alternatives were ruled out and §3.1 for what the feed carries.
+
+```bash
+py tools/record_bitstamp.py --pair btcusd --minutes 10     # writes to data/ (gitignored)
+./build/replay --bitstamp data/btcusd_*_bitstamp.jsonl.gz --verify
+```
+
+| Component | Header | What it is for |
+|---|---|---|
+| JSON scanner | `lob/feed/json.hpp` | Non-allocating, total on untrusted input, exact decimal parsing. Prices never pass through `double`; a value with more precision than the tick size can hold is rejected rather than rounded. |
+| Bitstamp decoder | `lob/feed/bitstamp.hpp` | The only file that knows Bitstamp exists. Recovers the cancel-vs-fill split exactly from `amount_traded`, detects capture gaps from the `event_id` chain, and checks the feed's own consistency identity on every message. |
+| Line reader | `lob/feed/line_reader.hpp` | Plain, gzipped or stdin. A truncated final line — what an interrupted recording leaves — is a counted decode failure, not a read error. |
+
+`replay --bitstamp` reports capture quality *before* anything derived from the data:
+whether the sequence chain is unbroken, whether the feed's `amount + amount_traded ==
+amount_at_create` identity holds, and what fraction of orders fell outside the book's
+price band. A number computed over a capture with holes in it is not a measurement.
 
 ## What Phase 2a built
 

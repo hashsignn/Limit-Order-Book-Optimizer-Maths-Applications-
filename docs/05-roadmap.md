@@ -35,13 +35,15 @@ measurement last. Then you can't tell whether a change helped.
 - L3 order book: flat price-level array indexed by tick offset + occupancy bitset,
   intrusive FIFO per level, open-addressed `order_id → order*` map, own-order tracking
   in the same FIFO.
-- One feed decoder. Start with the simplest real data you have (crypto L2 diffs or a
-  Databento MBO sample); add ITCH/SBE later behind the same event interface.
+- One feed decoder. Bitstamp `live_orders` + `live_trades` — free, no account, genuine
+  L3 over the whole book. Add ITCH/SBE later behind the same `BookEvent` interface.
 - `apps/replay`: stream a capture through the book, emit statistics.
 - Property tests vs a naive reference book; decoder fuzzing; golden-replay hash.
 
 **Done when**
-- Replay of a full trading day of a liquid instrument with zero invariant violations.
+- Replay of a full session of a liquid instrument with zero invariant violations, over a
+  capture whose `event_id` chain is unbroken — so "no violations" means the book handled
+  every message, not that messages went missing.
 - Published percentile curve for per-event book update latency, on real data, warm and cold.
 - Throughput number with the caveats stated (which instrument, which day, which mix of
   add/cancel/execute).

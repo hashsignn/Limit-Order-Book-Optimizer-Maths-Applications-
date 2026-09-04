@@ -44,12 +44,24 @@ endif()
 # ---- the library ----------------------------------------------------------
 add_library(lob STATIC
   src/tsc.cpp src/histogram.cpp src/journal.cpp src/recorder.cpp
-  src/order_book.cpp)
+  src/order_book.cpp src/bitstamp.cpp src/line_reader.cpp)
 target_include_directories(lob PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(lob PUBLIC lob_flags)
 
 find_package(Threads REQUIRED)
 target_link_libraries(lob PUBLIC Threads::Threads)
+
+# Optional: read gzipped captures directly. Without it the replay tool asks the
+# user to pipe gunzip, which works everywhere, so this is convenience and never
+# a requirement.
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND)
+  target_link_libraries(lob PUBLIC ZLIB::ZLIB)
+  target_compile_definitions(lob PUBLIC LOB_HAVE_ZLIB=1)
+  message(STATUS "zlib found: gzipped captures readable directly")
+else()
+  message(STATUS "zlib not found: gzipped captures need 'gunzip -c file.gz | replay --bitstamp -'")
+endif()
 
 # ---- apps -----------------------------------------------------------------
 add_executable(latency_demo apps/latency_demo/main.cpp)
@@ -70,11 +82,33 @@ target_link_libraries(backtest PRIVATE lob)
 # ---- tests ----------------------------------------------------------------
 if(LOB_BUILD_TESTS)
   enable_testing()
-  foreach(t types arena histogram tsc journal book book_differential features matching simulator strategies pnl order_map properties)
+
+  # A committed slice of a real venue capture, if one is present. Synthetic data
+  # can only ever prove the decoder agrees with the generator that produced it;
+  # this is the test that the decoder agrees with an exchange.
+  file(GLOB LOB_SAMPLE_CAPTURES "${CMAKE_CURRENT_SOURCE_DIR}/data/samples/*_bitstamp.jsonl*")
+  list(SORT LOB_SAMPLE_CAPTURES)
+  foreach(t types arena histogram tsc journal book book_differential features matching simulator strategies pnl order_map properties bitstamp)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE lob)
     add_test(NAME ${t} COMMAND test_${t})
   endforeach()
+
+  if(LOB_SAMPLE_CAPTURES)
+    list(GET LOB_SAMPLE_CAPTURES 0 LOB_SAMPLE_CAPTURE)
+    string(REGEX REPLACE "_bitstamp\\.jsonl(\\.gz)?$" "_snapshot.json"
+           LOB_SAMPLE_SNAPSHOT "${LOB_SAMPLE_CAPTURE}")
+    if(EXISTS "${LOB_SAMPLE_SNAPSHOT}")
+      target_compile_definitions(test_bitstamp PRIVATE
+        LOB_SAMPLE_CAPTURE="${LOB_SAMPLE_CAPTURE}"
+        LOB_SAMPLE_SNAPSHOT="${LOB_SAMPLE_SNAPSHOT}")
+      message(STATUS "real-capture regression test: ${LOB_SAMPLE_CAPTURE}")
+    else()
+      message(WARNING "sample capture has no matching _snapshot.json; skipping real-data test")
+    endif()
+  else()
+    message(STATUS "no data/samples capture: real-data regression test skipped")
+  endif()
 
   # The thorough differential pass. Same code, more events — too slow to be the
   # default under a sanitizer, so it is a separate test the release CI runs.
@@ -100,7 +134,7 @@ if(LOB_BUILD_FUZZ)
   unset(CMAKE_REQUIRED_FLAGS)
   unset(CMAKE_REQUIRED_LINK_OPTIONS)
 
-  foreach(f book matching)
+  foreach(f book matching bitstamp)
     if(LOB_HAS_LIBFUZZER)
       add_executable(fuzz_${f} fuzz/fuzz_${f}.cpp)
       target_compile_options(fuzz_${f} PRIVATE -fsanitize=fuzzer,address,undefined)
@@ -117,7 +151,9 @@ if(LOB_BUILD_FUZZ)
     # than being something someone remembers to do occasionally.
     add_test(NAME fuzz_book_short     COMMAND fuzz_book     -runs=20000)
     add_test(NAME fuzz_matching_short COMMAND fuzz_matching -runs=20000)
-    set_tests_properties(fuzz_book_short fuzz_matching_short PROPERTIES TIMEOUT 300)
+    add_test(NAME fuzz_bitstamp_short COMMAND fuzz_bitstamp -runs=20000)
+    set_tests_properties(fuzz_book_short fuzz_matching_short fuzz_bitstamp_short
+                         PROPERTIES TIMEOUT 300)
   endif()
 endif()
 
