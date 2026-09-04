@@ -4,9 +4,9 @@ An industry-grade market-making limit order book optimizer: quote placement, que
 modelling, and a first-class measurement plane for time delays, distributions and
 latency.
 
-**Status: Phase 1 complete — the L3 order book.** The design documents are in
-`docs/`; the code is the measurement plane (Phase 0) and the market-by-order book it
-measures (Phase 1). See [`docs/05-roadmap.md`](docs/05-roadmap.md).
+**Status: Phase 2a complete — the incremental feature engine.** The design documents are in
+`docs/`; the code is the measurement plane (Phase 0), the market-by-order book it
+measures (Phase 1), and the feature engine that reads the book (Phase 2a). See [`docs/05-roadmap.md`](docs/05-roadmap.md).
 
 ## Build and run
 
@@ -45,6 +45,21 @@ on GCC 13 and Clang 18.
 | Order map | `lob/book/order_map.hpp` | Open addressing with backward-shift deletion, so a day of balanced adds and cancels does not accumulate tombstones. |
 | Synthetic flow | `lob/sim/flow.hpp` | Zero-intelligence generator. Drives the book hard enough to prove it correct; becomes the Phase 3 simulator's interface once a calibrated model sits behind it. |
 
+## What Phase 2a built
+
+| Component | Header | What it is for |
+|---|---|---|
+| Feature engine | `lob/feat/features.hpp` | Imbalance, deep imbalance, imbalance-weighted mid, multi-level OFI, realised vol, event rate. Every one an O(1) update rule — measured flat from 5k to 500k resting orders. |
+
+Order flow imbalance follows Cont, Kukanov & Stoikov ([arXiv:1011.6402](https://arxiv.org/abs/1011.6402));
+the multi-level extension follows [arXiv:1907.06230](https://arxiv.org/abs/1907.06230).
+
+**On the micro-price, precisely.** The engine computes the *imbalance-weighted mid*,
+which is the first-order approximation to Stoikov's micro-price. The real estimator is a
+fitted object — the fixed point of a transition matrix estimated from data — and it lands
+in Phase 2b with the rest of the calibration. The two differ most in exactly the states a
+market maker cares about, so the code names it for what it is.
+
 **Own orders live in the same FIFO as everyone else's.** That is the decision the project
 turns on: queue position falls out of the structure rather than needing a parallel
 bookkeeping system to be kept in sync. `queue_ahead()` is O(1) — maintained as the queue
@@ -62,8 +77,16 @@ Arena::allocate(64)   1.14 ns    2.4 cy   best_bid + best_ask     0.65 ns    1.4
 Pool acquire+release  0.72 ns    1.5 cy   depth(10) both sides   47.04 ns   98.8 cy
 ```
 
-Mixed synthetic stream: **6.1 M events/s**, p50 36 ns per event. Top-of-book at 1.4 cycles
-is the cached-touch design paying off — the feature engine reads it on every event.
+```
+feature update @5k orders     52.75 ns    110.8 cy
+feature update @50k orders    52.26 ns    109.8 cy
+feature update @500k orders   53.16 ns    111.6 cy
+```
+
+Mixed synthetic stream: **5.9 M events/s**, p50 36 ns per event. Top-of-book at 1.4 cycles
+is the cached-touch design paying off — the feature engine reads it on every event. And a
+feature update that stays flat across a 100× change in book size is the O(1) claim
+holding: if any update rule were walking the book, that row would climb.
 
 > ### Scope: this is a model, not a trading operation
 >

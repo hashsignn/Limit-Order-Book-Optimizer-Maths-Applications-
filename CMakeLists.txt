@@ -63,7 +63,7 @@ target_link_libraries(replay PRIVATE lob)
 # ---- tests ----------------------------------------------------------------
 if(LOB_BUILD_TESTS)
   enable_testing()
-  foreach(t types arena histogram tsc journal book book_differential)
+  foreach(t types arena histogram tsc journal book book_differential features)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE lob)
     add_test(NAME ${t} COMMAND test_${t})

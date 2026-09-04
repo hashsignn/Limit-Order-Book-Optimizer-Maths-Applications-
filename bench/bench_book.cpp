@@ -7,10 +7,12 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "lob/book/order_book.hpp"
 #include "lob/core/compiler.hpp"
+#include "lob/feat/features.hpp"
 #include "lob/measure/histogram.hpp"
 #include "lob/measure/tsc.hpp"
 #include "lob/sim/flow.hpp"
@@ -128,6 +130,27 @@ int main() {
         do_not_optimize(b->depth(Side::Ask, 10, p, q));
       }
     }));
+
+  // The feature engine must be O(1) in book size. Run it against books an order
+  // of magnitude apart: if the cost tracks depth, an update rule is walking the
+  // book and the whole design premise is broken.
+  for (const std::size_t depth_orders : {std::size_t{5'000}, std::size_t{50'000}, std::size_t{500'000}}) {
+    r.push_back(bench("feature update @" + std::to_string(depth_orders / 1000) + "k orders", kN, 5,
+      [depth_orders] {
+        auto st = std::make_unique<std::pair<OrderBook, FeatureEngine>>(
+            OrderBook{kBase, kWindow, std::size_t{1} << 20}, FeatureEngine{});
+        for (std::size_t i = 0; i < depth_orders; ++i)
+          (void)st->first.add(static_cast<OrderId>(i + 1), (i & 1) ? Side::Bid : Side::Ask,
+                              10'000 + ((i & 1) ? -1 : 1) * static_cast<Ticks>(1 + (i % 30)), 100);
+        return st;
+      },
+      [](auto& st, std::size_t n) {
+        for (std::size_t i = 0; i < n; ++i) {
+          st->second.update(st->first, static_cast<Nanos>(i) * 1000);
+          do_not_optimize(st->second.get().imbalance);
+        }
+      }));
+  }
 
   std::printf("%-26s %12s %14s\n", "operation", "ns/op", "cycles/op");
   std::printf("--------------------------------------------------------\n");
