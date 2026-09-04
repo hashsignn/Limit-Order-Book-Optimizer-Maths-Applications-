@@ -19,6 +19,11 @@ enum class EventType : std::uint8_t {
   Execute,   // a resting order is filled, wholly or partly, from the front
   Replace,   // cancel + add under a new id. Priority is LOST — that is the point
   Clear,     // wipe the book (session boundary, halt resume)
+  // An aggressive order arriving. NOT a book mutation: it must go through the
+  // matching engine, which decides who it trades with. OrderBook::apply ignores
+  // it deliberately — a book that consumes a real exchange feed never sees one,
+  // because the exchange already matched it before publishing.
+  Aggress,
   Count
 };
 
@@ -30,6 +35,7 @@ enum class EventType : std::uint8_t {
     case EventType::Execute: return "execute";
     case EventType::Replace: return "replace";
     case EventType::Clear:   return "clear";
+    case EventType::Aggress: return "aggress";
     case EventType::Count:   return "?";
   }
   return "?";

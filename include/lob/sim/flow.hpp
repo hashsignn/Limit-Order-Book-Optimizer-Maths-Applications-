@@ -39,6 +39,11 @@ struct FlowConfig {
   double        w_reduce       = 0.09;
   double        w_execute      = 0.09;
   double        w_replace      = 0.04;
+  // Aggressive orders that cross the spread. Without these nothing ever trades
+  // against a resting quote, so the fill model is never exercised — which is
+  // the one thing a market-making simulator has to get right.
+  double        w_aggress      = 0.06;
+  Qty           aggress_max    = 400;
   double        drift_prob     = 0.02;     // chance the mid steps a tick
   // Adds outnumber removals in these weights, so without a brake the book grows
   // without bound and every benchmark ends up measuring an absurdly deep queue.
@@ -68,7 +73,8 @@ class FlowGenerator {
     const bool can_touch_existing = !live_.empty();
     // Suppress adds once the book is at its target size, so removals catch up.
     const double w_add = live_.size() >= cfg_.target_live ? cfg_.w_add * 0.15 : cfg_.w_add;
-    const double total = w_add + cfg_.w_delete + cfg_.w_reduce + cfg_.w_execute + cfg_.w_replace;
+    const double total = w_add + cfg_.w_delete + cfg_.w_reduce + cfg_.w_execute
+                       + cfg_.w_replace + cfg_.w_aggress;
     const double r = uniform() * total;
 
     double acc = w_add;
@@ -79,7 +85,9 @@ class FlowGenerator {
     if (r < acc) return make_on_existing(e, EventType::Reduce);
     acc += cfg_.w_execute;
     if (r < acc) return make_on_existing(e, EventType::Execute);
-    return make_on_existing(e, EventType::Replace);
+    acc += cfg_.w_replace;
+    if (r < acc) return make_on_existing(e, EventType::Replace);
+    return make_aggress(e);
   }
 
   // The generator tracks what it believes is resting so it can emit valid
@@ -107,6 +115,10 @@ class FlowGenerator {
         live_.clear();
         at_.clear();
         break;
+      case EventType::Aggress:
+        // The matcher decides what this consumed; the caller resyncs via
+        // forget_order() for each order it removed.
+        break;
       case EventType::Count: break;
     }
   }
@@ -119,6 +131,11 @@ class FlowGenerator {
     has_bid_ = has_bid; best_bid_ = bid;
     has_ask_ = has_ask; best_ask_ = ask;
   }
+
+  // Told by the caller when a match removed a resting order the generator still
+  // believed was live. Without this the generator emits references to orders
+  // that an aggressive order already consumed.
+  void forget_order(OrderId id) { forget(id); }
 
   [[nodiscard]] std::size_t believed_live() const noexcept { return live_.size(); }
   [[nodiscard]] Ticks mid() const noexcept { return mid_; }
@@ -155,6 +172,20 @@ class FlowGenerator {
     e.price    = price_for(e.side);
     e.qty      = rand_qty();
     e.order_id = next_id_++;
+    return e;
+  }
+
+  // A market order sweeping the opposite side. Size is drawn small most of the
+  // time and occasionally large, so both "nibbles the front of the queue" and
+  // "clears the level" are exercised.
+  BookEvent make_aggress(BookEvent e) noexcept {
+    e.type     = EventType::Aggress;
+    e.side     = (rng_() & 1) ? Side::Bid : Side::Ask;
+    e.order_id = next_id_++;
+    e.price    = 0;
+    const bool big = (rng_() % 10) == 0;
+    e.qty = big ? 1 + static_cast<Qty>(rng_() % static_cast<std::uint64_t>(cfg_.aggress_max))
+                : 1 + static_cast<Qty>(rng_() % 40);
     return e;
   }
 

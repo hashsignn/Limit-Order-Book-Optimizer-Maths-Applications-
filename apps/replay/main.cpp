@@ -7,11 +7,13 @@
 // file does not change.
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <string>
 
 #include "lob/book/order_book.hpp"
 #include "lob/core/compiler.hpp"
+#include "lob/feat/features.hpp"
 #include "lob/measure/histogram.hpp"
 #include "lob/measure/recorder.hpp"
 #include "lob/measure/tsc.hpp"
@@ -38,7 +40,11 @@ int main(int argc, char** argv) {
   FlowGenerator gen{cfg};
   OrderBook book{5'000, 10'240, 1 << 18};
 
+  FeatureEngine fe;
   Histogram per_event{1'000'000, 3};
+  Histogram feat_cost{1'000'000, 3};
+  Histogram imb_hist{2000, 3};        // imbalance mapped to [0, 2000]
+  Histogram wmid_dev{10'000, 3};      // |weighted_mid - mid| in milli-ticks
   Histogram spread_hist{1'000, 3};
   Histogram depth_hist{1'000'000'000, 3};
   std::uint64_t by_type[static_cast<std::size_t>(EventType::Count)] = {};
@@ -65,9 +71,16 @@ int main(int argc, char** argv) {
     gen.on_applied(e, book.qty_of(e.order_id));
     gen.observe(book.has_bid(), book.best_bid(), book.has_ask(), book.best_ask());
 
+    const std::uint64_t fs = tsc::now();
+    fe.update(book, e.ts);
+    feat_cost.record(static_cast<std::int64_t>(tsc::to_nanos(tsc::now() - fs)));
+
     if (book.has_bid() && book.has_ask()) {
       spread_hist.record(book.spread());
       depth_hist.record(book.best_bid_qty() + book.best_ask_qty());
+      const Features& f = fe.get();
+      imb_hist.record(static_cast<std::int64_t>((f.imbalance + 1.0) * 1000.0));
+      wmid_dev.record(static_cast<std::int64_t>(std::fabs(f.weighted_mid - f.mid) * 1000.0));
     }
 
     if (verify && (i % 10'000 == 0)) {
@@ -85,7 +98,8 @@ int main(int argc, char** argv) {
   banner("throughput");
   std::printf("  %.1f ms wall, %.2f M events/s  (book + generator + measurement)\n",
               total_ns / 1e6, static_cast<double>(n) * 1e3 / total_ns);
-  std::printf("  per-event latency: %s\n", per_event.summary().c_str());
+  std::printf("  book  apply:   %s\n", per_event.summary().c_str());
+  std::printf("  feature update: %s\n", feat_cost.summary().c_str());
   std::printf("  (each event pays ~%.0f ns of rdtsc overhead to be measured at all)\n",
               2.0 * static_cast<double>(tsc::to_nanos(35)));
 
@@ -121,6 +135,16 @@ int main(int argc, char** argv) {
   banner("book state distributions");
   std::printf("  spread (ticks)  %s\n", spread_hist.summary("ticks").c_str());
   std::printf("  touch depth     %s\n", depth_hist.summary("shares").c_str());
+  std::printf("  imbalance*1000+1000 (so 1000 == balanced)\n                  %s\n",
+              imb_hist.summary("").c_str());
+  std::printf("  |wmid - mid|    %s\n", wmid_dev.summary("milli-ticks").c_str());
+  {
+    const Features& f = fe.get();
+    std::printf("\n  final features: imb %+.3f  deep_imb %+.3f  wmid %.2f (mid %.2f)\n",
+                f.imbalance, f.deep_imbalance, f.weighted_mid, f.mid);
+    std::printf("                  ofi_ewma %+.1f  vol_ewma %.4f ticks^2  rate %.0f evt/s\n",
+                f.ofi_ewma, f.vol_ewma, f.event_rate);
+  }
 
   if (verify) {
     std::string why;
