@@ -1,12 +1,18 @@
 build/
 build-*/
 compile_commands.json
-data/
-# ..except a small committed slice of a real capture. Every feed handler
-# needs one: a regression test against synthetic data only ever proves the
-# decoder agrees with the generator.
+# Recorded captures are large and belong to whoever recorded them.
+#
+# Note the trailing /* rather than a bare data/. Git will not descend into an
+# excluded DIRECTORY, so a bare `data/` makes the re-include below unreachable
+# and `git add data/samples` fails with nothing but a hint. Excluding the
+# directory's CONTENTS leaves the directory itself visible, so the exception
+# works. This cost a round trip; it is written down so it does not cost another.
+data/*
+# ..except the committed captures the real-data regression tests replay. A test
+# against synthetic data only ever proves the decoder agrees with the generator
+# that wrote it.
 !data/samples/
-!data/samples/**
 *.hgrm
 *.journal
 .cache/
