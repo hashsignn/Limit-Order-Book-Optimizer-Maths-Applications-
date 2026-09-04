@@ -90,39 +90,81 @@ alone suggested. Every `live_orders` message carries:
 |---|---|
 | `amount_at_create` | size when the order was first booked |
 | `amount` | size **remaining** right now |
-| `amount_traded` | cumulative size **filled** so far |
+| `amount_traded` | size filled **by this event** — not cumulative |
+| `order_type` | 0 = bid, 1 = ask |
 | `event_id` / `pre_event_id` | a chain: each message names its predecessor |
-| `microtimestamp` | exchange time, µs — but see the caveat below |
+| `microtimestamp` | exchange time in µs, but only ever whole milliseconds |
 
-Three consequences, each of which changed the design:
+Four consequences, every one of them found by decoding a real capture and none
+of them visible in synthetic data:
 
-**The cancel/fill split is exact and needs no join.** The original plan was to match
-`order_deleted` against the trade channel on order id — the approach
-[ob-analytics#28](https://github.com/phil8192/ob-analytics/issues/28) warns is unreliable.
-`amount_traded` makes it a subtraction instead. Since §5 of
-[03-metrics-and-estimators.md](03-metrics-and-estimators.md) makes this split
-non-negotiable — volume *cancelled* ahead of you is free progress up the queue, volume
-*traded* ahead of you is progress **plus** the information that someone is buying — this
-is the single most valuable thing the feed provides. In a 10-minute btcusd capture
-roughly **0.5% of removals were fills**; the other 99.5% were cancels. Aggregating them
-would hide almost the entire mechanism.
+**`amount_traded` is per event.** It was read as cumulative until the data said
+otherwise. Order `2046841350975488` took six partial fills of 0.00572747,
+0.00405924, 0.05969432, 0.00784165, 0.02010227 and 0.02334723 — summing exactly
+to the 0.12077218 that left the book — and was then deleted with the remaining
+0.00422782 cancelled and `amount_traded` **0**. Under a cumulative reading that
+order's total filled size is zero. Across a capture, the *sum* of `amount_traded`
+matched the size consumed for 84.8% of completed orders against 50.5% for the
+last value, and the residual is amend-downs, which are cancels rather than fills.
 
-**Gaps are detectable rather than suspected.** `pre_event_id` of each message equals
-`event_id` of the last. A capture that chains end to end is *provably* whole, which is
-what makes "a full session with zero invariant violations" a meaningful claim. The
-decoder counts breaks; `replay` reports them before anything derived from the data.
+A corollary: `amount + amount_traded == amount_at_create` holds only for an order
+with exactly one trading event and no amend. It is **not** an invariant. What is
+invariant is that no more size leaves an order than it had, and that is what the
+decoder checks.
 
-**The clocks do not agree, so never join on time.** In one capture the order channel
-arrived ~570 ms *after* its own exchange timestamp while the trade channel arrived ~88 ms
-*before* its own — the two channels are not on a common clock, and neither is on the
-local one. Worse, order-channel `microtimestamp` values are always whole milliseconds:
-the resolution is 1 ms wearing a microsecond coat, so many events share a timestamp and
-intra-millisecond ordering must come from the chain. Any duration derived from these
-numbers is quantised to 1 ms and must be reported that way. A constant offset does cancel
-out of a *spread*, so per-channel delay **variation** is still a real measurement — that
-is what `replay` reports, per channel, never pooled.
+**The cancel/fill split is still exact, and still the point.** §5 of
+[03-metrics-and-estimators.md](03-metrics-and-estimators.md) makes it
+non-negotiable: volume *cancelled* ahead of you is free progress up the queue,
+volume *traded* ahead of you is progress **plus** the information that someone is
+buying. Measured over 10 minutes per pair, fills are **0.97% of removals on
+btcusd, 0.34% on ethusd, 0.95% on xrpusd** — and by size, under 0.1% everywhere.
+Aggregating the two would hide better than 99% of the mechanism.
 
-**One structural caveat.** Orders rest very far from the touch — a bid at \$71,743 against
+**Marketable orders are published as `order_created` before they are matched.**
+The exchange announces an aggressive order at its limit price, then announces the
+fills it causes. A decoder that rests every create therefore builds a crossed
+book — 10.9% of btcusd creates arrive marketable. Nearly all are gone inside the
+same millisecond having traded nothing, which is what an order the exchange
+refuses to rest looks like; a few trade out, and a very few come back passive
+once the touch moves. None may ever join a queue. Their fills belong to the
+resting side's own events; counting them here as well would double traded volume.
+
+**Gaps are detectable rather than suspected**, via the `pre_event_id` chain. All
+three 10-minute captures chain end to end, which is what makes "zero invariant
+violations over a full session" a claim worth stating.
+
+**The clocks do not agree, so never join on time.** The order channel arrived
+~570 ms *after* its own exchange timestamp while the trade channel arrived ~88 ms
+*before* its own; the two channels are not on a common clock and neither is on
+the local one. Order timestamps are also always whole milliseconds — 1 ms
+resolution wearing a microsecond coat — so many events share a timestamp and
+intra-millisecond ordering must come from the chain. Any duration derived from
+them is quantised to 1 ms and must be reported that way. A constant offset does
+cancel out of a *spread*, so per-channel delay **variation** remains a real
+measurement, and `replay` reports it per channel, never pooled.
+
+### 3.2 The REST snapshot cannot seed the book
+
+`order_book/<pair>?group=2` returns individual orders with ids, and it is the
+only source of absolute depth — but it must not be used to initialise the book.
+
+It contains orders whose deletes happened *before* the capture began, so nothing
+in the stream ever removes them and they rest in the reconstruction for good. The
+test is independent and needs no reconstruction to interpret: **a trade must
+print inside the touch.** Seeding from the snapshot scored **11.1%** on xrpusd;
+building from the stream alone scored **90.2%**. btcusd and ethusd scored the
+same either way (85% and 89%), because their churn buries the stale entries while
+xrpusd's does not.
+
+So the book is built from the stream after a warm-up, and the snapshot is read
+only for quoting precision and to centre the price window. The cost is that
+levels nobody has touched since the capture began are missing, which is why
+`replay` prints the spread distribution with the instruction to read the median
+and distrust the tail. For market making at the touch this loses nothing; for a
+depth study it would, and the number is printed so that judgement is the
+reader's. `replay --seed-snapshot` reproduces the comparison.
+
+**One further caveat.** Orders rest very far from the touch — a bid at \$71,743 against
 a \$79,715 touch is 800,000 ticks away at Bitstamp's \$0.01 tick. The book is a flat array
 over a tick window (see [00-scope-and-architecture.md](00-scope-and-architecture.md)), so
 it is banded around the touch and everything outside is **excluded and counted**, never
@@ -131,9 +173,10 @@ this loses nothing that matters; for a depth study it would, and the number is p
 that judgement is the reader's.
 
 **Recommended path:** record Bitstamp L3 with `tools/record_bitstamp.py`, replay it with
-`replay --bitstamp`, and keep a short slice in `data/samples/` as a committed regression
-fixture. Synthetic flow only ever proves the decoder agrees with the generator that
-produced it.
+`replay --bitstamp --verify`, and commit the capture to `data/samples/` so it becomes a
+permanent regression test. Synthetic flow only ever proves the decoder agrees with the
+generator that produced it; every one of the four defects above was found the day real
+data first ran through the pipeline, and none of them was reachable any other way.
 
 ## 4. PCAP and the timestamp hierarchy
 

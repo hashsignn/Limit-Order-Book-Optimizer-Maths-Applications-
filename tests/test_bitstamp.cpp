@@ -37,6 +37,10 @@ constexpr const char* kSnapshot = R"J({"timestamp": "1788551766", "microtimestam
 // market maker quotes into, and far short of the $8,000-away resting orders the
 // capture actually contains. Excluding those is the point; counting them is
 // what keeps the exclusion honest.
+// An empty book: nothing can be marketable against it, so the tests that are
+// not about marketable orders are unaffected by the touch.
+constexpr BookTouch kNoTouch{};
+
 BitstampConfig make_cfg() {
   BitstampConfig c;
   c.price_decimals = 2;
@@ -62,9 +66,112 @@ std::string order_msg(const char* event, OrderId id, int order_type, const char*
   return std::string(buf);
 }
 
+// Replays a real venue capture and asserts the book survived it.
+//
+// This is Phase 1's actual acceptance criterion: a full session of real market
+// data with zero invariant violations. Everything else in this file proves the
+// decoder agrees with fixtures I wrote; only this proves it agrees with an
+// exchange. data/samples holds the captures — see .gitignore, which excludes
+// bulk recordings and admits these.
+void replay_real_capture(const char* capture_path, const char* snapshot_path) {
+  std::string snap;
+  {
+    LineReader r;
+    if (!r.open(snapshot_path)) {
+      ::lobtest::report(false, "open snapshot", __FILE__, __LINE__, r.error());
+      return;
+    }
+    std::string_view l;
+    while (r.next(&l)) snap.append(l.data(), l.size());
+  }
+  CHECK(!snap.empty());
+
+  BitstampConfig c = make_cfg();
+  // Measured, not assumed: these three captures are btcusd (cents), ethusd
+  // (cents) and xrpusd (five decimals), and one hardcoded precision cannot be
+  // right for all of them.
+  unsigned px_dp = 0, qt_dp = 0;
+  CHECK(BitstampDecoder::detect_decimals(snap, &px_dp, &qt_dp));
+  c.price_decimals = px_dp;
+  c.qty_decimals   = qt_dp;
+
+  Ticks bb = 0, ba = 0;
+  CHECK(BitstampDecoder::snapshot_touch(snap, c, &bb, &ba));
+  CHECK(bb < ba);                       // a real snapshot is never crossed
+
+  // Centre the window on the touch. Sized here rather than in make_cfg because
+  // these instruments differ by orders of magnitude: at a $0.01 tick, 80,000
+  // ticks is $800 around a $79,715 BTC mid, and the same 80,000 ticks around a
+  // $2 XRP mid is a band the whole book fits inside many times over.
+  // The band is +-2% of the mid, expressed in ticks and rounded up to the
+  // multiple of 64 the occupancy bitset needs. A fixed tick count cannot serve
+  // both a $79,715 book at a $0.01 tick and a $2 book at a $0.00001 one.
+  const Ticks mid = (bb + ba) / 2;
+  Ticks band = (mid / 25) & ~Ticks{63};
+  if (band < 4096) band = 4096;
+  c.window_ticks = band;
+  c.window_base  = mid - band / 2;
+
+  BitstampDecoder d{c};
+  OrderBook book{c.window_base, static_cast<std::uint32_t>(c.window_ticks), 1 << 21};
+
+  // The snapshot is read for scale only. It is NOT used to seed: it carries
+  // orders whose deletes happened before the capture began, so nothing in the
+  // stream removes them. Measured against the trade channel, seeding scored
+  // 11.1% of trades inside the touch on xrpusd against 90.2% without it.
+  std::vector<BookEvent> seed;
+  d.load_snapshot(snap, seed);
+  CHECK(seed.size() > 100);
+
+  LineReader reader;
+  if (!reader.open(capture_path)) {
+    ::lobtest::report(false, "open capture", __FILE__, __LINE__, reader.error());
+    return;
+  }
+  std::string_view line;
+  std::uint64_t n = 0, crossed = 0;
+  std::string why;
+  while (reader.next(&line)) {
+    const BookTouch touch{book.has_bid(), book.has_ask(),
+                          book.has_bid() ? book.best_bid() : 0,
+                          book.has_ask() ? book.best_ask() : 0};
+    Decoded out;
+    if (!d.decode_line(line, touch, out)) continue;
+    for (int i = 0; i < out.n; ++i) {
+      // A real MBO feed can never book an order that crosses: the exchange
+      // matched it instead of resting it. One here means the decoder built an
+      // event the exchange never sent.
+      if (book.apply(out.ev[i]) == BookError::CrossedBook) ++crossed;
+      if ((++n % 20'000) == 0) CHECK(book.check_invariants(&why));
+    }
+  }
+  CHECK(book.check_invariants(&why));
+  CHECK_EQ(crossed, 0u);
+
+  const BitstampStats& st = d.stats();
+  CHECK(st.lines > 1000);
+  CHECK_EQ(st.chain_gaps, 0u);            // the capture is provably whole
+  CHECK_EQ(st.size_violations, 0u);       // no order lost more size than it held
+  CHECK_EQ(st.missing_amount_traded, 0u); // the fill/cancel split is exact
+  // A recording stopped with Ctrl-C ends mid-frame, so one unusable line is
+  // expected; more than that means the decoder is misreading the format.
+  CHECK(st.parse_errors <= 1);
+  CHECK(st.fill_events > 0);              // a capture with no fills proves nothing
+  CHECK(st.cancel_events > 0);
+
+  std::printf("  %s\n    %llu lines -> %llu book events | %llu fills / %llu cancels"
+              " | %llu marketable held back | %llu outside band | %zu resting\n",
+              capture_path, static_cast<unsigned long long>(st.lines),
+              static_cast<unsigned long long>(n),
+              static_cast<unsigned long long>(st.fill_events),
+              static_cast<unsigned long long>(st.cancel_events),
+              static_cast<unsigned long long>(st.marketable),
+              static_cast<unsigned long long>(st.out_of_window), book.live_orders());
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   // ======================= json scanner =======================
   {
     constexpr const char* obj = R"({"a":1,"b":"two","c":{"a":9},"d":[1,2],"e":null})";
@@ -149,14 +256,14 @@ int main() {
 
     // A bid $8,000 below the touch: outside the window, so no book event, but
     // it is counted rather than dropped in silence.
-    CHECK(d.decode_line(kCreateBid, out));
+    CHECK(d.decode_line(kCreateBid, kNoTouch, out));
     CHECK_EQ(out.n, 0);
     CHECK_EQ(d.stats().out_of_window, 1u);
     CHECK_EQ(out.ts, 1788551766357000LL * 1000);
     CHECK_EQ(out.recv_ns, 1788551766927713300LL);
 
     // An ask inside the window: one Add, fields exact.
-    CHECK(d.decode_line(kCreateAsk, out));
+    CHECK(d.decode_line(kCreateAsk, kNoTouch, out));
     CHECK_EQ(out.n, 1);
     CHECK(out.ev[0].type == EventType::Add);
     CHECK(out.ev[0].side == Side::Ask);
@@ -165,13 +272,13 @@ int main() {
     CHECK_EQ(out.ev[0].qty, 18'816'587);
 
     // A delete for an id this stream never created. Never guessed at.
-    CHECK(d.decode_line(kDeleteUnknown, out));
+    CHECK(d.decode_line(kDeleteUnknown, kNoTouch, out));
     CHECK_EQ(out.n, 0);
     CHECK_EQ(d.stats().unknown_order, 1u);
 
     // A trade produces NO book event: the exchange already applied its effect
     // through the order channel, and replaying it would remove size twice.
-    CHECK(d.decode_line(kTrade, out));
+    CHECK(d.decode_line(kTrade, kNoTouch, out));
     CHECK_EQ(out.n, 0);
     CHECK(out.is_trade);
     CHECK_EQ(out.trade_price, 7'971'539);
@@ -180,7 +287,7 @@ int main() {
 
     // Those three order lines chain end to end, so no gap is reported.
     CHECK_EQ(d.stats().chain_gaps, 0u);
-    CHECK_EQ(d.stats().identity_violations, 0u);
+    CHECK_EQ(d.stats().size_violations, 0u);
     CHECK_EQ(d.stats().missing_amount_traded, 0u);
   }
 
@@ -193,21 +300,23 @@ int main() {
     Decoded out;
 
     CHECK(d.decode_line(order_msg("order_created", 1, 0, "79715.00", "1.00000000", "0",
-                                  "1.00000000", 1788551766000000ULL, "e1", "e0"), out));
+                                  "1.00000000", 1788551766000000ULL, "e1", "e0"), kNoTouch, out));
     CHECK_EQ(out.n, 1);
     CHECK(out.ev[0].type == EventType::Add);
     CHECK_EQ(out.ev[0].qty, 100'000'000);
 
     // 0.6 traded away: an Execute for exactly the traded delta.
     CHECK(d.decode_line(order_msg("order_changed", 1, 0, "79715.00", "0.40000000", "0.60000000",
-                                  "1.00000000", 1788551766100000ULL, "e2", "e1"), out));
+                                  "1.00000000", 1788551766100000ULL, "e2", "e1"), kNoTouch, out));
     CHECK_EQ(out.n, 1);
     CHECK(out.ev[0].type == EventType::Execute);
     CHECK_EQ(out.ev[0].qty, 60'000'000);
 
-    // The remaining 0.4 is pulled: a Delete, and it must NOT be counted as a fill.
-    CHECK(d.decode_line(order_msg("order_deleted", 1, 0, "79715.00", "0.40000000", "0.60000000",
-                                  "1.00000000", 1788551766200000ULL, "e3", "e2"), out));
+    // The remaining 0.4 is pulled. amount_traded is PER EVENT, so this message
+    // reports 0 traded — nothing traded in THIS event — and it must come out as
+    // a Delete, never as a fill.
+    CHECK(d.decode_line(order_msg("order_deleted", 1, 0, "79715.00", "0.40000000", "0",
+                                  "1.00000000", 1788551766200000ULL, "e3", "e2"), kNoTouch, out));
     CHECK_EQ(out.n, 1);
     CHECK(out.ev[0].type == EventType::Delete);
     CHECK_EQ(out.ev[0].qty, 40'000'000);
@@ -216,7 +325,7 @@ int main() {
     CHECK_EQ(d.stats().cancelled_qty, 40'000'000);
     CHECK_EQ(d.stats().fill_events, 1u);
     CHECK_EQ(d.stats().cancel_events, 1u);
-    CHECK_EQ(d.stats().identity_violations, 0u);
+    CHECK_EQ(d.stats().size_violations, 0u);
     CHECK_EQ(d.tracked_orders(), 0u);   // erased on delete: no unbounded growth
   }
 
@@ -226,9 +335,9 @@ int main() {
     BitstampDecoder d{make_cfg()};
     Decoded out;
     CHECK(d.decode_line(order_msg("order_created", 7, 1, "79720.00", "2.00000000", "0",
-                                  "2.00000000", 1788551766000000ULL, "e1", "e0"), out));
+                                  "2.00000000", 1788551766000000ULL, "e1", "e0"), kNoTouch, out));
     CHECK(d.decode_line(order_msg("order_deleted", 7, 1, "79720.00", "0", "2.00000000",
-                                  "2.00000000", 1788551766050000ULL, "e2", "e1"), out));
+                                  "2.00000000", 1788551766050000ULL, "e2", "e1"), kNoTouch, out));
     CHECK_EQ(out.n, 1);
     CHECK(out.ev[0].type == EventType::Execute);
     CHECK_EQ(out.ev[0].qty, 200'000'000);
@@ -241,9 +350,9 @@ int main() {
     BitstampDecoder d{make_cfg()};
     Decoded out;
     CHECK(d.decode_line(order_msg("order_created", 8, 0, "79700.00", "0.50000000", "0",
-                                  "0.50000000", 1788551766000000ULL, "e1", "e0"), out));
+                                  "0.50000000", 1788551766000000ULL, "e1", "e0"), kNoTouch, out));
     CHECK(d.decode_line(order_msg("order_deleted", 8, 0, "79700.00", "0.50000000", "0",
-                                  "0.50000000", 1788551766050000ULL, "e2", "e1"), out));
+                                  "0.50000000", 1788551766050000ULL, "e2", "e1"), kNoTouch, out));
     CHECK_EQ(out.n, 1);
     CHECK(out.ev[0].type == EventType::Delete);
     CHECK_EQ(d.stats().filled_qty, 0);
@@ -255,27 +364,103 @@ int main() {
     BitstampDecoder d{make_cfg()};
     Decoded out;
     CHECK(d.decode_line(order_msg("order_created", 1, 0, "79715.00", "1.00000000", "0",
-                                  "1.00000000", 1788551766000000ULL, "e1", "e0"), out));
+                                  "1.00000000", 1788551766000000ULL, "e1", "e0"), kNoTouch, out));
     // pre_event_id names a message we never saw: a hole in the capture.
     CHECK(d.decode_line(order_msg("order_created", 2, 0, "79714.00", "1.00000000", "0",
-                                  "1.00000000", 1788551766001000ULL, "e5", "e4"), out));
+                                  "1.00000000", 1788551766001000ULL, "e5", "e4"), kNoTouch, out));
     CHECK_EQ(d.stats().chain_gaps, 1u);
     // .. and the chain resumes from the message that was actually received,
     // so one gap is reported once rather than every message thereafter.
     CHECK(d.decode_line(order_msg("order_created", 3, 0, "79713.00", "1.00000000", "0",
-                                  "1.00000000", 1788551766002000ULL, "e6", "e5"), out));
+                                  "1.00000000", 1788551766002000ULL, "e6", "e5"), kNoTouch, out));
     CHECK_EQ(d.stats().chain_gaps, 1u);
   }
 
-  // The feed's own identity, amount + amount_traded == amount_at_create, is what
-  // licenses reading `amount` as remaining rather than original size. If it ever
-  // stops holding, the split is being computed from a misread field.
+  // amount_traded is PER EVENT, not cumulative. This is the sequence from real
+  // order 2046841350975488: six partial fills, then the remainder cancelled.
+  // Under a cumulative reading the last value is 0 and the order looks like a
+  // pure cancel, losing every one of those fills.
   {
     BitstampDecoder d{make_cfg()};
     Decoded out;
-    CHECK(d.decode_line(order_msg("order_created", 1, 0, "79715.00", "0.30000000", "0.30000000",
-                                  "0.90000000", 1788551766000000ULL, "e1", "e0"), out));
-    CHECK_EQ(d.stats().identity_violations, 1u);
+    const char* fills[] = {"0.00572747", "0.00405924", "0.05969432",
+                           "0.00784165", "0.02010227", "0.02334723"};
+    const char* rem[]   = {"0.11927253", "0.11521329", "0.05551897",
+                           "0.04767732", "0.02757505", "0.00422782"};
+    CHECK(d.decode_line(order_msg("order_created", 9, 0, "79715.00", "0.12500000", "0",
+                                  "0.12500000", 1788551766000000ULL, "e0", "x"), kNoTouch, out));
+    for (int i = 0; i < 6; ++i) {
+      char e[8], pe[8];
+      std::snprintf(e, sizeof(e), "e%d", i + 1);
+      std::snprintf(pe, sizeof(pe), "e%d", i);
+      CHECK(d.decode_line(order_msg("order_changed", 9, 0, "79715.00", rem[i], fills[i],
+                                    "0.12500000", 1788551766000000ULL + static_cast<std::uint64_t>(i + 1) * 1000,
+                                    e, pe), kNoTouch, out));
+      CHECK_EQ(out.n, 1);
+      CHECK(out.ev[0].type == EventType::Execute);
+    }
+    // The six fills sum to the 0.12077218 that left the book.
+    CHECK_EQ(d.stats().filled_qty, 12'077'218);
+    CHECK_EQ(d.stats().fill_events, 6u);
+
+    // Then the remainder is cancelled, with amount_traded 0 on that message.
+    CHECK(d.decode_line(order_msg("order_deleted", 9, 0, "79715.00", "0.00422782", "0",
+                                  "0.12500000", 1788551766100000ULL, "e7", "e6"), kNoTouch, out));
+    CHECK_EQ(out.n, 1);
+    CHECK(out.ev[0].type == EventType::Delete);
+    CHECK_EQ(d.stats().cancelled_qty, 422'782);
+    CHECK_EQ(d.stats().filled_qty + d.stats().cancelled_qty, 12'500'000);  // == at_create
+    CHECK_EQ(d.stats().size_violations, 0u);
+  }
+
+  // ======================= marketable creates are never rested =======================
+  // Bitstamp publishes an aggressive order as order_created at its limit price
+  // before publishing the fills it causes. Resting it would cross the book.
+  {
+    BitstampDecoder d{make_cfg()};
+    Decoded out;
+    const BookTouch touch{true, true, 7'971'500, 7'971'501};   // 1-tick spread
+
+    // A bid at the ask: marketable. No book event at all.
+    CHECK(d.decode_line(order_msg("order_created", 20, 0, "79715.01", "1.00000000", "0",
+                                  "1.00000000", 1788551766000000ULL, "e1", "e0"), touch, out));
+    CHECK_EQ(out.n, 0);
+    CHECK_EQ(d.stats().marketable, 1u);
+
+    // It is gone in the same millisecond having traded nothing — the signature
+    // of an order the exchange refuses to rest. Still no book event: it was
+    // never in the book.
+    CHECK(d.decode_line(order_msg("order_deleted", 20, 0, "79715.01", "1.00000000", "0",
+                                  "1.00000000", 1788551766000000ULL, "e2", "e1"), touch, out));
+    CHECK_EQ(out.n, 0);
+    CHECK_EQ(d.stats().marketable_cancelled, 1u);
+    CHECK_EQ(d.stats().cancel_events, 0u);   // not a book cancel: it never rested
+
+    // A bid one tick inside the spread is passive and rests normally.
+    CHECK(d.decode_line(order_msg("order_created", 21, 0, "79715.00", "1.00000000", "0",
+                                  "1.00000000", 1788551766001000ULL, "e3", "e2"), touch, out));
+    CHECK_EQ(out.n, 1);
+    CHECK(out.ev[0].type == EventType::Add);
+  }
+
+  // A marketable order can become passive when the touch moves away from it,
+  // and then it must join the book — at the back of the queue, on the event
+  // that made it passive, not at the price it originally crossed.
+  {
+    BitstampDecoder d{make_cfg()};
+    Decoded out;
+    const BookTouch tight{true, true, 7'971'500, 7'971'501};
+    CHECK(d.decode_line(order_msg("order_created", 30, 0, "79715.01", "1.00000000", "0",
+                                  "1.00000000", 1788551766000000ULL, "e1", "e0"), tight, out));
+    CHECK_EQ(out.n, 0);
+
+    const BookTouch wide{true, true, 7'971'400, 7'971'600};   // ask moved up
+    CHECK(d.decode_line(order_msg("order_changed", 30, 0, "79715.01", "1.00000000", "0",
+                                  "1.00000000", 1788551766002000ULL, "e2", "e1"), wide, out));
+    CHECK_EQ(out.n, 1);
+    CHECK(out.ev[0].type == EventType::Add);
+    CHECK_EQ(out.ev[0].price, 7'971'501);
+    CHECK_EQ(d.stats().marketable_rested, 1u);
   }
 
   // ======================= snapshot =======================
@@ -289,6 +474,10 @@ int main() {
     std::vector<BookEvent> seed;
     const Nanos ts = d.load_snapshot(kSnapshot, seed);
     CHECK_EQ(ts, 1788551766754717LL * 1000);
+    // Reading the snapshot must not change what the decoder believes is
+    // resting: the book is built from the stream, and a snapshot order is not
+    // in it.
+    CHECK_EQ(d.tracked_orders(), 0u);
     // Four bids, but one is the $71,743 outlier and falls outside the window.
     CHECK_EQ(seed.size(), 5u);
     CHECK_EQ(d.stats().out_of_window, 1u);
@@ -342,86 +531,18 @@ int main() {
     // order the snapshot already holds, which is the expected startup transient
     // where the websocket buffer overlaps the REST snapshot.
     Decoded out;
-    d.decode_line(kCreateAsk, out);
+    d.decode_line(kCreateAsk, kNoTouch, out);
     for (int i = 0; i < out.n; ++i) {
       const BookError e = book.apply(out.ev[i]);
       CHECK(e == BookError::DuplicateOrder);
     }
     CHECK(book.check_invariants(&why));
+    CHECK_EQ(d.stats().unknown_order, 0u);
   }
 
-  // ======================= a real capture, if one is committed =======================
-  // This is Phase 1's actual acceptance criterion: a full session of real venue
-  // data replayed with zero invariant violations. Everything above proves the
-  // decoder agrees with fixtures I wrote; only this proves it agrees with an
-  // exchange. data/samples holds a short slice for exactly this reason — see
-  // .gitignore, which excludes bulk captures and admits this one.
-#if defined(LOB_SAMPLE_CAPTURE) && defined(LOB_SAMPLE_SNAPSHOT)
-  {
-    std::string snap;
-    {
-      LineReader r;
-      CHECK(r.open(LOB_SAMPLE_SNAPSHOT));
-      std::string_view l;
-      while (r.next(&l)) snap.append(l.data(), l.size());
-    }
-    CHECK(!snap.empty());
-
-    BitstampConfig c = make_cfg();
-    Ticks bb = 0, ba = 0;
-    CHECK(BitstampDecoder::snapshot_touch(snap, c, &bb, &ba));
-    CHECK(bb < ba);                       // a real snapshot is never crossed
-    c.window_ticks = 80'000;
-    c.window_base  = (bb + ba) / 2 - c.window_ticks / 2;
-
-    BitstampDecoder d{c};
-    OrderBook book{c.window_base, static_cast<std::uint32_t>(c.window_ticks), 1 << 21};
-
-    std::vector<BookEvent> seed;
-    d.load_snapshot(snap, seed);
-    CHECK(seed.size() > 100);
-    for (const BookEvent& e : seed) CHECK(book.apply(e) == BookError::Ok);
-
-    LineReader reader;
-    CHECK(reader.open(LOB_SAMPLE_CAPTURE));
-    std::string_view line;
-    std::uint64_t n = 0, crossed = 0;
-    std::string why;
-    while (reader.next(&line)) {
-      Decoded out;
-      if (!d.decode_line(line, out)) continue;
-      for (int i = 0; i < out.n; ++i) {
-        // A real MBO feed can never book an order that crosses: the exchange
-        // matched it instead of resting it. One here means the decoder built an
-        // event the exchange never sent.
-        if (book.apply(out.ev[i]) == BookError::CrossedBook) ++crossed;
-        if ((++n % 20'000) == 0) CHECK(book.check_invariants(&why));
-      }
-    }
-    CHECK(book.check_invariants(&why));
-    CHECK_EQ(crossed, 0u);
-
-    const BitstampStats& st = d.stats();
-    CHECK(st.lines > 1000);
-    CHECK_EQ(st.chain_gaps, 0u);            // the capture is provably whole
-    CHECK_EQ(st.identity_violations, 0u);   // `amount` really is remaining size
-    CHECK_EQ(st.missing_amount_traded, 0u); // the fill/cancel split is exact
-    // A capture stopped with Ctrl-C ends mid-frame, so one unusable line is
-    // expected; more than that means the decoder is misreading the format.
-    CHECK(st.parse_errors <= 1);
-    CHECK(st.fill_events > 0);              // a slice with no fills proves nothing
-    CHECK(st.cancel_events > 0);
-
-    std::printf("  real capture: %llu lines, %llu book events, %llu fills / %llu cancels,\n"
-                "                %llu outside window, %zu orders resting at end\n",
-                static_cast<unsigned long long>(st.lines), static_cast<unsigned long long>(n),
-                static_cast<unsigned long long>(st.fill_events),
-                static_cast<unsigned long long>(st.cancel_events),
-                static_cast<unsigned long long>(st.out_of_window), book.live_orders());
-  }
-#else
-  std::printf("  (no data/samples capture committed: real-data test skipped)\n");
-#endif
+  // ======================= a real capture, if one was named =======================
+  if (argc >= 3) replay_real_capture(argv[1], argv[2]);
+  else std::printf("  (no capture given: pass <capture> <snapshot> for the real-data test)\n");
 
   return lobtest::summary("bitstamp");
 }

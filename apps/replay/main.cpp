@@ -146,6 +146,12 @@ int replay_synthetic(int n, bool verify) {
 
   banner("book state distributions");
   std::printf("  spread (ticks)  %s\n", spread_hist.summary("ticks").c_str());
+  // Read the median, distrust the tail. The book is built from the stream, so a
+  // level nobody has touched since the capture began is not in it; when the
+  // touch empties, the next level we KNOW about can be far further out than the
+  // real one. The median is corroborated by the snapshot's own touch, which
+  // involves no reconstruction at all; the upper percentiles are a property of
+  // the reconstruction, not of the market.
   std::printf("  touch depth     %s\n", depth_hist.summary("shares").c_str());
   std::printf("  imbalance*1000+1000 (so 1000 == balanced)\n                  %s\n",
               imb_hist.summary("").c_str());
@@ -206,7 +212,9 @@ bool slurp(const char* path, std::string& out) {
 }
 
 int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
-                    const BitstampConfig& base_cfg, Ticks band) {
+                    const BitstampConfig& base_cfg, Ticks band,
+                    bool price_dp_set, bool qty_dp_set,
+                    bool seed_snapshot, Nanos warmup_ns) {
   banner("replay: bitstamp capture");
   std::printf("  capture    %s\n", capture);
 
@@ -228,13 +236,35 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
   std::printf("  snapshot   %s\n", snap_path.c_str());
 
   BitstampConfig cfg = base_cfg;
+
+  // Measured from the snapshot unless the caller overrode it. btcusd is quoted
+  // to the cent and xrpusd to five decimals; assuming either would silently
+  // mis-scale the other by a factor of a thousand.
+  unsigned px_dp = 0, qt_dp = 0;
+  if (BitstampDecoder::detect_decimals(snap_text, &px_dp, &qt_dp)) {
+    if (!price_dp_set) cfg.price_decimals = px_dp;
+    if (!qty_dp_set)   cfg.qty_decimals   = qt_dp;
+    std::printf("  precision  %u price decimals, %u size decimals%s\n",
+                cfg.price_decimals, cfg.qty_decimals,
+                (price_dp_set || qty_dp_set) ? " (overridden)" : " (measured from snapshot)");
+  }
+
   Ticks bb = 0, ba = 0;
   if (!BitstampDecoder::snapshot_touch(snap_text, cfg, &bb, &ba)) {
     std::fprintf(stderr, "  snapshot has no two-sided book\n");
     return 2;
   }
+  // Default band is +-2% of the mid, in ticks, rounded to the multiple of 64
+  // the occupancy bitset needs. A fixed tick count cannot serve both a $79,715
+  // book at a $0.01 tick and a $2 book at a $0.00001 one: the same 80,000 ticks
+  // is +-0.5% of one and +-19% of the other.
+  const Ticks mid = (bb + ba) / 2;
+  if (band == 0) {
+    band = (mid / 25) & ~Ticks{63};
+    if (band < 4096) band = 4096;
+  }
   cfg.window_ticks = band;
-  cfg.window_base  = (bb + ba) / 2 - band / 2;
+  cfg.window_base  = mid - band / 2;
 
   std::printf("  touch      %lld / %lld  (spread %lld ticks)\n",
               static_cast<long long>(bb), static_cast<long long>(ba),
@@ -247,15 +277,27 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
   OrderBook book{cfg.window_base, static_cast<std::uint32_t>(band), 1 << 21};
   FeatureEngine fe;
 
+  // The snapshot sets precision and centres the window. It does NOT seed the
+  // book: it carries orders whose deletes happened before the capture began, so
+  // nothing in the stream ever removes them. Measured against the trade channel
+  // — a trade must print inside the touch — seeding scored 11.1% on xrpusd
+  // against 90.2% for building from the stream alone, and BTC and ETH scored
+  // the same either way. --seed-snapshot exists to reproduce that comparison.
   std::vector<BookEvent> seed;
   const Nanos snap_ts = dec.load_snapshot(snap_text, seed);
-  std::uint64_t seed_rejects = 0;
-  for (const BookEvent& e : seed) {
-    if (book.apply(e) != BookError::Ok) ++seed_rejects;
+  if (seed_snapshot) {
+    std::uint64_t seed_rejects = 0;
+    for (const BookEvent& e : seed) {
+      if (book.apply(e) != BookError::Ok) ++seed_rejects;
+    }
+    std::printf("  seeded     %zu orders (%llu rejected) -- NOT TRUSTED, see --help\n",
+                seed.size(), static_cast<unsigned long long>(seed_rejects));
+  } else {
+    std::printf("  snapshot   %zu orders read for scale only, book built from the stream\n",
+                seed.size());
   }
-  std::printf("  seeded     %zu orders (%llu rejected), snapshot ts %lld\n",
-              seed.size(), static_cast<unsigned long long>(seed_rejects),
-              static_cast<long long>(snap_ts));
+  std::printf("  warm-up    %.0f s before market state is recorded (snapshot ts %lld)\n",
+              static_cast<double>(warmup_ns) / 1e9, static_cast<long long>(snap_ts));
 
   // ---- stream ----
   LineReader reader;
@@ -273,17 +315,24 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
   std::string_view line;
   const std::uint64_t t0 = tsc::now_serialized();
   while (reader.next(&line)) {
+    const BookTouch touch{book.has_bid(), book.has_ask(),
+                          book.has_bid() ? book.best_bid() : 0,
+                          book.has_ask() ? book.best_ask() : 0};
     Decoded d;
-    if (!dec.decode_line(line, d)) continue;
+    if (!dec.decode_line(line, touch, d)) continue;
 
     if (d.ts != 0) { if (first_ts == 0) first_ts = d.ts; last_ts = d.ts; }
+    // Built from the stream, the book starts empty and fills in as orders
+    // arrive. Anything measured before it is populated describes the warm-up,
+    // not the market.
+    const bool warm = (first_ts != 0) && (d.ts - first_ts) >= warmup_ns;
     // Kept apart on purpose. The order and trade channels are not on the same
     // clock — in one capture orders arrived 570ms "late" and trades 88ms
     // "early" — so pooling them would report that offset as jitter and bury the
     // real variation, which is two orders of magnitude smaller.
     if (d.recv_ns != 0 && d.ts != 0)
       (d.is_trade ? trade_delay : order_delay).push_back(d.recv_ns - d.ts);
-    if (d.is_trade && d.trade_qty > 0) trade_size.record(d.trade_qty);
+    if (warm && d.is_trade && d.trade_qty > 0) trade_size.record(d.trade_qty);
 
     for (int i = 0; i < d.n; ++i) {
       const BookEvent& e = d.ev[i];
@@ -295,7 +344,7 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
       if (err == BookError::Ok) ++applied; else ++rejected;
 
       fe.update(book, e.ts);
-      if (book.has_bid() && book.has_ask()) {
+      if (warm && book.has_bid() && book.has_ask()) {
         spread_hist.record(book.spread());
         depth_hist.record(book.best_bid_qty() + book.best_ask_qty());
       }
@@ -334,8 +383,8 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
     std::printf("                   %llu gap(s): everything below is measured over a capture\n"
                 "                   with holes in it, and queue positions across a gap are wrong.\n",
                 static_cast<unsigned long long>(ds.chain_gaps));
-  std::printf("  feed identity    %llu violation(s) of amount + traded == at_create\n",
-              static_cast<unsigned long long>(ds.identity_violations));
+  std::printf("  size conservation %llu event(s) removed more size than the order held\n",
+              static_cast<unsigned long long>(ds.size_violations));
   std::printf("  amount_traded    %s\n",
               ds.missing_amount_traded == 0
                   ? "present on every message — the fill/cancel split is exact"
@@ -359,6 +408,20 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
                 "                   because size added to a resting order loses priority)\n",
                 static_cast<unsigned long long>(ds.grew),
                 static_cast<unsigned long long>(ds.repriced));
+
+  banner("marketable orders, published but never rested");
+  // Bitstamp publishes an aggressive order as order_created at its limit price
+  // before publishing the fills it causes. Resting those builds a crossed book.
+  std::printf("  held back  %llu of %llu creates (%.1f%%)\n",
+              static_cast<unsigned long long>(ds.marketable),
+              static_cast<unsigned long long>(ds.created),
+              ds.created ? 100.0 * static_cast<double>(ds.marketable) / static_cast<double>(ds.created) : 0.0);
+  std::printf("    traded out %llu | cancelled without trading %llu | later rested passive %llu\n",
+              static_cast<unsigned long long>(ds.marketable_traded),
+              static_cast<unsigned long long>(ds.marketable_cancelled),
+              static_cast<unsigned long long>(ds.marketable_rested));
+  std::printf("  Their fills are counted on the RESTING side's own events, never here:\n"
+              "  counting both would double the traded volume.\n");
 
   banner("why orders left the book");
   // docs/03 section 5: this split must never be aggregated. Volume cancelled
@@ -421,6 +484,12 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
 
   banner("market state");
   std::printf("  spread (ticks)  %s\n", spread_hist.summary("ticks").c_str());
+  // Read the median, distrust the tail. The book is built from the stream, so a
+  // level nobody has touched since the capture began is not in it; when the
+  // touch empties, the next level we KNOW about can be far further out than the
+  // real one. The median is corroborated by the snapshot's own touch, which
+  // involves no reconstruction at all; the upper percentiles are a property of
+  // the reconstruction, not of the market.
   {
     // Sizes are integers in units of 10^-qty_decimals of the base currency, so
     // 6272315 is 0.06272315 BTC. Printed in those units rather than converted,
@@ -479,9 +548,15 @@ void usage() {
       "\n"
       "  --snapshot <file>     REST seed. Derived from the capture name if omitted.\n"
       "  --verify              check book invariants as it goes\n"
-      "  --price-decimals <n>  ticks per unit of quote currency (default 2)\n"
-      "  --qty-decimals <n>    size precision (default 8)\n"
-      "  --band-ticks <n>      price window width, multiple of 64 (default 80000)\n"
+      "  --warmup-sec <s>      ignore market state for this long while the book\n"
+      "                        fills in from the stream (default 60)\n"
+      "  --seed-snapshot       seed the book from the REST snapshot. Off by default:\n"
+      "                        it carries orders whose deletes predate the capture,\n"
+      "                        which never clear. Kept to reproduce the comparison.\n"
+      "  --price-decimals <n>  override; measured from the snapshot otherwise\n"
+      "  --qty-decimals <n>    override; measured from the snapshot otherwise\n"
+      "  --band-ticks <n>      price window width, multiple of 64. Default is +-2%%\n"
+      "                        of the snapshot mid.\n"
       "\n"
       "  gzipped captures %s\n",
       LineReader::have_gzip() ? "are read directly."
@@ -497,8 +572,10 @@ int main(int argc, char** argv) {
   const char* snapshot = nullptr;
   bool  verify = false;
   int   n      = 1'000'000;
-  Ticks band   = 80'000;
+  Ticks band   = 0;   // 0 = derive from the snapshot mid
   BitstampConfig cfg;
+  bool price_dp_set = false, qty_dp_set = false, seed_snapshot = false;
+  Nanos warmup_ns = 60'000'000'000LL;
 
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
@@ -508,9 +585,9 @@ int main(int argc, char** argv) {
     else if (std::strcmp(a, "--bitstamp") == 0 && has_next) capture  = argv[++i];
     else if (std::strcmp(a, "--snapshot") == 0 && has_next) snapshot = argv[++i];
     else if (std::strcmp(a, "--price-decimals") == 0 && has_next)
-      cfg.price_decimals = static_cast<unsigned>(std::atoi(argv[++i]));
+      { cfg.price_decimals = static_cast<unsigned>(std::atoi(argv[++i])); price_dp_set = true; }
     else if (std::strcmp(a, "--qty-decimals") == 0 && has_next)
-      cfg.qty_decimals = static_cast<unsigned>(std::atoi(argv[++i]));
+      { cfg.qty_decimals = static_cast<unsigned>(std::atoi(argv[++i])); qty_dp_set = true; }
     else if (std::strcmp(a, "--band-ticks") == 0 && has_next)
       band = std::atoll(argv[++i]);
     else if (a[0] != '-') n = std::atoi(a);
@@ -519,11 +596,12 @@ int main(int argc, char** argv) {
 
   if (capture != nullptr) {
     // The book indexes levels with a 64-bit occupancy word per 64 ticks.
-    if (band <= 0 || band % 64 != 0) {
+    if (band < 0 || band % 64 != 0) {
       std::fprintf(stderr, "--band-ticks must be a positive multiple of 64\n");
       return 2;
     }
-    return replay_bitstamp(capture, snapshot, verify, cfg, band);
+    return replay_bitstamp(capture, snapshot, verify, cfg, band, price_dp_set, qty_dp_set,
+                           seed_snapshot, warmup_ns);
   }
   return replay_synthetic(n, verify);
 }
