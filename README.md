@@ -4,10 +4,9 @@ An industry-grade market-making limit order book optimizer: quote placement, que
 modelling, and a first-class measurement plane for time delays, distributions and
 latency.
 
-**Status: Phase 0 complete — the measurement plane.** The design documents are in
-`docs/`; the code so far is the instrumentation everything else will be measured with.
-Nothing about order books yet, deliberately: you cannot claim a latency improvement you
-cannot measure, so the measuring comes first. See [`docs/05-roadmap.md`](docs/05-roadmap.md).
+**Status: Phase 1 complete — the L3 order book.** The design documents are in
+`docs/`; the code is the measurement plane (Phase 0) and the market-by-order book it
+measures (Phase 1). See [`docs/05-roadmap.md`](docs/05-roadmap.md).
 
 ## Build and run
 
@@ -15,10 +14,12 @@ cannot measure, so the measuring comes first. See [`docs/05-roadmap.md`](docs/05
 cmake --preset release && cmake --build build/release
 ctest --preset release            # 5 suites, ~90 assertions
 
-./build/release/latency_demo      # per-stage attribution + HDR percentile curve
-./build/release/jitter_probe 10   # this machine's jitter floor
-./build/release/bench_measure     # cost of each primitive
-./tools/jitter_baseline.sh 10     # full machine baseline, for docs/BASELINE.md
+./build/release/latency_demo         # per-stage attribution + HDR percentile curve
+./build/release/jitter_probe 10      # this machine's jitter floor
+./build/release/bench_measure        # cost of each measurement primitive
+./build/release/replay 1000000 --verify   # stream events through the book, check invariants
+./build/release/bench_book           # cost of each book operation
+./tools/jitter_baseline.sh 10        # full machine baseline, for docs/BASELINE.md
 ```
 
 Presets: `release`, `debug`, `asan` (ASan+UBSan), `tsan`. Tests pass under all four,
@@ -35,16 +36,34 @@ on GCC 13 and Clang 18.
 | Per-stage recorder | `lob/measure/recorder.hpp` | One histogram per pipeline stage, so a tick-to-trade figure can be attributed rather than merely observed. |
 | Append-only journal | `lob/measure/journal.hpp` | Every decision written with its sequence number and timestamps. Replay must reproduce it byte for byte — that property is what makes a backtest measure the system you actually run. |
 
+## What Phase 1 built
+
+| Component | Header | What it is for |
+|---|---|---|
+| L3 order book | `lob/book/order_book.hpp` | Market-by-order. Flat price-level array indexed by tick offset, occupancy bitset scanned with `countr_zero`/`countl_zero`, intrusive FIFO per level, open-addressed order-id map. |
+| Reference book | `lob/book/reference_book.hpp` | Deliberately naive `std::map` + `std::list`. Its only job is to be a second opinion in the differential test. |
+| Order map | `lob/book/order_map.hpp` | Open addressing with backward-shift deletion, so a day of balanced adds and cancels does not accumulate tombstones. |
+| Synthetic flow | `lob/sim/flow.hpp` | Zero-intelligence generator. Drives the book hard enough to prove it correct; becomes the Phase 3 simulator's interface once a calibrated model sits behind it. |
+
+**Own orders live in the same FIFO as everyone else's.** That is the decision the project
+turns on: queue position falls out of the structure rather than needing a parallel
+bookkeeping system to be kept in sync. `queue_ahead()` is O(1) — maintained as the queue
+drains, not recomputed.
+
 Measured on this machine (see [`docs/BASELINE.md`](docs/BASELINE.md) for the full record
 and its caveats):
 
 ```
-tsc::now (rdtsc)          16.72 ns/op    35.1 cycles
-tsc::now_serialized       28.03 ns/op    58.9 cycles
-Histogram::record          3.65 ns/op     7.7 cycles
-Arena::allocate(64)        1.14 ns/op     2.4 cycles
-Pool acquire+release       0.72 ns/op     1.5 cycles
+measurement                          book
+tsc::now (rdtsc)     16.72 ns   35.1 cy   add (deep book)        29.66 ns   62.3 cy
+tsc::now_serialized  28.03 ns   58.9 cy   cancel (mid-queue)     45.09 ns   94.7 cy
+Histogram::record     3.65 ns    7.7 cy   execute (partial)      21.96 ns   46.1 cy
+Arena::allocate(64)   1.14 ns    2.4 cy   best_bid + best_ask     0.65 ns    1.4 cy
+Pool acquire+release  0.72 ns    1.5 cy   depth(10) both sides   47.04 ns   98.8 cy
 ```
+
+Mixed synthetic stream: **6.1 M events/s**, p50 36 ns per event. Top-of-book at 1.4 cycles
+is the cached-touch design paying off — the feature engine reads it on every event.
 
 > ### Scope: this is a model, not a trading operation
 >
