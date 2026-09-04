@@ -41,9 +41,13 @@ measurement last. Then you can't tell whether a change helped.
 - Property tests vs a naive reference book; decoder fuzzing; golden-replay hash.
 
 **Done when**
-- Replay of a full session of a liquid instrument with zero invariant violations, over a
+- ✅ Replay of a full session of a liquid instrument with zero invariant violations, over a
   capture whose `event_id` chain is unbroken — so "no violations" means the book handled
   every message, not that messages went missing.
+  *Met 2026-09-04: three 10-minute Bitstamp L3 sessions (btcusd, ethusd, xrpusd), 155k
+  messages, 124k book events, zero rejects, zero invariant violations, all three chains
+  unbroken. They are committed in `data/samples/` and replayed by `ctest -R capture` on
+  every build.*
 - Published percentile curve for per-event book update latency, on real data, warm and cold.
 - Throughput number with the caveats stated (which instrument, which day, which mix of
   add/cancel/execute).

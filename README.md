@@ -70,9 +70,23 @@ py tools/record_bitstamp.py --pair btcusd --minutes 10     # writes to data/ (gi
 | Line reader | `lob/feed/line_reader.hpp` | Plain, gzipped or stdin. A truncated final line — what an interrupted recording leaves — is a counted decode failure, not a read error. |
 
 `replay --bitstamp` reports capture quality *before* anything derived from the data:
-whether the sequence chain is unbroken, whether the feed's `amount + amount_traded ==
-amount_at_create` identity holds, and what fraction of orders fell outside the book's
-price band. A number computed over a capture with holes in it is not a measurement.
+whether the sequence chain is unbroken, whether any event removed more size than its
+order held, and what fraction of orders fell outside the book's price band. A number
+computed over a capture with holes in it is not a measurement.
+
+Three 10-minute Bitstamp sessions are committed in `data/samples/` and replayed by
+`ctest -R capture` on every build. They are there because the day real data first ran
+through this pipeline it found four defects that synthetic flow could never have
+reached — `amount_traded` read as cumulative when it is per-event, marketable orders
+rested when the exchange publishes them before matching, a REST snapshot trusted to
+seed the book when it carries orders that never clear, and quoting precision assumed
+rather than measured. See [`docs/02`](docs/02-data-and-protocols.md) §3.1–3.2.
+
+| Pair | Spread, median | Removals that were fills | Marketable creates held back |
+|---|---|---|---|
+| btcusd | 1 tick ($0.01) | 0.97% | 10.9% |
+| ethusd | 1 tick ($0.01) | 0.34% | 1.0% |
+| xrpusd | 2 ticks ($0.00002) | 0.95% | 2.5% |
 
 ## What Phase 2a built
 

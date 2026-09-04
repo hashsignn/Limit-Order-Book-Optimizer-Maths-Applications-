@@ -33,7 +33,8 @@ constexpr Nanos kMicrosToNanos = 1000;
 
 }  // namespace
 
-bool BitstampDecoder::decode_line(std::string_view line, Decoded& out) noexcept {
+bool BitstampDecoder::decode_line(std::string_view line, const BookTouch& touch,
+                                  Decoded& out) noexcept {
   out = Decoded{};
   ++stats_.lines;
 
@@ -131,19 +132,6 @@ bool BitstampDecoder::decode_line(std::string_view line, Decoded& out) noexcept 
     }
   }
 
-  // amount + amount_traded == amount_at_create is the feed's own consistency
-  // identity, and it is what licenses reading `amount` as REMAINING size rather
-  // than original size. Checked on every message instead of assumed: if it ever
-  // fails, the split above is being computed from a field that does not mean
-  // what this decoder thinks it means.
-  if (have_traded) {
-    std::int64_t at_create = 0;
-    if (json::parse_decimal(json::find_scalar(data, "amount_at_create"), cfg_.qty_decimals, &at_create) &&
-        at_create != remaining + traded) {
-      ++stats_.identity_violations;
-    }
-  }
-
   auto emit = [&out](EventType t, Nanos ts, SeqNum seq, OrderId oid, Side s, Ticks px, Qty q) {
     if (out.n >= static_cast<int>(sizeof(out.ev) / sizeof(out.ev[0]))) return;
     BookEvent& e = out.ev[out.n++];
@@ -155,10 +143,18 @@ bool BitstampDecoder::decode_line(std::string_view line, Decoded& out) noexcept 
     ++stats_.created;
     if (!in_window(price)) {
       ++stats_.out_of_window;
-      live_[id] = OrderState{remaining, traded, price, side, true};
+      live_[id] = OrderState{remaining, price, side, true, false};
       return true;
     }
-    live_[id] = OrderState{remaining, traded, price, side, false};
+    // Marketable on arrival: published by the exchange before the fills it
+    // causes. Resting it would cross the book and hand it a queue position it
+    // never had. Tracked so its later events resolve, never added.
+    if (marketable(side, price, touch)) {
+      ++stats_.marketable;
+      live_[id] = OrderState{remaining, price, side, false, true};
+      return true;
+    }
+    live_[id] = OrderState{remaining, price, side, false, false};
     emit(EventType::Add, out.ts, ++seq_, id, side, price, remaining);
     return true;
   }
@@ -178,18 +174,55 @@ bool BitstampDecoder::decode_line(std::string_view line, Decoded& out) noexcept 
     return true;
   }
 
-  // How much of this order traded since we last heard about it. Without the
-  // field we cannot tell, and treating the removal as a cancel is the
-  // conservative reading — it under-counts fills rather than inventing them.
-  const Qty d_traded = have_traded ? std::max<Qty>(0, traded - st.traded) : 0;
-  const Qty fill     = std::min(d_traded, st.remaining);
+  // ---- a marketable order that never rested ----
+  // It is not in the book, so nothing here removes size from the book. Its
+  // fills are already accounted for by the RESTING side's own events; counting
+  // them again here would double the traded volume.
+  if (st.pending) {
+    if (is_delete) {
+      if (traded > 0 || remaining == 0) ++stats_.marketable_traded;
+      else                              ++stats_.marketable_cancelled;
+      live_.erase(it);
+      return true;
+    }
+    ++stats_.changed;
+    st.remaining = remaining;
+    st.price     = price;
+    st.side      = side;
+    // The touch moved and what was marketable is now a passive resting order.
+    if (remaining > 0 && !marketable(side, price, touch)) {
+      if (in_window(price)) {
+        ++stats_.marketable_rested;
+        st.pending = false;
+        emit(EventType::Add, out.ts, ++seq_, id, side, price, remaining);
+      } else {
+        ++stats_.out_of_window;
+        st.pending    = false;
+        st.suppressed = true;
+      }
+    }
+    return true;
+  }
+
+  // Size this event traded. PER EVENT, not a difference against a running
+  // total: amount_traded is not cumulative, and differencing it silently
+  // under-counts every order that fills more than once. Without the field we
+  // cannot tell, and treating the removal as a cancel is the conservative
+  // reading — it under-counts fills rather than inventing them.
+  const Qty d_traded = have_traded ? std::max<Qty>(0, traded) : 0;
+
+  // The invariant that replaced the at_create identity: no more size can leave
+  // an order than it had. What traded plus what still remains cannot exceed
+  // what we believed was resting. A breach means a size field is being misread.
+  if (have_traded && d_traded + remaining > st.remaining) ++stats_.size_violations;
+
+  const Qty fill = std::min(d_traded, st.remaining);
   if (fill > 0) {
     emit(EventType::Execute, out.ts, ++seq_, id, st.side, st.price, fill);
     st.remaining -= fill;
     ++stats_.fill_events;
     stats_.filled_qty += fill;
   }
-  if (have_traded) st.traded = traded;
 
   // ---- deleted ----
   if (is_delete) {
@@ -212,12 +245,15 @@ bool BitstampDecoder::decode_line(std::string_view line, Decoded& out) noexcept 
   if (price != st.price) {
     ++stats_.repriced;
     emit(EventType::Delete, out.ts, ++seq_, id, st.side, st.price, st.remaining);
-    if (in_window(price)) {
-      emit(EventType::Add, out.ts, ++seq_, id, side, price, remaining);
-      st = OrderState{remaining, st.traded, price, side, false};
-    } else {
+    if (!in_window(price)) {
       ++stats_.out_of_window;
-      st = OrderState{remaining, st.traded, price, side, true};
+      st = OrderState{remaining, price, side, true, false};
+    } else if (marketable(side, price, touch)) {
+      ++stats_.marketable;
+      st = OrderState{remaining, price, side, false, true};
+    } else {
+      emit(EventType::Add, out.ts, ++seq_, id, side, price, remaining);
+      st = OrderState{remaining, price, side, false, false};
     }
     return true;
   }
@@ -274,10 +310,13 @@ Nanos BitstampDecoder::load_snapshot(std::string_view text, std::vector<BookEven
 
       if (!in_window(px)) {
         ++stats_.out_of_window;
-        live_[id] = OrderState{amt, 0, px, side, true};
         continue;
       }
-      live_[id] = OrderState{amt, 0, px, side, false};
+      // Deliberately NOT registered in live_. The book is built from the
+      // stream, so a snapshot order is not in it; tracking one here would make
+      // the decoder emit a Delete for an order the book never had, which the
+      // book then rejects as unknown. Reading the snapshot must not change what
+      // the decoder believes is resting.
 
       BookEvent e;
       e.ts = ts; e.seq = ++seq_; e.order_id = id;

@@ -81,7 +81,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 
   std::vector<lob::BookEvent> seed;
   (void)dec.load_snapshot(all, seed);
-  for (const lob::BookEvent& e : seed) (void)book.apply(e);
 
   // Split the input on newlines, exactly as the replay path does: a capture
   // file is JSONL, so a truncated final line is the normal end-of-file case
@@ -91,8 +90,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
   while (start < all.size() && lines < 2048) {
     std::size_t nl = all.find('\n', start);
     if (nl == std::string_view::npos) nl = all.size();
+    const lob::BookTouch touch{book.has_bid(), book.has_ask(),
+                               book.has_bid() ? book.best_bid() : 0,
+                               book.has_ask() ? book.best_ask() : 0};
     lob::Decoded out;
-    (void)dec.decode_line(all.substr(start, nl - start), out);
+    (void)dec.decode_line(all.substr(start, nl - start), touch, out);
     for (int i = 0; i < out.n; ++i) (void)book.apply(out.ev[i]);
     start = nl + 1;
     ++lines;

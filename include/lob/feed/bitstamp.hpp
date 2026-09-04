@@ -8,10 +8,25 @@
 //
 //   amount_at_create   size when the order was first booked
 //   amount             size REMAINING right now
-//   amount_traded      cumulative size filled so far
+//   amount_traded      size filled BY THIS EVENT (not cumulative — see below)
 //
 // Those three are on every message, so the reason an order shrank or vanished
-// is stated by the feed rather than inferred. That is the difference between
+// is stated by the feed rather than inferred.
+//
+//   amount_traded is PER EVENT. This was read as cumulative until a real
+//   capture disproved it. Order 2046841350975488 took six partial fills of
+//   0.00572747, 0.00405924, 0.05969432, 0.00784165, 0.02010227 and 0.02334723,
+//   summing to exactly the 0.12077218 that left the book, and was then deleted
+//   with the remaining 0.00422782 cancelled and amount_traded 0. Under a
+//   cumulative reading that order's final traded size is zero. Across the
+//   capture, the SUM of amount_traded matched the size consumed for 84.8% of
+//   completed orders against 50.5% for the last value — and the residual is
+//   amend-downs, which are cancels rather than fills.
+//
+//   Consequence: amount + amount_traded == amount_at_create holds only for an
+//   order with exactly one trading event and no amend. It is not an invariant
+//   and is not checked as one. What IS invariant is that no more size can leave
+//   an order than it had: see size_violations. That is the difference between
 // measuring the queue and guessing at it: volume cancelled ahead of you is free
 // progress up the queue, volume TRADED ahead of you is progress plus the
 // information that someone is buying, and a model that aggregates them is
@@ -72,6 +87,23 @@ struct BitstampConfig {
   Ticks window_ticks = 0;
 };
 
+// The book's touch, passed in so the decoder can tell a passive order from a
+// marketable one.
+//
+// Bitstamp publishes an aggressive order as order_created at its limit price
+// BEFORE publishing the fills it causes, so a decoder that rests every create
+// builds a crossed book. 13% of btcusd creates and 28% of xrpusd creates arrive
+// marketable. Nearly all of them are gone within the same millisecond having
+// traded nothing, which is the signature of a marketable order the exchange
+// refuses to rest; the rest trade out or come back passive after the touch
+// moves. None of them should ever join a queue.
+struct BookTouch {
+  bool  has_bid = false;
+  bool  has_ask = false;
+  Ticks bid     = 0;
+  Ticks ask     = 0;
+};
+
 struct BitstampStats {
   std::uint64_t lines                 = 0;
   std::uint64_t parse_errors          = 0;   // line was not usable JSON
@@ -90,12 +122,20 @@ struct BitstampStats {
   Qty           filled_qty            = 0;
   Qty           cancelled_qty         = 0;
 
+  // Marketable creates: published, never rested. See BookTouch.
+  std::uint64_t marketable            = 0;
+  std::uint64_t marketable_traded     = 0;   // left having traded
+  std::uint64_t marketable_cancelled  = 0;   // left having traded nothing
+  std::uint64_t marketable_rested     = 0;   // became passive and joined the book
+
   // Capture quality.
   std::uint64_t chain_gaps            = 0;   // pre_event_id != previous event_id
   std::uint64_t out_of_window         = 0;   // adds outside the price band
   std::uint64_t suppressed            = 0;   // follow-ups for those adds
   std::uint64_t unknown_order         = 0;   // change/delete for an id never seen
-  std::uint64_t identity_violations   = 0;   // amount + amount_traded != at_create
+  // More size left an order than it had. Unlike the at_create identity this IS
+  // an invariant, and a breach means the decoder is misreading a size field.
+  std::uint64_t size_violations       = 0;
   std::uint64_t missing_amount_traded = 0;   // field absent: split degrades
   std::uint64_t grew                  = 0;   // amended UP, so priority was lost
   std::uint64_t repriced              = 0;   // changed price in place, likewise
@@ -127,11 +167,25 @@ class BitstampDecoder {
   // Decodes one raw capture line. Returns false only when the line yields
   // nothing at all; `out.n` may legitimately be 0 for a control frame or a
   // trade. Never throws, never reads past the line.
-  bool decode_line(std::string_view line, Decoded& out) noexcept;
+  bool decode_line(std::string_view line, const BookTouch& touch, Decoded& out) noexcept;
 
-  // Seeds the book from a REST order_book?group=2 snapshot, appending one Add
-  // per resting order. Returns the snapshot's microtimestamp in ns, or 0 on
-  // failure. Orders outside the window are counted, not appended.
+  // Reads a REST order_book?group=2 snapshot into Add events.
+  //
+  // DO NOT USE THIS TO SEED THE BOOK. It is kept because the snapshot is the
+  // only source of absolute depth, and removing it would hide the evidence for
+  // why it is not trusted.
+  //
+  // The snapshot contains orders whose deletes happened before the capture
+  // began, so nothing in the stream ever removes them and they sit in the book
+  // for good. On btcusd the churn buries them; on xrpusd it does not, and
+  // seeding put phantom asks below the true ask. Measured against the trade
+  // channel — trades must print inside the touch — snapshot seeding scored
+  // 11.1% for xrpusd against 90.2% for building from the stream alone. BTC and
+  // ETH were unchanged either way, so the stream loses nothing near the touch.
+  //
+  // Build from the stream with a warm-up instead. The cost is that levels far
+  // from the touch are missing until an order there happens to change, which
+  // costs nothing for market making and must be stated for any depth study.
   Nanos load_snapshot(std::string_view text, std::vector<BookEvent>& out);
 
   [[nodiscard]] const BitstampStats& stats() const noexcept { return stats_; }
@@ -155,12 +209,16 @@ class BitstampDecoder {
 
  private:
   struct OrderState {
-    Qty   remaining = 0;    // our belief, kept in step with the book
-    Qty   traded    = 0;    // cumulative, as last reported
-    Ticks price     = 0;
-    Side  side      = Side::Bid;
-    bool  suppressed = false;   // outside the window: track it, never emit it
+    Qty   remaining  = 0;   // our belief, kept in step with the book
+    Ticks price      = 0;
+    Side  side       = Side::Bid;
+    bool  suppressed = false;   // outside the price band: tracked, never emitted
+    bool  pending    = false;   // marketable on arrival: tracked, not yet rested
   };
+
+  [[nodiscard]] static bool marketable(Side s, Ticks p, const BookTouch& t) noexcept {
+    return s == Side::Bid ? (t.has_ask && p >= t.ask) : (t.has_bid && p <= t.bid);
+  }
 
   [[nodiscard]] bool in_window(Ticks p) const noexcept {
     if (cfg_.window_ticks == 0) return true;
