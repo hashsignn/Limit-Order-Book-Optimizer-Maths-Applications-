@@ -27,6 +27,8 @@ class ReferenceBook {
   BookError add(OrderId id, Side side, Ticks price, Qty qty, bool mine = false) {
     if (qty <= 0) return BookError::BadQuantity;
     if (index_.count(id)) return BookError::DuplicateOrder;
+    if (side == Side::Bid) { if (has_ask() && price >= best_ask()) return BookError::CrossedBook; }
+    else                   { if (has_bid() && price <= best_bid()) return BookError::CrossedBook; }
     auto& book = (side == Side::Bid) ? bids_ : asks_;
     book[price].push_back(Entry{id, qty, mine});
     index_[id] = Loc{side, price};

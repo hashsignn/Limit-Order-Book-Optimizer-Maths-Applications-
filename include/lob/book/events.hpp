@@ -65,6 +65,12 @@ enum class BookError : std::uint8_t {
   PriceOutOfWindow,  // price outside the book's tick window
   PoolExhausted,     // no free order slots
   BadQuantity,       // non-positive size, or reducing by more than remains
+  // A resting order that would cross or lock the book. Impossible in a real
+  // MBO feed, because the exchange matches such an order instead of booking
+  // it — so it means a sequence gap, a decoder bug, or a caller that should
+  // have gone through the matching engine. Rejected and counted rather than
+  // absorbed, which would leave the book quietly describing an impossible market.
+  CrossedBook,
   Count
 };
 
@@ -76,6 +82,7 @@ enum class BookError : std::uint8_t {
     case BookError::PriceOutOfWindow: return "price_out_of_window";
     case BookError::PoolExhausted:    return "pool_exhausted";
     case BookError::BadQuantity:      return "bad_quantity";
+    case BookError::CrossedBook:      return "crossed_book";
     case BookError::Count:            return "?";
   }
   return "?";

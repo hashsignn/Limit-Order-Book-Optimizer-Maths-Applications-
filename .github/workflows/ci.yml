@@ -31,6 +31,13 @@ jobs:
       - name: Install ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
+      # libFuzzer needs the clang compiler-rt. Without it CMake falls back to
+      # the portable driver, which still runs the same targets — so this is an
+      # upgrade, not a requirement.
+      - name: Install libFuzzer runtime
+        if: matrix.compiler == 'clang'
+        run: sudo apt-get install -y --no-install-recommends libclang-rt-18-dev || true
+
       - name: Configure
         env:
           CC: ${{ matrix.cc }}
@@ -48,6 +55,15 @@ jobs:
       - name: Thorough differential book test
         if: matrix.preset == 'release'
         run: ctest --preset ${{ matrix.preset }} -R "_long" --output-on-failure
+
+      # A longer fuzz pass than the one wired into ctest. Coverage-guided where
+      # the clang runtime installed, blind brute force otherwise — either way
+      # the targets run on every commit rather than when someone remembers.
+      - name: Extended fuzzing
+        if: matrix.preset == 'release'
+        run: |
+          ./build/${{ matrix.preset }}/fuzz_book     -runs=200000 -max_len=512
+          ./build/${{ matrix.preset }}/fuzz_matching -runs=200000 -max_len=512
 
       # The measurement layer is the deliverable, so prove it runs — CI machines
       # are noisy and shared, so this checks that it works, not that it is fast.

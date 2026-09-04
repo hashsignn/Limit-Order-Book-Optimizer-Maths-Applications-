@@ -68,24 +68,72 @@ because the literature uses them, but nothing in the roadmap requires buying dat
 
 | Source | Cost | What | Notes |
 |---|---|---|---|
-| **Crypto exchange public feeds** | **Free** | Binance/OKX/Bybit/Deribit public WebSocket L2 + trades, live; Binance publishes free historical dumps | **Start here.** No account, no entitlement, no credentials — public market data endpoints are open. Crypto perps are large-tick and deep, a good fit for the queue-position problem. Caveat: most publish **L2 diffs, not MBO**, so queue position must be inferred. Deribit and a few others do better. |
-| **[Databento](https://databento.com/) free samples** | **Free** | Sample files for each dataset, including **MBO** for Nasdaq TotalView-ITCH and CME MDP 3.0 | **The L3 data this project needs.** Enough real market-by-order data to build and validate the book, the queue tracking and the fill model. Captured at Equinix NY4 with FPGA hardware timestamping, PTP-synced, so the timestamps are trustworthy. Download without a subscription. |
-| **[LOBSTER](https://lobsterdata.com/) sample data** | **Free** | Sample message + orderbook CSVs for a few Nasdaq tickers and days | Nanosecond timestamps, and the format the literature reports against — useful for checking your reconstruction against published results. ([LOBSTER paper, SSRN](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1977207)) |
-| **FI-2010** | **Free** | Benchmark ML dataset, 10 days, 5 Nasdaq Nordic stocks | Only for comparing against published ML numbers. |
-| ~~Databento full history~~ | Paid | Usage-based | Out of scope. Noted so you know where the samples come from. |
-| ~~LOBSTER full history~~ | Paid | Academic pricing | Out of scope. |
-| ~~Exchange direct / real-time~~ | Paid + colocation | Nasdaq, CME, Cboe | Out of scope. Real-time direct feeds require entitlements and infrastructure this project is not buying. |
-| ~~[Tardis.dev](https://tardis.dev/)~~ | Paid | Normalised historical crypto L2/L3 | Out of scope. Saves scraping effort if that ever becomes the bottleneck. |
+| **[Bitstamp](https://www.bitstamp.net/websocket/v2/) `live_orders` + `live_trades`** | **Free** | Genuine L3: `order_created` / `order_changed` / `order_deleted`, each with an order id, for the **whole book** | **What this project uses.** No account, no API key, no card — verified by capture, not by reading the docs. Recorded with `tools/record_bitstamp.py`, decoded by `include/lob/feed/bitstamp.hpp`. See §3.1 for what the feed actually carries; it is better than expected. |
+| **Crypto exchange public feeds (L2)** | **Free** | Binance/OKX/Bybit public WebSocket L2 + trades; Binance publishes free historical dumps | Fine for a live event loop and for volatility work. **Cannot** give queue position: an L2 diff says a level shrank, never which order left or why. |
+| **[Bitfinex](https://docs.bitfinex.com/reference/ws-public-books) raw books (`prec: R0`)** | **Free** | Per-order updates with ids | Real L3, but **windowed to the top 250 per side**. An order leaving the window is indistinguishable from a cancel, which silently corrupts the cancel/fill split. `tools/record_bitfinex.py` exists; prefer Bitstamp. |
+| **[LOBSTER](https://lobsterdata.com/) sample data** | **Free** | Message + orderbook CSVs for a few Nasdaq tickers and days | Nanosecond timestamps, and the format the literature reports against — useful for checking a reconstruction against published results. ([LOBSTER paper, SSRN](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1977207)) |
+| **FI-2010** | **Free** | Benchmark ML dataset, 10 days, 5 Nasdaq Nordic stocks | Only for comparing against published ML numbers. No order-level data. |
+| ~~Coinbase `level3` / `full`~~ | — | — | **Checked and ruled out.** The retail Advanced Trade WebSocket has no `level3` channel at all, and `level2` now requires authentication. The `full` channel lives on Coinbase Exchange, which is application-gated and institutional. Listed because it is the first thing everyone tries. |
+| ~~[Databento](https://databento.com/) samples~~ | — | Sample MBO for Nasdaq TotalView-ITCH and CME MDP 3.0 | Excellent data — NY4 capture, FPGA hardware timestamps, PTP-synced. Dropped here because sign-up wanted card details, and this project spends nothing. Revisit if equities/futures MBO becomes necessary; the decoder interface is designed so that is a new file, not a change. |
+| ~~Tardis.dev, LOBSTER full, exchange direct~~ | Paid | Normalised historical crypto L2/L3; academic pricing; entitlements + colocation | Out of scope. |
 
 On FI-2010 specifically: it is free, but too small and too old for anything except
 reproducing published ML numbers — and see [arXiv:2308.01915](https://arxiv.org/abs/2308.01915)
-on how badly models trained on it generalise. Do not use it to validate the book or the
-fill model; it has no order-level data.
+on how badly models trained on it generalise.
 
-**Recommended path:** develop against **free crypto L2 + a free Databento MBO sample** in
-parallel. The crypto feed gives you a live event loop for shadow mode; the MBO sample gives
-you correct L3 data to build and verify the queue logic against. Between them, every phase
-of the roadmap is reachable at zero cost.
+### 3.1 What the Bitstamp L3 feed actually carries
+
+Written after decoding a real capture, and it differs from what the documentation
+alone suggested. Every `live_orders` message carries:
+
+| Field | Meaning |
+|---|---|
+| `amount_at_create` | size when the order was first booked |
+| `amount` | size **remaining** right now |
+| `amount_traded` | cumulative size **filled** so far |
+| `event_id` / `pre_event_id` | a chain: each message names its predecessor |
+| `microtimestamp` | exchange time, µs — but see the caveat below |
+
+Three consequences, each of which changed the design:
+
+**The cancel/fill split is exact and needs no join.** The original plan was to match
+`order_deleted` against the trade channel on order id — the approach
+[ob-analytics#28](https://github.com/phil8192/ob-analytics/issues/28) warns is unreliable.
+`amount_traded` makes it a subtraction instead. Since §5 of
+[03-metrics-and-estimators.md](03-metrics-and-estimators.md) makes this split
+non-negotiable — volume *cancelled* ahead of you is free progress up the queue, volume
+*traded* ahead of you is progress **plus** the information that someone is buying — this
+is the single most valuable thing the feed provides. In a 10-minute btcusd capture
+roughly **0.5% of removals were fills**; the other 99.5% were cancels. Aggregating them
+would hide almost the entire mechanism.
+
+**Gaps are detectable rather than suspected.** `pre_event_id` of each message equals
+`event_id` of the last. A capture that chains end to end is *provably* whole, which is
+what makes "a full session with zero invariant violations" a meaningful claim. The
+decoder counts breaks; `replay` reports them before anything derived from the data.
+
+**The clocks do not agree, so never join on time.** In one capture the order channel
+arrived ~570 ms *after* its own exchange timestamp while the trade channel arrived ~88 ms
+*before* its own — the two channels are not on a common clock, and neither is on the
+local one. Worse, order-channel `microtimestamp` values are always whole milliseconds:
+the resolution is 1 ms wearing a microsecond coat, so many events share a timestamp and
+intra-millisecond ordering must come from the chain. Any duration derived from these
+numbers is quantised to 1 ms and must be reported that way. A constant offset does cancel
+out of a *spread*, so per-channel delay **variation** is still a real measurement — that
+is what `replay` reports, per channel, never pooled.
+
+**One structural caveat.** Orders rest very far from the touch — a bid at \$71,743 against
+a \$79,715 touch is 800,000 ticks away at Bitstamp's \$0.01 tick. The book is a flat array
+over a tick window (see [00-scope-and-architecture.md](00-scope-and-architecture.md)), so
+it is banded around the touch and everything outside is **excluded and counted**, never
+silently absorbed. `replay` prints what fraction of adds fell outside. For market making
+this loses nothing that matters; for a depth study it would, and the number is printed so
+that judgement is the reader's.
+
+**Recommended path:** record Bitstamp L3 with `tools/record_bitstamp.py`, replay it with
+`replay --bitstamp`, and keep a short slice in `data/samples/` as a committed regression
+fixture. Synthetic flow only ever proves the decoder agrees with the generator that
+produced it.
 
 ## 4. PCAP and the timestamp hierarchy
 

@@ -4,9 +4,10 @@ An industry-grade market-making limit order book optimizer: quote placement, que
 modelling, and a first-class measurement plane for time delays, distributions and
 latency.
 
-**Status: Phase 4 — baseline strategies and P&L attribution.** The design documents are in
+**Status: hardening — fuzzing and property tests.** The design documents are in
 `docs/`; the code is the measurement plane (Phase 0), the market-by-order book it
-measures (Phase 1), the feature engine that reads the book (Phase 2a), and the matching engine,
+measures (Phase 1) together with the Bitstamp L3 decoder that feeds it real data, the
+feature engine that reads the book (Phase 2a), and the matching engine,
 latency model and simulator loop (Phase 3), and the baseline strategies with their
 P&L attribution (Phase 4). See [`docs/05-roadmap.md`](docs/05-roadmap.md).
 
@@ -23,6 +24,8 @@ ctest --preset release            # 5 suites, ~90 assertions
 ./build/release/bench_book           # cost of each book operation
 ./build/release/sim_demo            # what latency costs a market maker
 ./build/release/backtest            # compare the five baseline strategies
+./build/release/fuzz_book -runs=200000      # fuzz the book's event path
+./build/release/fuzz_matching -runs=200000  # fuzz the matching engine
 ./tools/jitter_baseline.sh 10        # full machine baseline, for docs/BASELINE.md
 ```
 
@@ -48,6 +51,28 @@ on GCC 13 and Clang 18.
 | Reference book | `lob/book/reference_book.hpp` | Deliberately naive `std::map` + `std::list`. Its only job is to be a second opinion in the differential test. |
 | Order map | `lob/book/order_map.hpp` | Open addressing with backward-shift deletion, so a day of balanced adds and cancels does not accumulate tombstones. |
 | Synthetic flow | `lob/sim/flow.hpp` | Zero-intelligence generator. Drives the book hard enough to prove it correct; becomes the Phase 3 simulator's interface once a calibrated model sits behind it. |
+
+## Real data
+
+Free, genuine L3 — order-by-order over the whole book, no account and no API key.
+Bitstamp is the source; see [`docs/02`](docs/02-data-and-protocols.md) §3 for why the
+obvious alternatives were ruled out and §3.1 for what the feed carries.
+
+```bash
+py tools/record_bitstamp.py --pair btcusd --minutes 10     # writes to data/ (gitignored)
+./build/replay --bitstamp data/btcusd_*_bitstamp.jsonl.gz --verify
+```
+
+| Component | Header | What it is for |
+|---|---|---|
+| JSON scanner | `lob/feed/json.hpp` | Non-allocating, total on untrusted input, exact decimal parsing. Prices never pass through `double`; a value with more precision than the tick size can hold is rejected rather than rounded. |
+| Bitstamp decoder | `lob/feed/bitstamp.hpp` | The only file that knows Bitstamp exists. Recovers the cancel-vs-fill split exactly from `amount_traded`, detects capture gaps from the `event_id` chain, and checks the feed's own consistency identity on every message. |
+| Line reader | `lob/feed/line_reader.hpp` | Plain, gzipped or stdin. A truncated final line — what an interrupted recording leaves — is a counted decode failure, not a read error. |
+
+`replay --bitstamp` reports capture quality *before* anything derived from the data:
+whether the sequence chain is unbroken, whether the feed's `amount + amount_traded ==
+amount_at_create` identity holds, and what fraction of orders fell outside the book's
+price band. A number computed over a capture with holes in it is not a measurement.
 
 ## What Phase 2a built
 
@@ -147,6 +172,44 @@ sufficient on its own:
    models' assumptions. It does not.
 3. **No adverse selection in the flow.** The synthetic aggressors are uninformed, so the
    single largest cost a real market maker faces is absent by construction.
+
+## Hardening
+
+**Fuzzing.** `fuzz/` holds two targets against the standard `LLVMFuzzerTestOneInput`
+signature. They build coverage-guided under libFuzzer where its runtime exists, and
+against a portable driver everywhere else — blind brute force is a poor substitute for
+coverage feedback, but a far better one than a target that never runs because a CI image
+lacked a package.
+
+The contract being tested is that the book survives **any** input, not plausible input.
+A real feed delivers truncated packets, sequence gaps, references to orders you never saw,
+and sizes that do not fit. None may crash, corrupt state, or violate an invariant; every
+one must come back as a returned error.
+
+**It found a real defect within seconds.** `add()` accepted an order that crossed the
+book, while `check_invariants()` asserted the book was never crossed — the invariant
+claimed something the implementation did not maintain. A crossing add cannot occur in a
+real MBO feed, because the exchange matches such an order rather than booking it, so
+seeing one means a sequence gap. It is now rejected with `BookError::CrossedBook` and
+counted, which makes the invariant true by construction instead of by hope. 600k fuzz
+cases across both targets since, clean.
+
+**Property tests.** `tests/test_properties.cpp` asserts statements the rest of the system
+silently relies on, over generated streams rather than hand-picked cases:
+
+- quantity is conserved — everything entering the book leaves it or is still resting
+- matching conserves quantity, never fills through the limit, and sweeps best price first
+- imbalance stays in `[-1, 1]`; the weighted mid stays inside the spread
+- percentiles are monotone in `p` and bracket the true extremes
+- a rejected operation leaves the book byte-identical
+- `clear()` then replay equals a fresh replay
+
+`tests/test_order_map.cpp` differentially tests the open-addressed map against
+`std::unordered_map` over 400k random operations. Backward-shift deletion is the subtlest
+code here: when a slot is freed, anything that probed past it must be walked back or it
+becomes unreachable — a silent failure where an order vanishes from the index while still
+sitting in a level's FIFO. It also constructs deliberately colliding keys and erases from
+the head and middle of a probe chain.
 
 **Own orders live in the same FIFO as everyone else's.** That is the decision the project
 turns on: queue position falls out of the structure rather than needing a parallel

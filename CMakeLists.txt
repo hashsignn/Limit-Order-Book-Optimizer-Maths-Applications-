@@ -14,6 +14,7 @@ option(LOB_BUILD_TESTS "Build tests"      ON)
 option(LOB_BUILD_BENCH "Build benchmarks" ON)
 option(LOB_NATIVE      "Build with -march=native" ON)
 option(LOB_WERROR      "Treat warnings as errors"  ON)
+option(LOB_BUILD_FUZZ  "Build fuzz targets"        ON)
 
 add_library(lob_flags INTERFACE)
 target_compile_features(lob_flags INTERFACE cxx_std_20)
@@ -43,12 +44,24 @@ endif()
 # ---- the library ----------------------------------------------------------
 add_library(lob STATIC
   src/tsc.cpp src/histogram.cpp src/journal.cpp src/recorder.cpp
-  src/order_book.cpp)
+  src/order_book.cpp src/bitstamp.cpp src/line_reader.cpp)
 target_include_directories(lob PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(lob PUBLIC lob_flags)
 
 find_package(Threads REQUIRED)
 target_link_libraries(lob PUBLIC Threads::Threads)
+
+# Optional: read gzipped captures directly. Without it the replay tool asks the
+# user to pipe gunzip, which works everywhere, so this is convenience and never
+# a requirement.
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND)
+  target_link_libraries(lob PUBLIC ZLIB::ZLIB)
+  target_compile_definitions(lob PUBLIC LOB_HAVE_ZLIB=1)
+  message(STATUS "zlib found: gzipped captures readable directly")
+else()
+  message(STATUS "zlib not found: gzipped captures need 'gunzip -c file.gz | replay --bitstamp -'")
+endif()
 
 # ---- apps -----------------------------------------------------------------
 add_executable(latency_demo apps/latency_demo/main.cpp)
@@ -69,16 +82,79 @@ target_link_libraries(backtest PRIVATE lob)
 # ---- tests ----------------------------------------------------------------
 if(LOB_BUILD_TESTS)
   enable_testing()
-  foreach(t types arena histogram tsc journal book book_differential features matching simulator strategies pnl)
+
+  # A committed slice of a real venue capture, if one is present. Synthetic data
+  # can only ever prove the decoder agrees with the generator that produced it;
+  # this is the test that the decoder agrees with an exchange.
+  file(GLOB LOB_SAMPLE_CAPTURES "${CMAKE_CURRENT_SOURCE_DIR}/data/samples/*_bitstamp.jsonl*")
+  list(SORT LOB_SAMPLE_CAPTURES)
+  foreach(t types arena histogram tsc journal book book_differential features matching simulator strategies pnl order_map properties bitstamp)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE lob)
     add_test(NAME ${t} COMMAND test_${t})
   endforeach()
 
+  if(LOB_SAMPLE_CAPTURES)
+    list(GET LOB_SAMPLE_CAPTURES 0 LOB_SAMPLE_CAPTURE)
+    string(REGEX REPLACE "_bitstamp\\.jsonl(\\.gz)?$" "_snapshot.json"
+           LOB_SAMPLE_SNAPSHOT "${LOB_SAMPLE_CAPTURE}")
+    if(EXISTS "${LOB_SAMPLE_SNAPSHOT}")
+      target_compile_definitions(test_bitstamp PRIVATE
+        LOB_SAMPLE_CAPTURE="${LOB_SAMPLE_CAPTURE}"
+        LOB_SAMPLE_SNAPSHOT="${LOB_SAMPLE_SNAPSHOT}")
+      message(STATUS "real-capture regression test: ${LOB_SAMPLE_CAPTURE}")
+    else()
+      message(WARNING "sample capture has no matching _snapshot.json; skipping real-data test")
+    endif()
+  else()
+    message(STATUS "no data/samples capture: real-data regression test skipped")
+  endif()
+
   # The thorough differential pass. Same code, more events — too slow to be the
   # default under a sanitizer, so it is a separate test the release CI runs.
   add_test(NAME book_differential_long COMMAND test_book_differential --long)
   set_tests_properties(book_differential_long PROPERTIES TIMEOUT 600)
+endif()
+
+# ---- fuzz targets ---------------------------------------------------------
+# Built two ways. With libFuzzer where its runtime exists: coverage-guided, with
+# corpus minimisation and crash reproduction. Everywhere else, linked against a
+# portable driver so the targets still run on every commit — blind brute force
+# is a poor substitute for coverage feedback, but it is a far better one than a
+# target that never executes.
+if(LOB_BUILD_FUZZ)
+  include(CheckCXXSourceCompiles)
+  # No main() in the probe: libFuzzer supplies its own, and defining one here
+  # makes the link fail for a reason that has nothing to do with availability.
+  set(CMAKE_REQUIRED_FLAGS "-fsanitize=fuzzer")
+  set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=fuzzer")
+  check_cxx_source_compiles(
+    "#include <cstdint>\n#include <cstddef>\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t*, size_t){return 0;}"
+    LOB_HAS_LIBFUZZER)
+  unset(CMAKE_REQUIRED_FLAGS)
+  unset(CMAKE_REQUIRED_LINK_OPTIONS)
+
+  foreach(f book matching bitstamp)
+    if(LOB_HAS_LIBFUZZER)
+      add_executable(fuzz_${f} fuzz/fuzz_${f}.cpp)
+      target_compile_options(fuzz_${f} PRIVATE -fsanitize=fuzzer,address,undefined)
+      target_link_options(fuzz_${f}    PRIVATE -fsanitize=fuzzer,address,undefined)
+    else()
+      add_executable(fuzz_${f} fuzz/fuzz_${f}.cpp fuzz/portable_main.cpp)
+    endif()
+    target_include_directories(fuzz_${f} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(fuzz_${f} PRIVATE lob)
+  endforeach()
+
+  if(LOB_BUILD_TESTS)
+    # A short pass runs as a normal test, so fuzzing gates every commit rather
+    # than being something someone remembers to do occasionally.
+    add_test(NAME fuzz_book_short     COMMAND fuzz_book     -runs=20000)
+    add_test(NAME fuzz_matching_short COMMAND fuzz_matching -runs=20000)
+    add_test(NAME fuzz_bitstamp_short COMMAND fuzz_bitstamp -runs=20000)
+    set_tests_properties(fuzz_book_short fuzz_matching_short fuzz_bitstamp_short
+                         PROPERTIES TIMEOUT 300)
+  endif()
 endif()
 
 # ---- benchmarks -----------------------------------------------------------

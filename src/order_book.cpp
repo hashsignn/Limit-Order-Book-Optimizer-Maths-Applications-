@@ -102,6 +102,19 @@ BookError OrderBook::add(OrderId id, Side side, Ticks price, Qty qty, bool mine)
   if (!in_window(price)) { ++stats_.errors[static_cast<std::size_t>(BookError::PriceOutOfWindow)]; return BookError::PriceOutOfWindow; }
   if (free_.empty())     { ++stats_.errors[static_cast<std::size_t>(BookError::PoolExhausted)];    return BookError::PoolExhausted; }
 
+  // Reject anything that would cross or lock. Checked before any mutation, so a
+  // rejection leaves no trace. Two comparisons against cached values — the
+  // branch predicts perfectly in the common case, and it is what makes
+  // check_invariants()'s non-crossing assertion true by construction rather
+  // than by hope.
+  if (side == Side::Bid) {
+    if (best_ask_ != kNoLevel && price >= to_price(best_ask_))
+      { ++stats_.errors[static_cast<std::size_t>(BookError::CrossedBook)]; return BookError::CrossedBook; }
+  } else {
+    if (best_bid_ != kNoLevel && price <= to_price(best_bid_))
+      { ++stats_.errors[static_cast<std::size_t>(BookError::CrossedBook)]; return BookError::CrossedBook; }
+  }
+
   const std::uint32_t idx = to_index(price);
   const std::uint32_t slot = free_.back();
 
@@ -226,6 +239,10 @@ BookError OrderBook::replace(OrderId old_id, OrderId new_id, Ticks price, Qty qt
 
   // Deliberately a fresh add: the replaced order goes to the BACK of the queue.
   // Losing priority is the real cost of a requote, and the book must model it.
+  // If the add is rejected the old order is already gone. That is the right
+  // outcome for a feed consumer: a Replace means the exchange ALREADY did this,
+  // so the order is genuinely no longer resting. The book stays consistent and
+  // the caller gets the error.
   const BookError a = add(new_id, side, price, qty, mine);
   if (a != BookError::Ok) return a;
   --stats_.adds;
