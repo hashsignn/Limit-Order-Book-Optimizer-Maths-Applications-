@@ -41,7 +41,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # ---- the library ----------------------------------------------------------
-add_library(lob STATIC src/tsc.cpp src/histogram.cpp src/journal.cpp src/recorder.cpp)
+add_library(lob STATIC
+  src/tsc.cpp src/histogram.cpp src/journal.cpp src/recorder.cpp
+  src/order_book.cpp)
 target_include_directories(lob PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(lob PUBLIC lob_flags)
 
@@ -55,18 +57,29 @@ target_link_libraries(latency_demo PRIVATE lob)
 add_executable(jitter_probe apps/jitter_probe/main.cpp)
 target_link_libraries(jitter_probe PRIVATE lob)
 
+add_executable(replay apps/replay/main.cpp)
+target_link_libraries(replay PRIVATE lob)
+
 # ---- tests ----------------------------------------------------------------
 if(LOB_BUILD_TESTS)
   enable_testing()
-  foreach(t types arena histogram tsc journal)
+  foreach(t types arena histogram tsc journal book book_differential)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE lob)
     add_test(NAME ${t} COMMAND test_${t})
   endforeach()
+
+  # The thorough differential pass. Same code, more events — too slow to be the
+  # default under a sanitizer, so it is a separate test the release CI runs.
+  add_test(NAME book_differential_long COMMAND test_book_differential --long)
+  set_tests_properties(book_differential_long PROPERTIES TIMEOUT 600)
 endif()
 
 # ---- benchmarks -----------------------------------------------------------
 if(LOB_BUILD_BENCH)
   add_executable(bench_measure bench/bench_measure.cpp)
   target_link_libraries(bench_measure PRIVATE lob)
+
+  add_executable(bench_book bench/bench_book.cpp)
+  target_link_libraries(bench_book PRIVATE lob)
 endif()

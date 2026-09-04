@@ -40,8 +40,14 @@ jobs:
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
 
+      # Sanitizer builds run the fast differential pass; the optimised jobs run
+      # the thorough one, which is the same code over many more events.
       - name: Test
-        run: ctest --preset ${{ matrix.preset }}
+        run: ctest --preset ${{ matrix.preset }} -E "_long"
+
+      - name: Thorough differential book test
+        if: matrix.preset == 'release'
+        run: ctest --preset ${{ matrix.preset }} -R "_long" --output-on-failure
 
       # The measurement layer is the deliverable, so prove it runs — CI machines
       # are noisy and shared, so this checks that it works, not that it is fast.
@@ -51,3 +57,5 @@ jobs:
           ./build/${{ matrix.preset }}/latency_demo 20000
           ./build/${{ matrix.preset }}/jitter_probe 2
           ./build/${{ matrix.preset }}/bench_measure
+          ./build/${{ matrix.preset }}/replay 200000 --verify
+          ./build/${{ matrix.preset }}/bench_book
