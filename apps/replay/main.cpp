@@ -206,7 +206,8 @@ bool slurp(const char* path, std::string& out) {
 }
 
 int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
-                    const BitstampConfig& base_cfg, Ticks band) {
+                    const BitstampConfig& base_cfg, Ticks band,
+                    bool price_dp_set, bool qty_dp_set) {
   banner("replay: bitstamp capture");
   std::printf("  capture    %s\n", capture);
 
@@ -228,13 +229,35 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
   std::printf("  snapshot   %s\n", snap_path.c_str());
 
   BitstampConfig cfg = base_cfg;
+
+  // Measured from the snapshot unless the caller overrode it. btcusd is quoted
+  // to the cent and xrpusd to five decimals; assuming either would silently
+  // mis-scale the other by a factor of a thousand.
+  unsigned px_dp = 0, qt_dp = 0;
+  if (BitstampDecoder::detect_decimals(snap_text, &px_dp, &qt_dp)) {
+    if (!price_dp_set) cfg.price_decimals = px_dp;
+    if (!qty_dp_set)   cfg.qty_decimals   = qt_dp;
+    std::printf("  precision  %u price decimals, %u size decimals%s\n",
+                cfg.price_decimals, cfg.qty_decimals,
+                (price_dp_set || qty_dp_set) ? " (overridden)" : " (measured from snapshot)");
+  }
+
   Ticks bb = 0, ba = 0;
   if (!BitstampDecoder::snapshot_touch(snap_text, cfg, &bb, &ba)) {
     std::fprintf(stderr, "  snapshot has no two-sided book\n");
     return 2;
   }
+  // Default band is +-2% of the mid, in ticks, rounded to the multiple of 64
+  // the occupancy bitset needs. A fixed tick count cannot serve both a $79,715
+  // book at a $0.01 tick and a $2 book at a $0.00001 one: the same 80,000 ticks
+  // is +-0.5% of one and +-19% of the other.
+  const Ticks mid = (bb + ba) / 2;
+  if (band == 0) {
+    band = (mid / 25) & ~Ticks{63};
+    if (band < 4096) band = 4096;
+  }
   cfg.window_ticks = band;
-  cfg.window_base  = (bb + ba) / 2 - band / 2;
+  cfg.window_base  = mid - band / 2;
 
   std::printf("  touch      %lld / %lld  (spread %lld ticks)\n",
               static_cast<long long>(bb), static_cast<long long>(ba),
@@ -479,9 +502,10 @@ void usage() {
       "\n"
       "  --snapshot <file>     REST seed. Derived from the capture name if omitted.\n"
       "  --verify              check book invariants as it goes\n"
-      "  --price-decimals <n>  ticks per unit of quote currency (default 2)\n"
-      "  --qty-decimals <n>    size precision (default 8)\n"
-      "  --band-ticks <n>      price window width, multiple of 64 (default 80000)\n"
+      "  --price-decimals <n>  override; measured from the snapshot otherwise\n"
+      "  --qty-decimals <n>    override; measured from the snapshot otherwise\n"
+      "  --band-ticks <n>      price window width, multiple of 64. Default is +-2%%\n"
+      "                        of the snapshot mid.\n"
       "\n"
       "  gzipped captures %s\n",
       LineReader::have_gzip() ? "are read directly."
@@ -497,8 +521,9 @@ int main(int argc, char** argv) {
   const char* snapshot = nullptr;
   bool  verify = false;
   int   n      = 1'000'000;
-  Ticks band   = 80'000;
+  Ticks band   = 0;   // 0 = derive from the snapshot mid
   BitstampConfig cfg;
+  bool price_dp_set = false, qty_dp_set = false;
 
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
@@ -508,9 +533,9 @@ int main(int argc, char** argv) {
     else if (std::strcmp(a, "--bitstamp") == 0 && has_next) capture  = argv[++i];
     else if (std::strcmp(a, "--snapshot") == 0 && has_next) snapshot = argv[++i];
     else if (std::strcmp(a, "--price-decimals") == 0 && has_next)
-      cfg.price_decimals = static_cast<unsigned>(std::atoi(argv[++i]));
+      { cfg.price_decimals = static_cast<unsigned>(std::atoi(argv[++i])); price_dp_set = true; }
     else if (std::strcmp(a, "--qty-decimals") == 0 && has_next)
-      cfg.qty_decimals = static_cast<unsigned>(std::atoi(argv[++i]));
+      { cfg.qty_decimals = static_cast<unsigned>(std::atoi(argv[++i])); qty_dp_set = true; }
     else if (std::strcmp(a, "--band-ticks") == 0 && has_next)
       band = std::atoll(argv[++i]);
     else if (a[0] != '-') n = std::atoi(a);
@@ -519,11 +544,11 @@ int main(int argc, char** argv) {
 
   if (capture != nullptr) {
     // The book indexes levels with a 64-bit occupancy word per 64 ticks.
-    if (band <= 0 || band % 64 != 0) {
+    if (band < 0 || band % 64 != 0) {
       std::fprintf(stderr, "--band-ticks must be a positive multiple of 64\n");
       return 2;
     }
-    return replay_bitstamp(capture, snapshot, verify, cfg, band);
+    return replay_bitstamp(capture, snapshot, verify, cfg, band, price_dp_set, qty_dp_set);
   }
   return replay_synthetic(n, verify);
 }

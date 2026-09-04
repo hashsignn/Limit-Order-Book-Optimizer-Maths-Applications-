@@ -288,6 +288,45 @@ Nanos BitstampDecoder::load_snapshot(std::string_view text, std::vector<BookEven
   return ts;
 }
 
+namespace {
+// Digits after the decimal point, 0 if there is no point.
+[[nodiscard]] unsigned fraction_digits(json::View v) noexcept {
+  const std::size_t dot = v.find('.');
+  if (dot == json::View::npos) return 0;
+  unsigned n = 0;
+  for (std::size_t i = dot + 1; i < v.size(); ++i) {
+    if (v[i] < '0' || v[i] > '9') return n;
+    ++n;
+  }
+  return n;
+}
+}  // namespace
+
+bool BitstampDecoder::detect_decimals(std::string_view snapshot,
+                                      unsigned* price_dp, unsigned* qty_dp) noexcept {
+  if (price_dp == nullptr || qty_dp == nullptr) return false;
+  unsigned px = 0, qt = 0;
+  bool any = false;
+  for (int s = 0; s < 2; ++s) {
+    const View rows = json::find(snapshot, (s == 0) ? "bids" : "asks");
+    std::size_t i = 0;
+    View row;
+    while (json::array_next(rows, i, &row)) {
+      std::size_t j = 0;
+      View f;
+      if (!json::array_next(row, j, &f)) continue;
+      px = std::max(px, fraction_digits(f));
+      if (!json::array_next(row, j, &f)) continue;
+      qt = std::max(qt, fraction_digits(f));
+      any = true;
+    }
+  }
+  if (!any) return false;
+  *price_dp = px;
+  *qty_dp   = qt;
+  return true;
+}
+
 bool BitstampDecoder::snapshot_touch(std::string_view text, const BitstampConfig& cfg,
                                      Ticks* best_bid, Ticks* best_ask) noexcept {
   if (best_bid == nullptr || best_ask == nullptr) return false;

@@ -94,20 +94,23 @@ if(LOB_BUILD_TESTS)
     add_test(NAME ${t} COMMAND test_${t})
   endforeach()
 
-  if(LOB_SAMPLE_CAPTURES)
-    list(GET LOB_SAMPLE_CAPTURES 0 LOB_SAMPLE_CAPTURE)
-    string(REGEX REPLACE "_bitstamp\\.jsonl(\\.gz)?$" "_snapshot.json"
-           LOB_SAMPLE_SNAPSHOT "${LOB_SAMPLE_CAPTURE}")
-    if(EXISTS "${LOB_SAMPLE_SNAPSHOT}")
-      target_compile_definitions(test_bitstamp PRIVATE
-        LOB_SAMPLE_CAPTURE="${LOB_SAMPLE_CAPTURE}"
-        LOB_SAMPLE_SNAPSHOT="${LOB_SAMPLE_SNAPSHOT}")
-      message(STATUS "real-capture regression test: ${LOB_SAMPLE_CAPTURE}")
+  # One regression test per committed capture. Each asserts the same thing:
+  # the book survived a real exchange session with zero invariant violations,
+  # over a capture whose event_id chain is provably unbroken.
+  foreach(cap ${LOB_SAMPLE_CAPTURES})
+    string(REGEX REPLACE "_bitstamp\\.jsonl(\\.gz)?$" "_snapshot.json" snap "${cap}")
+    if(EXISTS "${snap}")
+      get_filename_component(capname "${cap}" NAME)
+      string(REGEX REPLACE "_bitstamp\\.jsonl(\\.gz)?$" "" capname "${capname}")
+      add_test(NAME capture_${capname} COMMAND test_bitstamp "${cap}" "${snap}")
+      set_tests_properties(capture_${capname} PROPERTIES TIMEOUT 300)
+      message(STATUS "real-capture test: ${capname}")
     else()
-      message(WARNING "sample capture has no matching _snapshot.json; skipping real-data test")
+      message(WARNING "capture ${cap} has no matching _snapshot.json; skipped")
     endif()
-  else()
-    message(STATUS "no data/samples capture: real-data regression test skipped")
+  endforeach()
+  if(NOT LOB_SAMPLE_CAPTURES)
+    message(STATUS "no data/samples captures: real-data tests skipped")
   endif()
 
   # The thorough differential pass. Same code, more events — too slow to be the

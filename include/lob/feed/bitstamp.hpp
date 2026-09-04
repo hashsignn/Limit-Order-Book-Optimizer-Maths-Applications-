@@ -137,6 +137,16 @@ class BitstampDecoder {
   [[nodiscard]] const BitstampStats& stats() const noexcept { return stats_; }
   [[nodiscard]] std::size_t tracked_orders() const noexcept { return live_.size(); }
 
+  // Infers quoting precision from a snapshot instead of carrying a per-pair
+  // table. Bitstamp quotes btcusd to the cent and xrpusd to five decimals, and
+  // a table of that sort is wrong the first time a venue changes a tick size
+  // without telling anyone. Scanning thousands of real price strings and taking
+  // the longest fraction is a measurement, and its failure mode is safe: under-
+  // detecting makes parse_decimal REJECT the first price it cannot represent
+  // exactly, which is loud, rather than rounding it, which is silent.
+  static bool detect_decimals(std::string_view snapshot,
+                              unsigned* price_dp, unsigned* qty_dp) noexcept;
+
   // Mid price in ticks implied by a snapshot, for sizing the book's window
   // before any event is applied. Returns false if the snapshot has no
   // two-sided top.

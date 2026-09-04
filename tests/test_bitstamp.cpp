@@ -62,9 +62,105 @@ std::string order_msg(const char* event, OrderId id, int order_type, const char*
   return std::string(buf);
 }
 
+// Replays a real venue capture and asserts the book survived it.
+//
+// This is Phase 1's actual acceptance criterion: a full session of real market
+// data with zero invariant violations. Everything else in this file proves the
+// decoder agrees with fixtures I wrote; only this proves it agrees with an
+// exchange. data/samples holds the captures — see .gitignore, which excludes
+// bulk recordings and admits these.
+void replay_real_capture(const char* capture_path, const char* snapshot_path) {
+  std::string snap;
+  {
+    LineReader r;
+    if (!r.open(snapshot_path)) {
+      ::lobtest::report(false, "open snapshot", __FILE__, __LINE__, r.error());
+      return;
+    }
+    std::string_view l;
+    while (r.next(&l)) snap.append(l.data(), l.size());
+  }
+  CHECK(!snap.empty());
+
+  BitstampConfig c = make_cfg();
+  // Measured, not assumed: these three captures are btcusd (cents), ethusd
+  // (cents) and xrpusd (five decimals), and one hardcoded precision cannot be
+  // right for all of them.
+  unsigned px_dp = 0, qt_dp = 0;
+  CHECK(BitstampDecoder::detect_decimals(snap, &px_dp, &qt_dp));
+  c.price_decimals = px_dp;
+  c.qty_decimals   = qt_dp;
+
+  Ticks bb = 0, ba = 0;
+  CHECK(BitstampDecoder::snapshot_touch(snap, c, &bb, &ba));
+  CHECK(bb < ba);                       // a real snapshot is never crossed
+
+  // Centre the window on the touch. Sized here rather than in make_cfg because
+  // these instruments differ by orders of magnitude: at a $0.01 tick, 80,000
+  // ticks is $800 around a $79,715 BTC mid, and the same 80,000 ticks around a
+  // $2 XRP mid is a band the whole book fits inside many times over.
+  // The band is +-2% of the mid, expressed in ticks and rounded up to the
+  // multiple of 64 the occupancy bitset needs. A fixed tick count cannot serve
+  // both a $79,715 book at a $0.01 tick and a $2 book at a $0.00001 one.
+  const Ticks mid = (bb + ba) / 2;
+  Ticks band = (mid / 25) & ~Ticks{63};
+  if (band < 4096) band = 4096;
+  c.window_ticks = band;
+  c.window_base  = mid - band / 2;
+
+  BitstampDecoder d{c};
+  OrderBook book{c.window_base, static_cast<std::uint32_t>(c.window_ticks), 1 << 21};
+
+  std::vector<BookEvent> seed;
+  d.load_snapshot(snap, seed);
+  CHECK(seed.size() > 100);
+  for (const BookEvent& e : seed) CHECK(book.apply(e) == BookError::Ok);
+
+  LineReader reader;
+  if (!reader.open(capture_path)) {
+    ::lobtest::report(false, "open capture", __FILE__, __LINE__, reader.error());
+    return;
+  }
+  std::string_view line;
+  std::uint64_t n = 0, crossed = 0;
+  std::string why;
+  while (reader.next(&line)) {
+    Decoded out;
+    if (!d.decode_line(line, out)) continue;
+    for (int i = 0; i < out.n; ++i) {
+      // A real MBO feed can never book an order that crosses: the exchange
+      // matched it instead of resting it. One here means the decoder built an
+      // event the exchange never sent.
+      if (book.apply(out.ev[i]) == BookError::CrossedBook) ++crossed;
+      if ((++n % 20'000) == 0) CHECK(book.check_invariants(&why));
+    }
+  }
+  CHECK(book.check_invariants(&why));
+  CHECK_EQ(crossed, 0u);
+
+  const BitstampStats& st = d.stats();
+  CHECK(st.lines > 1000);
+  CHECK_EQ(st.chain_gaps, 0u);            // the capture is provably whole
+  CHECK_EQ(st.identity_violations, 0u);   // `amount` really is remaining size
+  CHECK_EQ(st.missing_amount_traded, 0u); // the fill/cancel split is exact
+  // A recording stopped with Ctrl-C ends mid-frame, so one unusable line is
+  // expected; more than that means the decoder is misreading the format.
+  CHECK(st.parse_errors <= 1);
+  CHECK(st.fill_events > 0);              // a capture with no fills proves nothing
+  CHECK(st.cancel_events > 0);
+
+  std::printf("  %s\n    %llu lines -> %llu book events | %llu fills / %llu cancels"
+              " | %llu outside band | %zu resting\n",
+              capture_path, static_cast<unsigned long long>(st.lines),
+              static_cast<unsigned long long>(n),
+              static_cast<unsigned long long>(st.fill_events),
+              static_cast<unsigned long long>(st.cancel_events),
+              static_cast<unsigned long long>(st.out_of_window), book.live_orders());
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   // ======================= json scanner =======================
   {
     constexpr const char* obj = R"({"a":1,"b":"two","c":{"a":9},"d":[1,2],"e":null})";
@@ -350,78 +446,9 @@ int main() {
     CHECK(book.check_invariants(&why));
   }
 
-  // ======================= a real capture, if one is committed =======================
-  // This is Phase 1's actual acceptance criterion: a full session of real venue
-  // data replayed with zero invariant violations. Everything above proves the
-  // decoder agrees with fixtures I wrote; only this proves it agrees with an
-  // exchange. data/samples holds a short slice for exactly this reason — see
-  // .gitignore, which excludes bulk captures and admits this one.
-#if defined(LOB_SAMPLE_CAPTURE) && defined(LOB_SAMPLE_SNAPSHOT)
-  {
-    std::string snap;
-    {
-      LineReader r;
-      CHECK(r.open(LOB_SAMPLE_SNAPSHOT));
-      std::string_view l;
-      while (r.next(&l)) snap.append(l.data(), l.size());
-    }
-    CHECK(!snap.empty());
-
-    BitstampConfig c = make_cfg();
-    Ticks bb = 0, ba = 0;
-    CHECK(BitstampDecoder::snapshot_touch(snap, c, &bb, &ba));
-    CHECK(bb < ba);                       // a real snapshot is never crossed
-    c.window_ticks = 80'000;
-    c.window_base  = (bb + ba) / 2 - c.window_ticks / 2;
-
-    BitstampDecoder d{c};
-    OrderBook book{c.window_base, static_cast<std::uint32_t>(c.window_ticks), 1 << 21};
-
-    std::vector<BookEvent> seed;
-    d.load_snapshot(snap, seed);
-    CHECK(seed.size() > 100);
-    for (const BookEvent& e : seed) CHECK(book.apply(e) == BookError::Ok);
-
-    LineReader reader;
-    CHECK(reader.open(LOB_SAMPLE_CAPTURE));
-    std::string_view line;
-    std::uint64_t n = 0, crossed = 0;
-    std::string why;
-    while (reader.next(&line)) {
-      Decoded out;
-      if (!d.decode_line(line, out)) continue;
-      for (int i = 0; i < out.n; ++i) {
-        // A real MBO feed can never book an order that crosses: the exchange
-        // matched it instead of resting it. One here means the decoder built an
-        // event the exchange never sent.
-        if (book.apply(out.ev[i]) == BookError::CrossedBook) ++crossed;
-        if ((++n % 20'000) == 0) CHECK(book.check_invariants(&why));
-      }
-    }
-    CHECK(book.check_invariants(&why));
-    CHECK_EQ(crossed, 0u);
-
-    const BitstampStats& st = d.stats();
-    CHECK(st.lines > 1000);
-    CHECK_EQ(st.chain_gaps, 0u);            // the capture is provably whole
-    CHECK_EQ(st.identity_violations, 0u);   // `amount` really is remaining size
-    CHECK_EQ(st.missing_amount_traded, 0u); // the fill/cancel split is exact
-    // A capture stopped with Ctrl-C ends mid-frame, so one unusable line is
-    // expected; more than that means the decoder is misreading the format.
-    CHECK(st.parse_errors <= 1);
-    CHECK(st.fill_events > 0);              // a slice with no fills proves nothing
-    CHECK(st.cancel_events > 0);
-
-    std::printf("  real capture: %llu lines, %llu book events, %llu fills / %llu cancels,\n"
-                "                %llu outside window, %zu orders resting at end\n",
-                static_cast<unsigned long long>(st.lines), static_cast<unsigned long long>(n),
-                static_cast<unsigned long long>(st.fill_events),
-                static_cast<unsigned long long>(st.cancel_events),
-                static_cast<unsigned long long>(st.out_of_window), book.live_orders());
-  }
-#else
-  std::printf("  (no data/samples capture committed: real-data test skipped)\n");
-#endif
+  // ======================= a real capture, if one was named =======================
+  if (argc >= 3) replay_real_capture(argv[1], argv[2]);
+  else std::printf("  (no capture given: pass <capture> <snapshot> for the real-data test)\n");
 
   return lobtest::summary("bitstamp");
 }
