@@ -70,8 +70,12 @@ measurement last. Then you can't tell whether a change helped.
   goodness-of-fit diagnostics, from one command.
 - You've found the **exchange round-trip mode** in the inter-arrival distribution
   ([arXiv:2603.24137](https://arxiv.org/abs/2603.24137)) for at least one venue.
-- You can state the tick-size regime (large / medium / small) for each instrument you care
+- ✅ You can state the tick-size regime (large / medium / small) for each instrument you care
   about, with the metric that justifies it.
+  *The spread sits at one tick 99% / 92% / 70% of the time on btcusd / ethusd / xrpusd
+  (time-weighted, 100 ms grid). Large-tick. Confirmed independently by the A/k fit, which is
+  not identified on two of the three because δ has nothing to vary over — see
+  `tools/calibrate.py`.*
 
 > This phase is the deliverable the project is named after. Everything after it is
 > strategy; this is the instrument.

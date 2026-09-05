@@ -8,9 +8,12 @@
 // Five files, each answering a question docs/03 asks:
 //
 //   orders.csv   one row per order that left the book. Lifetime, distance from
-//                the touch when it arrived, and how much of it FILLED versus
-//                how much was CANCELLED. Section 5 forbids aggregating those
-//                two; this is where the split becomes a dataset.
+//                the touch when it arrived, the spread and the volume already
+//                queued at its level, and how much of it FILLED versus how much
+//                was CANCELLED. Section 5 forbids aggregating those two; this
+//                is where the split becomes a dataset. It is also the input to
+//                the A/k calibration: lifetime is exposure, a fill is an event,
+//                and the pair is a Poisson likelihood.
 //   trades.csv   every print, with the touch at the moment it happened, so
 //                markouts can be computed without re-deriving the book.
 //   mid.csv      the touch on a fixed grid — the series markouts read forward
@@ -38,12 +41,14 @@ namespace {
 constexpr std::uint32_t kProfileDepth = 40;   // levels each side for depth.csv
 
 struct Rec {
-  Nanos ts    = 0;    // when it joined the book
-  Ticks px    = 0;
-  Ticks dist  = 0;    // ticks from the same-side touch on arrival, 0 = at it
-  Qty   size  = 0;    // size on arrival
+  Nanos ts     = 0;   // when it joined the book
+  Ticks px     = 0;
+  Ticks dist   = 0;   // ticks from the same-side touch on arrival, 0 = at it
+  Ticks spread = 0;   // spread at arrival, so distance from the MID is recoverable
+  Qty   ahead  = 0;   // volume already queued at this level when we arrived
+  Qty   size   = 0;   // size on arrival
   Qty   filled = 0;
-  int   side  = 0;
+  int   side   = 0;
 };
 
 bool slurp(const char* path, std::string& out) {
@@ -124,7 +129,7 @@ int main(int argc, char** argv) {
   std::FILE* f_arr = open_out(dir, pair, "arrivals");
   if (!f_ord || !f_trd || !f_mid || !f_dep || !f_arr) return 2;
 
-  std::fprintf(f_ord, "t_ms,lifetime_ms,side,dist_ticks,size,filled,cancelled\n");
+  std::fprintf(f_ord, "t_ms,lifetime_ms,side,dist_ticks,spread_ticks,q_ahead,size,filled,cancelled\n");
   std::fprintf(f_trd, "t_ms,px,side,qty,bid,ask\n");
   std::fprintf(f_mid, "t_ms,bid,ask\n");
   std::fprintf(f_arr, "gap_us\n");
@@ -180,7 +185,16 @@ int main(int argc, char** argv) {
         Rec r;
         r.ts = rel; r.px = e.price; r.size = e.qty; r.side = (e.side == Side::Bid) ? 0 : 1;
         // Positive means behind the touch, which is where a passive order sits.
-        r.dist = (e.side == Side::Bid) ? (same - e.price) : (e.price - same);
+        r.dist   = (e.side == Side::Bid) ? (same - e.price) : (e.price - same);
+        // Avellaneda-Stoikov measures the quote's distance from the REFERENCE
+        // price, not from the same-side touch, so the spread has to travel with
+        // the record or delta cannot be reconstructed later.
+        r.spread = book.best_ask() - book.best_bid();
+        // Read BEFORE the event is applied: this is the volume that has to be
+        // consumed or cancelled before a print can reach this order. In a book
+        // whose spread is one tick 99% of the time, this — not distance —
+        // is what decides whether a passive order ever trades.
+        r.ahead  = book.qty_at(e.side, e.price);
         live[e.order_id] = r;
         measurable[e.order_id] = 1;
       }
@@ -197,10 +211,11 @@ int main(int argc, char** argv) {
           if (gone) {
             const Rec& r = it->second;
             const Qty cancelled = std::max<Qty>(0, r.size - r.filled);
-            std::fprintf(f_ord, "%lld,%lld,%d,%lld,%lld,%lld,%lld\n",
+            std::fprintf(f_ord, "%lld,%lld,%d,%lld,%lld,%lld,%lld,%lld,%lld\n",
                          static_cast<long long>(r.ts / 1'000'000),
                          static_cast<long long>((rel - r.ts) / 1'000'000),
                          r.side, static_cast<long long>(r.dist),
+                         static_cast<long long>(r.spread), static_cast<long long>(r.ahead),
                          static_cast<long long>(r.size), static_cast<long long>(r.filled),
                          static_cast<long long>(cancelled));
             ++n_ord;
