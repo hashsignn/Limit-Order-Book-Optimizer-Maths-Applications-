@@ -1,0 +1,487 @@
+{
+  "btcusd": {
+    "pair": "btcusd",
+    "dt_ms": 100.0,
+    "mid": {
+      "p_up": 0.008873720136518772,
+      "p_down": 0.0013651877133105802,
+      "p_flat": 0.9897610921501706,
+      "median_abs_move_ticks": 70.0,
+      "winsorised_sd_ticks": 5.2662978285119895,
+      "raw_sd_ticks": 22.195629740306487,
+      "max_abs_move_ticks": 584.0,
+      "samples": 4395,
+      "steps_kept_pct": 92.87827557058327,
+      "max_spread_ticks": 3.0
+    },
+    "queue": {
+      "mean_touch_size": 50958657.9,
+      "removed_per_s": 24285136.9611496,
+      "drain_fraction_per_step": 0.04765654740909022,
+      "note": "fraction of a full touch queue that leaves per epoch, both sides pooled"
+    },
+    "fill_hazard": [
+      {
+        "bucket": "empty",
+        "n": 238,
+        "fills": 31,
+        "exposure_s": 873.0719999999999,
+        "hazard_per_s": 0.035506808144116414,
+        "p_fill_per_step": 0.0035443846014406866
+      },
+      {
+        "bucket": "q1",
+        "n": 111,
+        "fills": 4,
+        "exposure_s": 439.998,
+        "hazard_per_s": 0.00909095041341097,
+        "p_fill_per_step": 0.0009086819396363355
+      },
+      {
+        "bucket": "q2",
+        "n": 135,
+        "fills": 9,
+        "exposure_s": 875.0379999999999,
+        "hazard_per_s": 0.01028526761123517,
+        "p_fill_per_step": 0.0010279980087685159
+      },
+      {
+        "bucket": "q3",
+        "n": 105,
+        "fills": 1,
+        "exposure_s": 351.628,
+        "hazard_per_s": 0.0028439145915569865,
+        "p_fill_per_step": 0.00028435102373791654
+      },
+      {
+        "bucket": "q4",
+        "n": 141,
+        "fills": 0,
+        "exposure_s": 580.95,
+        "hazard_per_s": 0.0,
+        "p_fill_per_step": 0.0
+      }
+    ],
+    "level_ratio": {
+      "hazard_at_touch_per_s": 0.00622882754779068,
+      "hazard_one_behind_per_s": 0.0,
+      "ratio": 0.0,
+      "fills_one_behind": 0,
+      "measured": false,
+      "note": "fill hazard one tick behind the touch over the hazard at it; unmeasured unless it lands in (0,1) on at least 3 fills"
+    },
+    "imbalance": {
+      "edges": [
+        -1.0,
+        -0.6,
+        -0.2,
+        0.2,
+        0.6,
+        1.0
+      ],
+      "stationary": [
+        0.0669765476442003,
+        0.0038030847242763576,
+        0.06000422564969364,
+        0.37058947813226284,
+        0.4986266638495669
+      ],
+      "transition": [
+        [
+          0.9752066115702479,
+          0.0,
+          0.004132231404958678,
+          0.012396694214876033,
+          0.008264462809917356
+        ],
+        [
+          0.0,
+          0.6363636363636364,
+          0.18181818181818182,
+          0.18181818181818182,
+          0.0
+        ],
+        [
+          0.0038022813688212928,
+          0.0038022813688212928,
+          0.9581749049429658,
+          0.019011406844106463,
+          0.015209125475285171
+        ],
+        [
+          0.0023228803716608595,
+          0.0011614401858304297,
+          0.0040650406504065045,
+          0.9715447154471545,
+          0.020905923344947737
+        ],
+        [
+          0.0004636068613815484,
+          0.0,
+          0.0018544274455261937,
+          0.016226240148354196,
+          0.981455725544738
+        ]
+      ],
+      "median_next_move_ticks": [
+        0.0,
+        null,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "p_next_move_up": [
+        0.004132231404958678,
+        null,
+        0.0,
+        0.004645760743321719,
+        0.013908205841446454
+      ],
+      "p_next_move_down": [
+        0.012396694214876033,
+        null,
+        0.0,
+        0.0011614401858304297,
+        0.0004636068613815484
+      ]
+    },
+    "adverse_selection": {
+      "markout_0.5s_ticks_median": 45.409166666679084,
+      "markout_0.5s_bps": 0.47049203906814563,
+      "p_adverse_0.5s": 0.6,
+      "markout_1.0s_ticks_median": 67.0588235296309,
+      "markout_1.0s_bps": 0.5156162816792473,
+      "p_adverse_1.0s": 0.6272727272727273,
+      "markout_5.0s_ticks_median": 345.5,
+      "markout_5.0s_bps": 0.6955273694826876,
+      "p_adverse_5.0s": 0.7,
+      "n_prints": 220
+    },
+    "usable_for_mdp": false,
+    "unusable_because": [
+      "median mid move is 70 ticks in a book whose spread is 1 tick \u2014 the touch is teleporting, not moving"
+    ]
+  },
+  "ethusd": {
+    "pair": "ethusd",
+    "dt_ms": 100.0,
+    "mid": {
+      "p_up": 0.008591707134852447,
+      "p_down": 0.010833022039596563,
+      "p_flat": 0.980575270825551,
+      "median_abs_move_ticks": 0.5,
+      "winsorised_sd_ticks": 0.10758765503226835,
+      "raw_sd_ticks": 0.5417428721866756,
+      "max_abs_move_ticks": 15.5,
+      "samples": 2677,
+      "steps_kept_pct": 85.41799617102744,
+      "max_spread_ticks": 3.0
+    },
+    "queue": {
+      "mean_touch_size": 2439954.9,
+      "removed_per_s": 1316091.3041623465,
+      "drain_fraction_per_step": 0.05393916519368234,
+      "note": "fraction of a full touch queue that leaves per epoch, both sides pooled"
+    },
+    "fill_hazard": [
+      {
+        "bucket": "empty",
+        "n": 227,
+        "fills": 10,
+        "exposure_s": 683.425,
+        "hazard_per_s": 0.014632183487580936,
+        "p_fill_per_step": 0.0014621483667260904
+      },
+      {
+        "bucket": "q1",
+        "n": 34,
+        "fills": 0,
+        "exposure_s": 112.253,
+        "hazard_per_s": 0.0,
+        "p_fill_per_step": 0.0
+      },
+      {
+        "bucket": "q2",
+        "n": 160,
+        "fills": 3,
+        "exposure_s": 607.682,
+        "hazard_per_s": 0.004936792598760536,
+        "p_fill_per_step": 0.000493557420320978
+      },
+      {
+        "bucket": "q3",
+        "n": 92,
+        "fills": 3,
+        "exposure_s": 599.145,
+        "hazard_per_s": 0.00500713516761385,
+        "p_fill_per_step": 0.0005005881806684487
+      },
+      {
+        "bucket": "q4",
+        "n": 104,
+        "fills": 0,
+        "exposure_s": 356.025,
+        "hazard_per_s": 0.0,
+        "p_fill_per_step": 0.0
+      }
+    ],
+    "level_ratio": {
+      "hazard_at_touch_per_s": 0.004070711752319289,
+      "hazard_one_behind_per_s": 0.004580873022780681,
+      "ratio": 1.1253248329780972,
+      "fills_one_behind": 1,
+      "measured": false,
+      "note": "fill hazard one tick behind the touch over the hazard at it; unmeasured unless it lands in (0,1) on at least 3 fills"
+    },
+    "imbalance": {
+      "edges": [
+        -1.0,
+        -0.6,
+        -0.2,
+        0.2,
+        0.6,
+        1.0
+      ],
+      "stationary": [
+        0.24688995215311005,
+        0.2886762360446571,
+        0.24497607655502393,
+        0.07304625199362041,
+        0.14641148325358852
+      ],
+      "transition": [
+        [
+          0.9716535433070866,
+          0.012598425196850394,
+          0.012598425196850394,
+          0.0031496062992125984,
+          0.0
+        ],
+        [
+          0.020884520884520884,
+          0.9557739557739557,
+          0.014742014742014743,
+          0.0012285012285012285,
+          0.007371007371007371
+        ],
+        [
+          0.01059001512859304,
+          0.03479576399394856,
+          0.9319213313161876,
+          0.01059001512859304,
+          0.012102874432677761
+        ],
+        [
+          0.0,
+          0.0,
+          0.029585798816568046,
+          0.9408284023668639,
+          0.029585798816568046
+        ],
+        [
+          0.0,
+          0.017587939698492462,
+          0.02512562814070352,
+          0.010050251256281407,
+          0.9472361809045227
+        ]
+      ],
+      "median_next_move_ticks": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "p_next_move_up": [
+        0.0031496062992125984,
+        0.0036855036855036856,
+        0.007564296520423601,
+        0.005917159763313609,
+        0.03015075376884422
+      ],
+      "p_next_move_down": [
+        0.015748031496062992,
+        0.009828009828009828,
+        0.007564296520423601,
+        0.005917159763313609,
+        0.01256281407035176
+      ]
+    },
+    "adverse_selection": {
+      "markout_0.5s_ticks_median": 0.0,
+      "markout_0.5s_bps": 0.5518189988257975,
+      "p_adverse_0.5s": 0.48148148148148145,
+      "markout_1.0s_ticks_median": 0.0,
+      "markout_1.0s_bps": 0.6290136120868639,
+      "p_adverse_1.0s": 0.48148148148148145,
+      "markout_5.0s_ticks_median": 1.0,
+      "markout_5.0s_bps": 0.5458173113367276,
+      "p_adverse_5.0s": 0.5185185185185185,
+      "n_prints": 54
+    },
+    "usable_for_mdp": true,
+    "unusable_because": []
+  },
+  "xrpusd": {
+    "pair": "xrpusd",
+    "dt_ms": 100.0,
+    "mid": {
+      "p_up": 0.035056657223796035,
+      "p_down": 0.03611898016997167,
+      "p_flat": 0.9288243626062322,
+      "median_abs_move_ticks": 0.5,
+      "winsorised_sd_ticks": 0.44653634414499505,
+      "raw_sd_ticks": 0.8856973468537772,
+      "max_abs_move_ticks": 29.0,
+      "samples": 2824,
+      "steps_kept_pct": 79.52689383272318,
+      "max_spread_ticks": 3.0
+    },
+    "queue": {
+      "mean_touch_size": 145335370753.7,
+      "removed_per_s": 215592864449.87082,
+      "drain_fraction_per_step": 0.14834163447742962,
+      "note": "fraction of a full touch queue that leaves per epoch, both sides pooled"
+    },
+    "fill_hazard": [
+      {
+        "bucket": "empty",
+        "n": 563,
+        "fills": 19,
+        "exposure_s": 1366.683,
+        "hazard_per_s": 0.013902272875275392,
+        "p_fill_per_step": 0.0013892613692392253
+      },
+      {
+        "bucket": "q1",
+        "n": 69,
+        "fills": 7,
+        "exposure_s": 211.52799999999996,
+        "hazard_per_s": 0.033092545667713025,
+        "p_fill_per_step": 0.003303785018916372
+      },
+      {
+        "bucket": "q2",
+        "n": 65,
+        "fills": 4,
+        "exposure_s": 193.506,
+        "hazard_per_s": 0.020671193658077784,
+        "p_fill_per_step": 0.002064984345938492
+      },
+      {
+        "bucket": "q3",
+        "n": 72,
+        "fills": 2,
+        "exposure_s": 114.123,
+        "hazard_per_s": 0.01752495114919867,
+        "p_fill_per_step": 0.0017509603920182748
+      },
+      {
+        "bucket": "q4",
+        "n": 69,
+        "fills": 0,
+        "exposure_s": 151.82399999999996,
+        "hazard_per_s": 0.0,
+        "p_fill_per_step": 0.0
+      }
+    ],
+    "level_ratio": {
+      "hazard_at_touch_per_s": 0.02061634628864534,
+      "hazard_one_behind_per_s": 0.007982927179738267,
+      "ratio": 0.3872134794386406,
+      "fills_one_behind": 3,
+      "measured": true,
+      "note": "fill hazard one tick behind the touch over the hazard at it; unmeasured unless it lands in (0,1) on at least 3 fills"
+    },
+    "imbalance": {
+      "edges": [
+        -1.0,
+        -0.6,
+        -0.2,
+        0.2,
+        0.6,
+        1.0
+      ],
+      "stationary": [
+        0.2294481981981982,
+        0.11092342342342343,
+        0.33417792792792794,
+        0.03490990990990991,
+        0.2905405405405405
+      ],
+      "transition": [
+        [
+          0.8852988691437803,
+          0.011308562197092083,
+          0.07108239095315025,
+          0.01938610662358643,
+          0.012924071082390954
+        ],
+        [
+          0.028391167192429023,
+          0.917981072555205,
+          0.01892744479495268,
+          0.0,
+          0.03470031545741325
+        ],
+        [
+          0.05064655172413793,
+          0.00646551724137931,
+          0.896551724137931,
+          0.005387931034482759,
+          0.040948275862068964
+        ],
+        [
+          0.13793103448275862,
+          0.0,
+          0.022988505747126436,
+          0.7816091954022989,
+          0.05747126436781609
+        ],
+        [
+          0.011454753722794959,
+          0.013745704467353952,
+          0.032073310423825885,
+          0.006872852233676976,
+          0.9358533791523482
+        ]
+      ],
+      "median_next_move_ticks": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "p_next_move_up": [
+        0.022617124394184167,
+        0.006309148264984227,
+        0.036637931034482756,
+        0.13793103448275862,
+        0.042382588774341354
+      ],
+      "p_next_move_down": [
+        0.08077544426494346,
+        0.05362776025236593,
+        0.028017241379310345,
+        0.05747126436781609,
+        0.004581901489117984
+      ]
+    },
+    "adverse_selection": {
+      "markout_0.5s_ticks_median": 0.0,
+      "markout_0.5s_bps": 0.2158929443125139,
+      "p_adverse_0.5s": 0.49673202614379086,
+      "markout_1.0s_ticks_median": 0.06603773584356532,
+      "markout_1.0s_bps": 0.28262835836457517,
+      "p_adverse_1.0s": 0.5163398692810458,
+      "markout_5.0s_ticks_median": 2.73499999998603,
+      "markout_5.0s_bps": 0.39568847791150175,
+      "p_adverse_5.0s": 0.5816993464052288,
+      "n_prints": 153
+    },
+    "usable_for_mdp": true,
+    "unusable_because": []
+  }
+}

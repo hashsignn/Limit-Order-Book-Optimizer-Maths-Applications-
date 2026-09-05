@@ -44,7 +44,8 @@ endif()
 # ---- the library ----------------------------------------------------------
 add_library(lob STATIC
   src/tsc.cpp src/histogram.cpp src/journal.cpp src/recorder.cpp
-  src/order_book.cpp src/bitstamp.cpp src/line_reader.cpp)
+  src/order_book.cpp src/bitstamp.cpp src/line_reader.cpp
+  src/mdp.cpp src/policy_table.cpp)
 target_include_directories(lob PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(lob PUBLIC lob_flags)
 
@@ -73,6 +74,9 @@ target_link_libraries(jitter_probe PRIVATE lob)
 add_executable(replay apps/replay/main.cpp)
 target_link_libraries(replay PRIVATE lob)
 
+add_executable(solve apps/solve/main.cpp)
+target_link_libraries(solve PRIVATE lob)
+
 add_executable(stats apps/stats/main.cpp)
 target_link_libraries(stats PRIVATE lob)
 
@@ -94,7 +98,7 @@ if(LOB_BUILD_TESTS)
   # this is the test that the decoder agrees with an exchange.
   file(GLOB LOB_SAMPLE_CAPTURES "${CMAKE_CURRENT_SOURCE_DIR}/data/samples/*_bitstamp.jsonl*")
   list(SORT LOB_SAMPLE_CAPTURES)
-  foreach(t types arena histogram tsc journal book book_differential features matching simulator strategies pnl order_map properties bitstamp)
+  foreach(t types arena histogram tsc journal book book_differential features matching simulator strategies pnl order_map properties bitstamp policy)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE lob)
     add_test(NAME ${t} COMMAND test_${t})

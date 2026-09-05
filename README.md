@@ -88,6 +88,29 @@ rather than measured. See [`docs/02`](docs/02-data-and-protocols.md) §3.1–3.2
 | ethusd | 92% | 0.34% | 425 ms | 1.0% |
 | xrpusd | 70% | 0.95% | 722 ms | 2.5% |
 
+## Phase 5 — the optimiser
+
+```bash
+py tools/mdp_params.py --csv csv --out policy      # the process, measured
+./build/solve --pair xrpusd --out policy/xrpusd.bin # value iteration, offline
+```
+
+An MDP over `(inventory, bid quote, ask quote, imbalance)` — 4,455 states, 9 actions —
+solved offline by value iteration and shipped as a byte per state. Reading it is a bounds
+check and an index: **0.6 ns**, random access, measured. No solving in the hot path, ever.
+
+Queue position is in the state and distance from the mid is not, because that is what the
+data said: P(fill) runs 3–10% at the front of the touch queue and 0.00% in the deepest
+quartile, while an Avellaneda–Stoikov `k` could not be identified on two of three
+instruments. The resulting policy skews hard on inventory — at the position limit it pulls
+the quote on the side that would add to the position and works the other at the touch.
+
+**`solve` refuses to run on a process the data could not identify**, naming the parameter.
+btcusd fails on mid dynamics (the reconstructed touch teleports rather than moves) and
+ethusd on the fill rate one tick behind the touch (one observed fill). Only xrpusd solves
+from measurement alone. A table built on a guess is indistinguishable from a calibrated one
+once it is a file on disk.
+
 ## Calibration
 
 `apps/stats` writes the measurement plane as CSV, `tools/figures.py` draws it, and

@@ -16,8 +16,9 @@
 //                and the pair is a Poisson likelihood.
 //   trades.csv   every print, with the touch at the moment it happened, so
 //                markouts can be computed without re-deriving the book.
-//   mid.csv      the touch on a fixed grid — the series markouts read forward
-//                into, and the spread distribution.
+//   mid.csv      the touch on a fixed grid, prices and sizes — the series
+//                markouts read forward into, the spread distribution, and the
+//                imbalance the MDP's state is built from.
 //   depth.csv    mean resting size by tick distance from the touch. The shape
 //                that says whether a book is dense or sparse behind the touch.
 //   arrivals.csv gaps between consecutive events, in microseconds. Section 4
@@ -131,7 +132,7 @@ int main(int argc, char** argv) {
 
   std::fprintf(f_ord, "t_ms,lifetime_ms,side,dist_ticks,spread_ticks,q_ahead,size,filled,cancelled\n");
   std::fprintf(f_trd, "t_ms,px,side,qty,bid,ask\n");
-  std::fprintf(f_mid, "t_ms,bid,ask\n");
+  std::fprintf(f_mid, "t_ms,bid,ask,bid_qty,ask_qty\n");
   std::fprintf(f_arr, "gap_us\n");
 
   std::unordered_map<OrderId, Rec> live;
@@ -230,8 +231,12 @@ int main(int argc, char** argv) {
     if (d.ts != 0 && d.ts >= next_grid) {
       next_grid = d.ts + grid;
       if (warmed && book.has_bid() && book.has_ask()) {
-        std::fprintf(f_mid, "%lld,%lld,%lld\n", static_cast<long long>(rel / 1'000'000),
-                     static_cast<long long>(book.best_bid()), static_cast<long long>(book.best_ask()));
+        // Touch sizes as well as prices: the MDP's state carries imbalance, and
+        // it cannot be recovered from prices alone.
+        std::fprintf(f_mid, "%lld,%lld,%lld,%lld,%lld\n", static_cast<long long>(rel / 1'000'000),
+                     static_cast<long long>(book.best_bid()), static_cast<long long>(book.best_ask()),
+                     static_cast<long long>(book.best_bid_qty()),
+                     static_cast<long long>(book.best_ask_qty()));
         ++n_mid;
         for (int s = 0; s < 2; ++s) {
           const Side side = (s == 0) ? Side::Bid : Side::Ask;

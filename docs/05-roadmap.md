@@ -139,7 +139,10 @@ measurement last. Then you can't tell whether a change helped.
   ([arXiv:2511.15262](https://arxiv.org/abs/2511.15262) on why).
 
 **Done when**
-- Policy evaluation is measured in nanoseconds and is deterministic.
+- ✅ Policy evaluation is measured in nanoseconds and is deterministic.
+  *0.6 ns per lookup, random access across the whole table; the solve is
+  bit-identical on a re-run and the artefact carries a hash of the parameters
+  that produced it.*
 - The tabulated policy beats the best Phase 4 baseline in the simulator, out of sample,
   with a bootstrap CI that excludes zero.
 - You can point at a state and explain why the policy quotes what it quotes. A policy you
