@@ -283,6 +283,12 @@ Nanos BitstampDecoder::load_snapshot(std::string_view text, std::vector<BookEven
   if (!json::parse_u64(json::find_scalar(text, "microtimestamp"), &micros)) return 0;
   const Nanos ts = static_cast<Nanos>(micros) * kMicrosToNanos;
 
+  // The guard is measured from the snapshot's OWN touch, not the book's: the
+  // book may be empty when this runs, and the snapshot is internally consistent
+  // even when it is stale relative to the stream.
+  Ticks snap_bid = 0, snap_ask = 0;
+  if (cfg_.seed_guard > 0 && !snapshot_touch(text, cfg_, &snap_bid, &snap_ask)) return 0;
+
   for (int s = 0; s < 2; ++s) {
     const Side side  = (s == 0) ? Side::Bid : Side::Ask;
     const View rows  = json::find(text, (s == 0) ? "bids" : "asks");
@@ -308,15 +314,22 @@ Nanos BitstampDecoder::load_snapshot(std::string_view text, std::vector<BookEven
       }
       if (amt <= 0) continue;
 
+      // Near the touch the stream is authoritative and the snapshot is
+      // contamination. Skipped silently: these are not errors, they are the
+      // half of the snapshot that is not trusted.
+      if (cfg_.seed_guard > 0) {
+        const Ticks out_by = (side == Side::Bid) ? snap_bid - px : px - snap_ask;
+        if (out_by < cfg_.seed_guard) continue;
+      }
+
       if (!in_window(px)) {
         ++stats_.out_of_window;
         continue;
       }
-      // Deliberately NOT registered in live_. The book is built from the
-      // stream, so a snapshot order is not in it; tracking one here would make
-      // the decoder emit a Delete for an order the book never had, which the
-      // book then rejects as unknown. Reading the snapshot must not change what
-      // the decoder believes is resting.
+      // Registered, because unlike the near-touch orders these DO go into the
+      // book, and the decoder must know about them or it will emit deletes the
+      // book rejects as unknown.
+      live_[id] = OrderState{amt, px, side, false, false};
 
       BookEvent e;
       e.ts = ts; e.seq = ++seq_; e.order_id = id;

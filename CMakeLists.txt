@@ -73,6 +73,9 @@ target_link_libraries(jitter_probe PRIVATE lob)
 add_executable(replay apps/replay/main.cpp)
 target_link_libraries(replay PRIVATE lob)
 
+add_executable(tape apps/tape/main.cpp)
+target_link_libraries(tape PRIVATE lob)
+
 add_executable(sim_demo apps/sim_demo/main.cpp)
 target_link_libraries(sim_demo PRIVATE lob)
 

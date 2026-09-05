@@ -214,7 +214,7 @@ bool slurp(const char* path, std::string& out) {
 int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
                     const BitstampConfig& base_cfg, Ticks band,
                     bool price_dp_set, bool qty_dp_set,
-                    bool seed_snapshot, Nanos warmup_ns) {
+                    double seed_guard_pct, Nanos warmup_ns) {
   banner("replay: bitstamp capture");
   std::printf("  capture    %s\n", capture);
 
@@ -265,6 +265,7 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
   }
   cfg.window_ticks = band;
   cfg.window_base  = mid - band / 2;
+  cfg.seed_guard   = static_cast<Ticks>(static_cast<double>(mid) * seed_guard_pct / 100.0);
 
   std::printf("  touch      %lld / %lld  (spread %lld ticks)\n",
               static_cast<long long>(bb), static_cast<long long>(ba),
@@ -285,17 +286,16 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
   // the same either way. --seed-snapshot exists to reproduce that comparison.
   std::vector<BookEvent> seed;
   const Nanos snap_ts = dec.load_snapshot(snap_text, seed);
-  if (seed_snapshot) {
-    std::uint64_t seed_rejects = 0;
-    for (const BookEvent& e : seed) {
-      if (book.apply(e) != BookError::Ok) ++seed_rejects;
-    }
-    std::printf("  seeded     %zu orders (%llu rejected) -- NOT TRUSTED, see --help\n",
-                seed.size(), static_cast<unsigned long long>(seed_rejects));
-  } else {
-    std::printf("  snapshot   %zu orders read for scale only, book built from the stream\n",
-                seed.size());
+  std::uint64_t seed_rejects = 0;
+  for (const BookEvent& e : seed) {
+    if (book.apply(e) != BookError::Ok) ++seed_rejects;
   }
+  std::printf("  seeded     %zu snapshot orders beyond +-%lld ticks (%.2f%%) of the touch"
+              " (%llu rejected)\n",
+              seed.size(), static_cast<long long>(cfg.seed_guard), seed_guard_pct,
+              static_cast<unsigned long long>(seed_rejects));
+  std::printf("             inside that guard the stream is authoritative: near-touch orders\n"
+              "             churn in seconds, so the snapshot's stale ones are contamination\n");
   std::printf("  warm-up    %.0f s before market state is recorded (snapshot ts %lld)\n",
               static_cast<double>(warmup_ns) / 1e9, static_cast<long long>(snap_ts));
 
@@ -311,6 +311,7 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
   std::uint64_t by_type[static_cast<std::size_t>(EventType::Count)] = {};
   std::uint64_t applied = 0, rejected = 0, invariant_checks = 0;
   Nanos first_ts = 0, last_ts = 0;
+  Ticks mid_lo = 0, mid_hi = 0;
 
   std::string_view line;
   const std::uint64_t t0 = tsc::now_serialized();
@@ -345,6 +346,9 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
 
       fe.update(book, e.ts);
       if (warm && book.has_bid() && book.has_ask()) {
+        const Ticks m = (book.best_bid() + book.best_ask()) / 2;
+        if (mid_lo == 0 || m < mid_lo) mid_lo = m;
+        if (m > mid_hi) mid_hi = m;
         spread_hist.record(book.spread());
         depth_hist.record(book.best_bid_qty() + book.best_ask_qty());
       }
@@ -396,6 +400,15 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
   std::printf("  unknown order    %llu  (change/delete for an id never seen: pre-snapshot\n"
               "                   orders, expected early and near zero after)\n",
               static_cast<unsigned long long>(ds.unknown_order));
+  // The guard only works if the price stayed inside it; otherwise a stale deep
+  // order becomes the touch. Reported rather than assumed.
+  if (mid_hi > 0 && cfg.seed_guard > 0) {
+    const Ticks moved = mid_hi - mid_lo;
+    std::printf("  price range      %lld ticks over the session, guard is %lld  %s\n",
+                static_cast<long long>(moved), static_cast<long long>(cfg.seed_guard),
+                moved < cfg.seed_guard ? "\033[32mOK\033[0m"
+                                       : "\033[31mTOO NARROW — widen --seed-guard-pct\033[0m");
+  }
   std::printf("  outside window   %llu adds, %llu follow-ups suppressed\n",
               static_cast<unsigned long long>(ds.out_of_window),
               static_cast<unsigned long long>(ds.suppressed));
@@ -550,9 +563,9 @@ void usage() {
       "  --verify              check book invariants as it goes\n"
       "  --warmup-sec <s>      ignore market state for this long while the book\n"
       "                        fills in from the stream (default 60)\n"
-      "  --seed-snapshot       seed the book from the REST snapshot. Off by default:\n"
-      "                        it carries orders whose deletes predate the capture,\n"
-      "                        which never clear. Kept to reproduce the comparison.\n"
+      "  --seed-guard-pct <p>  seed snapshot orders more than p%% of mid away from\n"
+      "                        the touch; build everything nearer from the stream.\n"
+      "                        Default 0.30. Use 0 to seed nothing at all.\n"
       "  --price-decimals <n>  override; measured from the snapshot otherwise\n"
       "  --qty-decimals <n>    override; measured from the snapshot otherwise\n"
       "  --band-ticks <n>      price window width, multiple of 64. Default is +-2%%\n"
@@ -574,13 +587,18 @@ int main(int argc, char** argv) {
   int   n      = 1'000'000;
   Ticks band   = 0;   // 0 = derive from the snapshot mid
   BitstampConfig cfg;
-  bool price_dp_set = false, qty_dp_set = false, seed_snapshot = false;
+  bool price_dp_set = false, qty_dp_set = false;
+  double seed_guard_pct = 0.30;
   Nanos warmup_ns = 60'000'000'000LL;
 
   for (int i = 1; i < argc; ++i) {
     const char* a = argv[i];
     const bool has_next = (i + 1 < argc);
     if      (std::strcmp(a, "--verify")   == 0) verify = true;
+    else if (std::strcmp(a, "--seed-guard-pct") == 0 && has_next)
+      seed_guard_pct = std::atof(argv[++i]);
+    else if (std::strcmp(a, "--warmup-sec") == 0 && has_next)
+      warmup_ns = static_cast<Nanos>(std::atof(argv[++i]) * 1e9);
     else if (std::strcmp(a, "--help")     == 0) { usage(); return 0; }
     else if (std::strcmp(a, "--bitstamp") == 0 && has_next) capture  = argv[++i];
     else if (std::strcmp(a, "--snapshot") == 0 && has_next) snapshot = argv[++i];
@@ -601,7 +619,7 @@ int main(int argc, char** argv) {
       return 2;
     }
     return replay_bitstamp(capture, snapshot, verify, cfg, band, price_dp_set, qty_dp_set,
-                           seed_snapshot, warmup_ns);
+                           seed_guard_pct, warmup_ns);
   }
   return replay_synthetic(n, verify);
 }

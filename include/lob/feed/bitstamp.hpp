@@ -85,6 +85,13 @@ struct BitstampConfig {
   // window_ticks == 0 disables the check and lets the book do the rejecting.
   Ticks window_base  = 0;
   Ticks window_ticks = 0;
+
+  // Minimum distance from the snapshot's own touch, in ticks, for a snapshot
+  // order to be seeded — see load_snapshot. 0 reads the whole snapshot, which
+  // is the measurably wrong setting and is kept only to reproduce that result.
+  // Reading the snapshot and declining to apply the events is how you seed
+  // nothing; that is the caller's decision, not this field's.
+  Ticks seed_guard   = 0;
 };
 
 // The book's touch, passed in so the decoder can tell a passive order from a
@@ -169,23 +176,40 @@ class BitstampDecoder {
   // trade. Never throws, never reads past the line.
   bool decode_line(std::string_view line, const BookTouch& touch, Decoded& out) noexcept;
 
-  // Reads a REST order_book?group=2 snapshot into Add events.
+  // Reads a REST order_book?group=2 snapshot into Add events, seeding only the
+  // levels beyond cfg.seed_guard ticks from the snapshot's own touch.
   //
-  // DO NOT USE THIS TO SEED THE BOOK. It is kept because the snapshot is the
-  // only source of absolute depth, and removing it would hide the evidence for
-  // why it is not trusted.
+  // Seeding the WHOLE snapshot is wrong. It contains orders whose deletes
+  // happened before the capture began, so nothing in the stream removes them
+  // and they rest forever. Measured against the trade channel — a trade must
+  // print inside the touch — full seeding scored 11.1% on xrpusd against 90.2%
+  // for the stream alone.
   //
-  // The snapshot contains orders whose deletes happened before the capture
-  // began, so nothing in the stream ever removes them and they sit in the book
-  // for good. On btcusd the churn buries them; on xrpusd it does not, and
-  // seeding put phantom asks below the true ask. Measured against the trade
-  // channel — trades must print inside the touch — snapshot seeding scored
-  // 11.1% for xrpusd against 90.2% for building from the stream alone. BTC and
-  // ETH were unchanged either way, so the stream loses nothing near the touch.
+  // But seeding NOTHING is wasteful. A stream-built book holds only what has
+  // churned since recording started, about 240 orders against the real book's
+  // 8,000, so it understates depth badly and its spread tail is fiction.
   //
-  // Build from the stream with a warm-up instead. The cost is that levels far
-  // from the touch are missing until an order there happens to change, which
-  // costs nothing for market making and must be stated for any depth study.
+  // The split is the fix, and the reason it works is that the two populations
+  // behave differently: orders near the touch turn over in seconds, so the
+  // stream reconstructs them exactly and the snapshot's stale ones are pure
+  // contamination; orders far out may rest for months — one in these captures
+  // carries an id from years ago — so the snapshot is their only source and its
+  // staleness there costs a little depth accuracy rather than a wrong touch.
+  //
+  // Measured, trades inside the touch against guard width:
+  //
+  //     guard      btcusd   ethusd   xrpusd    levels held (xrpusd)
+  //     none        85.0%    88.9%    90.2%      152
+  //     0.05%       84.5%    88.9%    51.6%     2578
+  //     0.10%       85.0%    88.9%    90.2%     2579
+  //     0.20%       85.0%    88.9%    90.2%     2574
+  //
+  // The cliff sits between 0.05% and 0.10% of mid, and density barely changes
+  // across the range, so a wide guard costs nothing. 0.3% is the default.
+  //
+  // One limitation, and it is why replay reports the observed price range: the
+  // guard must be wider than the price moves during the capture, or a stale
+  // deep order becomes the touch. These ten-minute sessions moved 0.06%.
   Nanos load_snapshot(std::string_view text, std::vector<BookEvent>& out);
 
   [[nodiscard]] const BitstampStats& stats() const noexcept { return stats_; }
