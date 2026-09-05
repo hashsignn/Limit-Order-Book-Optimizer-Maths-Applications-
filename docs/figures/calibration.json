@@ -1,0 +1,85 @@
+{
+  "model": "lambda(delta) = A * exp(-k * delta), delta in ticks from mid",
+  "estimator": "per-order Poisson MLE, Newton-Raphson, observed-information SEs",
+  "fit_range_ticks": 32.0,
+  "k_stability_ratio": {
+    "btcusd": {
+      "ratio": NaN,
+      "sign_change": true,
+      "k_by_cutoff": {
+        "4": 48.14755774089591,
+        "8": 49.51767580538375,
+        "16": 48.24083633695348,
+        "32": 0.019927893795701614,
+        "64": -0.018866346615768893,
+        "128": -0.0009590485584896548
+      }
+    },
+    "ethusd": {
+      "ratio": NaN,
+      "sign_change": true,
+      "k_by_cutoff": {
+        "4": -0.15725399246868713,
+        "8": 0.26499861198235974,
+        "16": 0.09515563997042857,
+        "32": 0.10105485039735324,
+        "64": 0.07982057578672454,
+        "128": 0.08162775926080776
+      }
+    },
+    "xrpusd": {
+      "ratio": 2.854108132567033,
+      "sign_change": false,
+      "k_by_cutoff": {
+        "4": 0.5291257524562835,
+        "8": 0.40929193814190235,
+        "16": 0.35277056705451365,
+        "32": 0.2166712701261575,
+        "64": 0.18539092700050536,
+        "128": 0.18540322527752465
+      }
+    }
+  },
+  "instruments": {
+    "btcusd": {
+      "A": 0.005381356991912251,
+      "k": 0.019927893795701614,
+      "se_A": 0.0015023702366452644,
+      "se_k": 0.04363740402498724,
+      "loglik": -63.97736996925327,
+      "fills": 15,
+      "exposure_s": 2949.262,
+      "n_orders": 1320,
+      "dmax": 32.0,
+      "inside_spread_excluded": 238,
+      "monotone": false
+    },
+    "ethusd": {
+      "A": 0.0039669526036029855,
+      "k": 0.10105485039735324,
+      "se_A": 0.0013389458863906842,
+      "se_k": 0.03847986968930558,
+      "loglik": -75.64744208690766,
+      "fills": 14,
+      "exposure_s": 8624.997,
+      "n_orders": 3959,
+      "dmax": 32.0,
+      "inside_spread_excluded": 207,
+      "monotone": false
+    },
+    "xrpusd": {
+      "A": 0.017436165331147484,
+      "k": 0.2166712701261575,
+      "se_A": 0.003868927133930349,
+      "se_k": 0.03920336238256692,
+      "loglik": -144.18846759114493,
+      "fills": 30,
+      "exposure_s": 13356.148000000001,
+      "n_orders": 6008,
+      "dmax": 32.0,
+      "inside_spread_excluded": 380,
+      "monotone": true
+    }
+  },
+  "caveat": "Ten minutes per instrument. Fill counts are 24-65 per instrument, so these are order-of-magnitude estimates. A-S has no queue term and these books sit at a one-tick spread almost always, where queue position rather than distance decides fills."
+}

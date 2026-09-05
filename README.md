@@ -82,11 +82,58 @@ rested when the exchange publishes them before matching, a REST snapshot trusted
 seed the book when it carries orders that never clear, and quoting precision assumed
 rather than measured. See [`docs/02`](docs/02-data-and-protocols.md) §3.1–3.2.
 
-| Pair | Spread, median | Removals that were fills | Marketable creates held back |
-|---|---|---|---|
-| btcusd | 1 tick ($0.01) | 0.97% | 10.9% |
-| ethusd | 1 tick ($0.01) | 0.34% | 1.0% |
-| xrpusd | 2 ticks ($0.00002) | 0.95% | 2.5% |
+| Pair | Spread at 1 tick | Removals that were fills | Median order life | Marketable held back |
+|---|---|---|---|---|
+| btcusd | 99% of the time | 0.97% | 249 ms | 10.9% |
+| ethusd | 92% | 0.34% | 425 ms | 1.0% |
+| xrpusd | 70% | 0.95% | 722 ms | 2.5% |
+
+## Phase 5 — the optimiser
+
+```bash
+py tools/mdp_params.py --csv csv --out policy      # the process, measured
+./build/solve --pair xrpusd --out policy/xrpusd.bin # value iteration, offline
+```
+
+An MDP over `(inventory, bid quote, ask quote, imbalance)` — 4,455 states, 9 actions —
+solved offline by value iteration and shipped as a byte per state. Reading it is a bounds
+check and an index: **0.6 ns**, random access, measured. No solving in the hot path, ever.
+
+Queue position is in the state and distance from the mid is not, because that is what the
+data said: P(fill) runs 3–10% at the front of the touch queue and 0.00% in the deepest
+quartile, while an Avellaneda–Stoikov `k` could not be identified on two of three
+instruments. The resulting policy skews hard on inventory — at the position limit it pulls
+the quote on the side that would add to the position and works the other at the touch.
+
+**`solve` refuses to run on a process the data could not identify**, naming the parameter.
+btcusd fails on mid dynamics (the reconstructed touch teleports rather than moves) and
+ethusd on the fill rate one tick behind the touch (one observed fill). Only xrpusd solves
+from measurement alone. A table built on a guess is indistinguishable from a calibrated one
+once it is a file on disk.
+
+## Calibration
+
+`apps/stats` writes the measurement plane as CSV, `tools/figures.py` draws it, and
+`tools/calibrate.py` fits the Avellaneda–Stoikov fill intensity λ(δ) = A·e^(−kδ) by
+per-order Poisson MLE — every resting order is an exposure and every fill an event, so
+orders cancelled before filling are not missing data but exposure without an event.
+
+The answer is that **two of the three instruments do not admit the model**:
+
+| Pair | A (/s) | k (/tick) | k across fit cutoffs | Verdict |
+|---|---|---|---|---|
+| btcusd | 0.0054 ± 0.0015 | 0.020 ± 0.044 | 48 → 0.02 → −0.02 | not identified — k changes sign |
+| ethusd | 0.0040 ± 0.0013 | 0.101 ± 0.038 | −0.16 → 0.27 → 0.08 | not identified — k changes sign |
+| xrpusd | 0.0174 ± 0.0039 | **0.217 ± 0.039** | 0.53 → 0.22 → 0.19 | usable, 2.9× across cutoffs |
+
+This is a finding, not a failure. A-S is a **small-tick** model: δ is the quote's distance
+from the mid, and it presumes δ has room to vary. These books sit at a one-tick spread 70–99%
+of the time, so δ barely varies and what actually decides whether a passive order trades is
+its **queue position** — P(fill) runs 3–10% at the front of the touch queue and hits **0.00%
+in the deepest quartile** on all three instruments. That is the queue-reactive regime, and it
+is the same conclusion the spread distribution reached about Phase 5's architecture.
+
+![A and k calibration](docs/figures/07_ak_calibration.png)
 
 ## What Phase 2a built
 

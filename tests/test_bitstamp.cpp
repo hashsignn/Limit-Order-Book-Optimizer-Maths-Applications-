@@ -111,17 +111,18 @@ void replay_real_capture(const char* capture_path, const char* snapshot_path) {
   if (band < 4096) band = 4096;
   c.window_ticks = band;
   c.window_base  = mid - band / 2;
+  c.seed_guard   = static_cast<Ticks>(static_cast<double>(mid) * 0.003);
 
   BitstampDecoder d{c};
   OrderBook book{c.window_base, static_cast<std::uint32_t>(c.window_ticks), 1 << 21};
 
-  // The snapshot is read for scale only. It is NOT used to seed: it carries
-  // orders whose deletes happened before the capture began, so nothing in the
-  // stream removes them. Measured against the trade channel, seeding scored
-  // 11.1% of trades inside the touch on xrpusd against 90.2% without it.
+  // Only the DEEP half of the snapshot seeds the book. Near the touch the
+  // stream is authoritative — those orders churn in seconds, so the snapshot's
+  // stale ones are contamination and cost 39 points of accuracy on xrpusd.
   std::vector<BookEvent> seed;
   d.load_snapshot(snap, seed);
   CHECK(seed.size() > 100);
+  for (const BookEvent& e : seed) CHECK(book.apply(e) == BookError::Ok);
 
   LineReader reader;
   if (!reader.open(capture_path)) {
@@ -474,24 +475,60 @@ int main(int argc, char** argv) {
     std::vector<BookEvent> seed;
     const Nanos ts = d.load_snapshot(kSnapshot, seed);
     CHECK_EQ(ts, 1788551766754717LL * 1000);
-    // Reading the snapshot must not change what the decoder believes is
-    // resting: the book is built from the stream, and a snapshot order is not
-    // in it.
-    CHECK_EQ(d.tracked_orders(), 0u);
+    // With no guard the whole snapshot is read — the measurably wrong setting,
+    // kept so the comparison behind the guard can be reproduced.
     // Four bids, but one is the $71,743 outlier and falls outside the window.
     CHECK_EQ(seed.size(), 5u);
     CHECK_EQ(d.stats().out_of_window, 1u);
     CHECK_EQ(d.stats().parse_errors, 0u);
-    CHECK(seed[0].type == EventType::Add);
-    CHECK(seed[0].side == Side::Bid);
-    CHECK_EQ(seed[0].price, 7'971'538);
-    CHECK_EQ(seed[0].qty, 6'272'315);
+    if (seed.size() >= 2) {
+      CHECK(seed[0].type == EventType::Add);
+      CHECK(seed[0].side == Side::Bid);
+      CHECK_EQ(seed[0].price, 7'971'538);
+      CHECK_EQ(seed[0].qty, 6'272'315);
 
-    // Two orders at the same price stay two orders. Aggregating them here would
-    // destroy queue position before the book ever sees it, which is the one
-    // thing L3 data is for.
-    CHECK_EQ(seed[1].price, 7'971'538);
-    CHECK_EQ(seed[1].order_id, 2046839975448576ULL);
+      // Two orders at the same price stay two orders. Aggregating them here
+      // would destroy queue position before the book ever sees it, which is
+      // the one thing L3 data is for.
+      CHECK_EQ(seed[1].price, 7'971'538);
+      CHECK_EQ(seed[1].order_id, 2046839975448576ULL);
+    }
+  }
+
+  // ---- the seed guard ----
+  // Only the DEEP half of a snapshot may seed the book. Orders near the touch
+  // churn in seconds, so the stream reconstructs them exactly and the
+  // snapshot's stale ones are contamination — worth 39 points of accuracy on
+  // xrpusd, measured as the share of trades printing inside the touch.
+  {
+    BitstampConfig c = make_cfg();
+    c.seed_guard = 1;                    // exclude only orders AT the touch
+    BitstampDecoder d{c};
+    std::vector<BookEvent> seed;
+    d.load_snapshot(kSnapshot, seed);
+
+    // Both bids at 7'971'538 and the ask at 7'972'811 are the touch: excluded.
+    // 7'971'524 and 7'973'000 are behind it: kept. The $71,743 bid is far
+    // enough out to qualify but falls outside the price window.
+    CHECK_EQ(seed.size(), 2u);
+    if (seed.size() == 2) {
+      CHECK_EQ(seed[0].price, 7'971'524);
+      CHECK_EQ(seed[1].price, 7'973'000);
+    }
+    // Seeded orders ARE registered, unlike the near-touch ones: they go into
+    // the book, so the decoder must know about them or it will emit deletes
+    // the book rejects as unknown.
+    CHECK_EQ(d.tracked_orders(), 2u);
+  }
+
+  // A guard wider than the book seeds nothing at all.
+  {
+    BitstampConfig c = make_cfg();
+    c.seed_guard = 1'000'000;
+    BitstampDecoder d{c};
+    std::vector<BookEvent> seed;
+    d.load_snapshot(kSnapshot, seed);
+    CHECK_EQ(seed.size(), 0u);
   }
 
   // A two-column snapshot means the endpoint aggregated by price and there are

@@ -70,8 +70,12 @@ measurement last. Then you can't tell whether a change helped.
   goodness-of-fit diagnostics, from one command.
 - You've found the **exchange round-trip mode** in the inter-arrival distribution
   ([arXiv:2603.24137](https://arxiv.org/abs/2603.24137)) for at least one venue.
-- You can state the tick-size regime (large / medium / small) for each instrument you care
+- ✅ You can state the tick-size regime (large / medium / small) for each instrument you care
   about, with the metric that justifies it.
+  *The spread sits at one tick 99% / 92% / 70% of the time on btcusd / ethusd / xrpusd
+  (time-weighted, 100 ms grid). Large-tick. Confirmed independently by the A/k fit, which is
+  not identified on two of the three because δ has nothing to vary over — see
+  `tools/calibrate.py`.*
 
 > This phase is the deliverable the project is named after. Everything after it is
 > strategy; this is the instrument.
@@ -135,7 +139,10 @@ measurement last. Then you can't tell whether a change helped.
   ([arXiv:2511.15262](https://arxiv.org/abs/2511.15262) on why).
 
 **Done when**
-- Policy evaluation is measured in nanoseconds and is deterministic.
+- ✅ Policy evaluation is measured in nanoseconds and is deterministic.
+  *0.6 ns per lookup, random access across the whole table; the solve is
+  bit-identical on a re-run and the artefact carries a hash of the parameters
+  that produced it.*
 - The tabulated policy beats the best Phase 4 baseline in the simulator, out of sample,
   with a bootstrap CI that excludes zero.
 - You can point at a state and explain why the policy quotes what it quotes. A policy you
