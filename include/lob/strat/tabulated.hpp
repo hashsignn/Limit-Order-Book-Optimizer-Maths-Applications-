@@ -18,6 +18,16 @@
 // smallest total seen since we joined ignores them. It is an upper bound on our
 // true queue position, and it is the same estimator a production system uses,
 // because the public feed does not say which orders are whose either.
+//
+// WHAT THE QUEUE IS MEASURED AGAINST
+//
+// The bucket is a fraction of a reference depth, and that depth comes from the
+// TABLE HEADER, not from the book in front of us. Dividing by the current
+// level's size looks equivalent and is not: it turns "a lot of size ahead of
+// me" into "a large share of this particular level", so an order alone at a
+// thin level and an order alone at a thick one land in different buckets, and
+// every lookup is answered from a row the solver computed for a different
+// question. The scale the solve used is the only scale that reproduces it.
 #pragma once
 
 #include <algorithm>
@@ -40,9 +50,11 @@ struct TabulatedPolicy {
   bool  bid_on = false, ask_on = false;
   Ticks bid_px = 0, ask_px = 0;
   Qty   bid_ahead = 0, ask_ahead = 0;
-  // Counted so a run can report how often the policy asked for a price the
-  // model has no state for, rather than leaving it invisible.
-  std::uint64_t off_grid = 0;
+  // Counted so a run can report how often our own quote sat outside the levels
+  // the model has a state for — the state is then "not quoting", which is not
+  // what is happening, and the count is how that stays visible rather than
+  // becoming an invisible approximation.
+  mutable std::uint64_t off_grid = 0;
 
   void set_resting(const AgentView& v, bool bon, Ticks bpx, bool aon, Ticks apx) {
     track(v, Side::Bid, bon, bpx, bid_on, bid_px, bid_ahead);
@@ -61,8 +73,8 @@ struct TabulatedPolicy {
     policy::State s;
     s.inventory = inv;
     s.imb = policy::imb_bucket(v.features.imbalance);
-    s.bid = side_state(v, Side::Bid, bb);
-    s.ask = side_state(v, Side::Ask, ba);
+    s.bid = side_state(Side::Bid, bb);
+    s.ask = side_state(Side::Ask, ba);
 
     const policy::Action a = policy::decode_action(table->action_for(policy::encode(s)));
 
@@ -96,16 +108,15 @@ struct TabulatedPolicy {
     ahead = std::min(ahead, v.book.qty_at(side, px));
   }
 
-  [[nodiscard]] int side_state(const AgentView& v, Side side, Ticks touch) const {
+  [[nodiscard]] int side_state(Side side, Ticks touch) const {
     const bool  on    = (side == Side::Bid) ? bid_on : ask_on;
     const Ticks px    = (side == Side::Bid) ? bid_px : ask_px;
     const Qty   ahead = (side == Side::Bid) ? bid_ahead : ask_ahead;
     if (!on) return policy::kNoQuote;
     const Ticks away = (side == Side::Bid) ? (touch - px) : (px - touch);
-    if (away < 0 || away >= policy::kQuoteLevels) return policy::kNoQuote;
-    const Qty level = v.book.qty_at(side, px);
+    if (away < 0 || away >= policy::kQuoteLevels) { ++off_grid; return policy::kNoQuote; }
     return policy::make_side(static_cast<int>(away),
-                             policy::queue_bucket(ahead, level > 0 ? level : ahead));
+                             policy::queue_bucket(ahead, table->header().queue_scale));
   }
 };
 

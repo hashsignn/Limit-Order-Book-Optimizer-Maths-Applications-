@@ -13,15 +13,25 @@ rather than quietly using a default.
 The state the solver works over:
 
     inventory        lots held, bounded
-    bid quote        none, or (at touch | one tick behind) x queue quartile
+    bid quote        none, or (one of three price levels) x (volume ahead)
     ask quote        the same
     imbalance        touch imbalance, five buckets
 
 Distance from the mid is deliberately NOT in the state. These books sit at a
 one-tick spread 70-99% of the time, so there is nowhere to put a quote except
-the touch or one tick behind it, and tools/calibrate.py could not identify an
-Avellaneda-Stoikov k on two of the three instruments for exactly that reason.
+the touch or a tick or two behind it, and tools/calibrate.py could not identify
+an Avellaneda-Stoikov k on two of the three instruments for exactly that reason.
 Queue position is what varies and what decides who trades.
+
+Queue position is bucketed by ABSOLUTE volume ahead, as a fraction of the mean
+touch depth — not by quartile among the market's own resting orders, which is
+what this did first. Fill hazard depends on how much size has to trade before
+the queue reaches you, and that is an absolute quantity; a quartile is a rank,
+taken over a population that is not ours. A market maker re-quotes the moment a
+level clears, so its orders sit at small absolute queues far more often than the
+book's own do. Measured against a touch-joining strategy's real placements the
+hazard at the front ran 1,019/s while the quartile-calibrated model said 52/s,
+and the policy duly concluded that quoting behind the touch was the better idea.
 """
 import argparse
 import json
@@ -33,12 +43,31 @@ import pandas as pd
 DT_MS = 100.0            # decision epoch; --dt-ms overrides, and must match the
                          # --grid-ms apps/stats sampled on
 N_IMB = 5                # imbalance buckets
-N_QUEUE = 4              # queue-position quartiles, front to back
 IMB_EDGES = [-1.0, -0.6, -0.2, 0.2, 0.6, 1.0]
+
+# Queue buckets, as fractions of the mean touch depth. These MUST match
+# kQueueEdges and kQueueBuckets in include/lob/policy/state.hpp: the solver
+# indexes the rows this file emits, and a table solved over one bucketing and
+# looked up through another is not a degraded policy, it is a random one.
+N_QUEUE = 5
+QUEUE_EDGES = [0.02, 0.10, 0.35]
+QUEUE_NAMES = ["alone", "<2%", "<10%", "<35%", "deep"]
 
 
 def imb_bucket(x):
     return np.clip(np.digitize(x, IMB_EDGES[1:-1]), 0, N_IMB - 1)
+
+
+def queue_bucket(ahead, scale):
+    """Mirror of policy::queue_bucket. Bucket 0 is alone at the price."""
+    ahead = np.asarray(ahead, dtype=float)
+    b = np.ones(ahead.shape, dtype=int)
+    if scale > 0:
+        for i, e in enumerate(QUEUE_EDGES):
+            b = np.where(ahead > e * scale, i + 2, b)
+    else:
+        b = np.full(ahead.shape, N_QUEUE - 1, dtype=int)
+    return np.where(ahead <= 0, 0, b)
 
 
 def estimate(csvdir, pair, max_spread, order_size):
@@ -118,7 +147,7 @@ def estimate(csvdir, pair, max_spread, order_size):
         "note": "fraction of a full touch queue that leaves per epoch, both sides pooled",
     }
 
-    # ---- fill hazard by queue quartile ------------------------------------
+    # ---- fill hazard by volume ahead --------------------------------------
     # Measured as events over exposure, so an order cancelled before filling
     # contributes time at risk without an event, which is what it is.
     # Fill probability depends on SIZE as much as on queue position: a small
@@ -141,46 +170,70 @@ def estimate(csvdir, pair, max_spread, order_size):
     q = at_touch.q_ahead.values.astype(float)
     hz = []
     if len(at_touch) >= 60:
-        pos = q[q > 0]
-        edges = np.unique(np.percentile(pos, [0, 25, 50, 75, 100])) if len(pos) >= 40 else np.array([0.0])
-        groups = [("empty", q == 0)] + [
-            (f"q{i+1}", (q > 0) & (q >= lo) & ((q <= hi) if hi == edges[-1] else (q < hi)))
-            for i, (lo, hi) in enumerate(zip(edges[:-1], edges[1:]))]
-        for name, sel in groups:
+        bq = queue_bucket(q, touch_sz if np.isfinite(touch_sz) else 0.0)
+        for i in range(N_QUEUE):
+            sel = bq == i
             n = int(sel.sum())
             if n < 10:
                 continue
             ev = float((at_touch["y"].values[sel] > 0).sum())
             ex = float(at_touch["T"].values[sel].sum())
             lam = ev / ex if ex > 0 else 0.0
-            hz.append({"bucket": name, "n": n, "fills": int(ev), "exposure_s": ex,
-                       "hazard_per_s": lam,
+            # `index` is what the solver reads. The name is for people; matching
+            # on it meant an unrecognised name became a bucket of zeros, which
+            # the solver could not tell from "a quote here never fills".
+            hz.append({"bucket": QUEUE_NAMES[i], "index": i, "n": n, "fills": int(ev),
+                       "exposure_s": ex, "hazard_per_s": lam,
+                       "mean_ahead": float(q[sel].mean()),
                        "p_fill_per_step": float(1.0 - np.exp(-lam * DT_MS / 1000.0))})
     out["fill_hazard"] = hz
+    out["queue"]["scale_note"] = (
+        "mean_touch_size is the scale queue buckets are fractions of; it is written "
+        "into the policy table header so the executor cannot bucket on another one")
+    out["queue"]["bucket_edges"] = QUEUE_EDGES
 
     # How much less often a quote one tick BEHIND the touch trades than one at
-    # it. Measured directly rather than borrowed from the A-S k, which
-    # tools/calibrate.py could not identify on two of three instruments.
-    def hazard(lo, hi):
-        sel = o[(o.delta > lo) & (o.delta <= hi)]
-        ex = float(sel["T"].sum())
-        return (float((sel["y"] > 0).sum()) / ex) if ex > 0 else float("nan")
-    h0, h1 = hazard(0.0, 1.0), hazard(1.0, 2.0)
-    n_behind = int((o[(o.delta > 1.0) & (o.delta <= 2.0)]["y"] > 0).sum())
-    ratio = (h1 / h0) if (h0 and np.isfinite(h0) and np.isfinite(h1) and h0 > 0) else float("nan")
+    # it. Measured from the TRADES, not from where orders were placed.
+    #
+    # An order's recorded distance is its distance on arrival. Most orders that
+    # were placed a tick behind and then filled were filled after the touch came
+    # to them — they were AT the touch when they traded. Counting those as fills
+    # one tick behind roughly doubles the level-one hazard, and the MDP already
+    # models promotion to the touch as its own transition, so the model was
+    # paying for the same event twice. That error has a direction: it makes
+    # quoting behind the touch look better than quoting at it, which is exactly
+    # the wrong conclusion the first solved policy reached.
+    #
+    # A print's dist_ticks is how far past the resting side's touch the sweep
+    # went at the moment it happened, so this conditions on the thing that
+    # matters. The ratio is the share of traded volume that reaches each level:
+    # a resting order at level l is only reachable by the flow that gets there,
+    # so the rate it is reached at scales with that share.
+    lv = {}
+    if len(tr) and "dist_ticks" in tr.columns:
+        dist = tr.dist_ticks.values.astype(float)
+        vol = tr.qty.values.astype(float)
+        v0 = float(vol[dist >= 0].sum())
+        for l in range(4):
+            vl = float(vol[dist >= l].sum())
+            lv[l] = {"volume": vl, "prints": int((dist >= l).sum()),
+                     "share": (vl / v0) if v0 > 0 else float("nan")}
+    ratio = lv.get(1, {}).get("share", float("nan"))
+    n_behind = lv.get(1, {}).get("prints", 0)
     # A quote further from the touch cannot be filled MORE often than one at it:
     # every market order that reaches the second level passed through the first.
-    # ethusd measures 1.125 off a single fill, which is noise wearing the shape
-    # of a result. Marked unmeasured so the solver demands an explicit value
-    # instead of quietly using it.
-    measured = bool(np.isfinite(ratio) and 0.0 < ratio < 1.0 and n_behind >= 3)
+    # A ratio at or above 1 is noise wearing the shape of a result. Marked
+    # unmeasured so the solver demands an explicit value instead of using it.
+    measured = bool(np.isfinite(ratio) and 0.0 < ratio < 1.0 and n_behind >= 20)
     out["level_ratio"] = {
-        "hazard_at_touch_per_s": h0, "hazard_one_behind_per_s": h1,
+        "volume_share_by_level": {str(k): v for k, v in lv.items()},
         "ratio": float(ratio) if np.isfinite(ratio) else None,
-        "fills_one_behind": n_behind,
+        "prints_one_behind": n_behind,
         "measured": measured,
-        "note": "fill hazard one tick behind the touch over the hazard at it; "
-                "unmeasured unless it lands in (0,1) on at least 3 fills",
+        "note": "share of traded volume that reaches one tick past the touch, "
+                "measured at the moment of each print. Unmeasured unless it "
+                "lands in (0,1) on at least 20 prints. The solver compounds it "
+                "geometrically for the levels beyond that",
     }
 
     # ---- imbalance, and how it moves --------------------------------------
@@ -251,6 +304,18 @@ def estimate(csvdir, pair, max_spread, order_size):
         reasons.append("the mid essentially never moves in the reconstruction")
     if not any(h["fills"] > 0 for h in hz):
         reasons.append("no fills observed at the touch")
+    # Queue position is the whole reason this state variable exists, and the one
+    # thing it must do is fall as the volume ahead rises: every market order that
+    # reaches you passed through everything in front of you first. Where the
+    # measured hazard does not fall, ten minutes has not identified it — the
+    # buckets are being ordered by noise, and a policy solved on that is choosing
+    # its queue position at random while looking like it optimised one.
+    if len(hz) >= 2 and hz[0]["hazard_per_s"] <= hz[-1]["hazard_per_s"]:
+        reasons.append(
+            f"fill hazard does not fall with volume ahead ({hz[0]['bucket']} "
+            f"{hz[0]['hazard_per_s']:.2e}/s on {hz[0]['fills']} fills vs "
+            f"{hz[-1]['bucket']} {hz[-1]['hazard_per_s']:.2e}/s on {hz[-1]['fills']}) "
+            "— queue position is not identified in this sample")
     out["usable_for_mdp"] = not reasons
     out["unusable_because"] = reasons
     return out
@@ -284,7 +349,7 @@ def main():
         all_out[p] = r
         print(f"\n=== {p} ===")
         md = r["mid"]
-        print(f"  mid, per {DT_MS:.0f} ms (spread<={md['max_spread_ticks']} ticks, "
+        print(f"  mid, per {DT_MS:g} ms (spread<={md['max_spread_ticks']} ticks, "
               f"{md['steps_kept_pct']:.0f}% of steps kept):")
         print(f"    up {100*md['p_up']:.1f}%  down {100*md['p_down']:.1f}%  flat {100*md['p_flat']:.1f}%   "
               f"median move {md['median_abs_move_ticks']:.1f}  winsorised sd {md['winsorised_sd_ticks']:.2f}  "
@@ -294,13 +359,19 @@ def main():
         qq = r["queue"]
         print(f"  touch queue: mean size {qq['mean_touch_size']:,.0f}, "
               f"{100*qq['drain_fraction_per_step']:.2f}% of it leaves per epoch")
-        print(f"  fill hazard by queue position:")
+        print(f"  fill hazard by volume ahead (as a fraction of that mean size):")
         for h in r["fill_hazard"]:
             print(f"    {h['bucket']:<6s} n={h['n']:>4}  fills={h['fills']:>3}  "
+                  f"mean ahead={h['mean_ahead']:>10,.0f}  "
                   f"lambda={h['hazard_per_s']:.2e}/s  P(fill per epoch)={h['p_fill_per_step']:.2e}")
         pu = r["imbalance"]["p_next_move_up"]
         print(f"  imbalance -> P(next mid move is up), by bucket (bid-heavy on the right):")
         print("    " + "  ".join("  n/a" if x is None else f"{100*x:4.1f}%" for x in pu))
+        lr = r["level_ratio"]
+        if lr["ratio"] is not None:
+            print(f"  volume reaching each level past the touch: " +
+                  "  ".join(f"L{k}={100*v['share']:.1f}%"
+                            for k, v in lr["volume_share_by_level"].items()))
         if not r["usable_for_mdp"]:
             print(f"  \033[31mNOT USABLE for the MDP\033[0m: " + "; ".join(r["unusable_because"]))
         if r["adverse_selection"]:

@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "lob/policy/state.hpp"
 #include "lob/policy/table.hpp"
 #include "lob/sim/simulator.hpp"
 #include "lob/strat/driver.hpp"
@@ -114,18 +115,27 @@ int main(int argc, char** argv) {
   int seeds = 24, events = 300'000;
   bool latency = true;
   std::uint64_t calib_seed = 20260904;
+  // Which family of seeds the comparison runs on. The acceptance test uses
+  // 1000; anything chosen by looking at results — the inventory penalty, the
+  // horizon — has to be chosen on a different family, or the number it produces
+  // is a fit to the test. --seed-base makes that separation visible in the
+  // command line instead of implied by a comment.
+  std::uint64_t seed_base = 1000;
   // The generator puts 2 us between events and moves the mid about a tick
   // every few ms, so a 1 ms round trip is 500 events of staleness — market
   // making is impossible by construction and abstaining wins. The default is
   // set proportionate to the process; --sweep-latency shows where the line is.
   Nanos median_ns = 10'000;
-  bool sweep = false, sweep_drift = false, sweep_informed = false;
+  bool sweep = false, sweep_drift = false, sweep_informed = false, probe = false;
 
   for (int i = 1; i < argc; ++i) {
     const bool nx = (i + 1 < argc);
     if      (std::strcmp(argv[i], "--table") == 0 && nx) table_path = argv[++i];
     else if (std::strcmp(argv[i], "--out-of-model") == 0 && nx) xmodel_path = argv[++i];
     else if (std::strcmp(argv[i], "--seeds")  == 0 && nx) seeds  = std::atoi(argv[++i]);
+    else if (std::strcmp(argv[i], "--seed-base") == 0 && nx)
+      seed_base = std::strtoull(argv[++i], nullptr, 10);
+    else if (std::strcmp(argv[i], "--tune") == 0) seed_base = 700;
     else if (std::strcmp(argv[i], "--events") == 0 && nx) events = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--no-latency") == 0) latency = false;
     else if (std::strcmp(argv[i], "--latency-ns") == 0 && nx) median_ns = std::atoll(argv[++i]);
@@ -144,11 +154,16 @@ int main(int argc, char** argv) {
     // the spread from the uninformed and pays impact to the informed.
     else if (std::strcmp(argv[i], "--informed") == 0 && nx) g_informed = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--sweep-informed") == 0) sweep_informed = true;
+    else if (std::strcmp(argv[i], "--probe") == 0) probe = true;
     else {
       std::fprintf(stderr,
         "evaluate --table <file.bin> [--out-of-model <file.bin>] [--seeds 24]\n"
         "         [--events 300000] [--no-latency] [--latency-ns 10000]\n"
-        "         [--sweep-latency]\n");
+        "         [--sweep-latency] [--tune | --seed-base N]\n"
+        "\n"
+        "  --tune   run on a DIFFERENT family of seeds (700). Use it for anything\n"
+        "           chosen by looking at the answer; the acceptance test is family\n"
+        "           1000 and must stay untouched by that choice.\n");
       return 2;
     }
   }
@@ -161,6 +176,52 @@ int main(int argc, char** argv) {
   if (xmodel_path != nullptr && !have_x) std::fprintf(stderr, "out-of-model table: %s\n", why.c_str());
 
   const QuoteParams p = base_params();
+
+  if (probe) {
+    // What OUR orders actually experience, against what the MDP was told they
+    // would. The model is calibrated on the market's own resting orders; if
+    // those and ours are not the same population, every fill probability in the
+    // table is for a different order than the one being quoted.
+    banner("realised fill hazard for our own quotes, against the calibrated one");
+    RunResult r = run_strategy(JoinTouch{p}, make_config(calib_seed + 77, latency, median_ns), events);
+    std::printf("  JoinTouch placed %zu orders, %zu of them at the touch\n",
+                r.placements.size(),
+                static_cast<std::size_t>(std::count_if(r.placements.begin(), r.placements.end(),
+                                                       [](const RunResult::Placement& q) { return q.at_touch; })));
+    // Bucketed by the TABLE'S OWN discretisation, on the table's own scale, so
+    // the two columns answer the same question. Bucketing the probe one way and
+    // the model another is how the twenty-fold gap stayed invisible: both
+    // numbers were called "the fill hazard by queue position" and neither was
+    // measuring the position the other meant.
+    const std::int64_t scale = table.header().queue_scale;
+    std::printf("  queue scale %lld shares, from the table header\n\n", static_cast<long long>(scale));
+    std::printf("  %-8s %10s %8s %8s %12s %14s %14s\n", "bucket", "mean ahead", "orders",
+                "filled", "rest (ms)", "realised /s", "model P(fill)");
+    std::printf("  %s\n", std::string(80, '-').c_str());
+    for (int b = 0; b < policy::kQueueBuckets; ++b) {
+      std::size_t n = 0, filled = 0;
+      double rest = 0.0, ahead = 0.0;
+      for (const RunResult::Placement& q : r.placements) {
+        if (!q.at_touch || policy::queue_bucket(q.ahead, scale) != b) continue;
+        ++n;
+        if (q.filled > 0) ++filled;
+        rest  += static_cast<double>(q.rest_ns) / 1e9;
+        ahead += static_cast<double>(q.ahead);
+      }
+      if (n == 0) { std::printf("  %-8d %10s %8s\n", b, "-", "0"); continue; }
+      std::printf("  %-8d %10.0f %8zu %8zu %12.2f %14.2f\n", b,
+                  ahead / static_cast<double>(n), n, filled,
+                  1e3 * rest / static_cast<double>(n),
+                  rest > 0 ? static_cast<double>(filled) / rest : 0.0);
+    }
+    std::printf("\n  Compare 'realised' against fill_hazard in the mdp.json the table was\n"
+                "  solved from, row for row. A large gap means the model is pricing a\n"
+                "  different order than the one being quoted, and no amount of solving\n"
+                "  fixes that: it was 20x at the front of the queue, because the model\n"
+                "  bucketed by rank among the market's orders and a maker's orders are\n"
+                "  not drawn from that population.\n");
+    return 0;
+  }
 
   if (sweep_informed) {
     // Glosten & Milgrom, measured rather than assumed. A maker earns the spread
@@ -275,7 +336,7 @@ int main(int argc, char** argv) {
   std::vector<Row> rows(have_x ? 8 : 7);
   const char* names[] = {"ConstantSpread", "InventorySkew", "AvellanedaStoikov",
                          "GLFT", "ImbalanceSkew", "JoinTouch",
-                         "TabulatedMDP", "TabulatedMDP(xrpusd)"};
+                         "TabulatedMDP", "TabulatedMDP(out-of-model)"};
   for (std::size_t i = 0; i < rows.size(); ++i) rows[i].name = names[i];
 
   banner("Phase 5 acceptance test");
@@ -285,6 +346,9 @@ int main(int argc, char** argv) {
               table.header().residual);
   std::printf("  calibrated  seed %llu - EXCLUDED from evaluation\n",
               static_cast<unsigned long long>(calib_seed));
+  std::printf("  seeds       family %llu%s\n", static_cast<unsigned long long>(seed_base),
+              seed_base == 1000 ? "  (the acceptance family: nothing may be tuned on it)"
+                                : "  \033[33m(NOT the acceptance family - this is a tuning run)\033[0m");
   std::printf("  evaluating  %d seeds x %d events, latency %s (median %.1f us)\n", seeds, events,
               latency ? "on" : "off", static_cast<double>(median_ns) / 1000.0);
   {
@@ -297,12 +361,36 @@ int main(int argc, char** argv) {
   std::printf("  position    +-%lld shares for every strategy\n",
               static_cast<long long>(p.max_inventory));
 
+  // The three layers each have an idea of how long a decision epoch is: the
+  // grid apps/stats sampled on, the --dt-ms mdp_params measured over, and the
+  // message budget in DriverConfig. Only the first two were ever compared. The
+  // third is set in events, and how long an event takes is a property of the
+  // generator — so the executor can quietly be asking a model calibrated for
+  // one millisecond what to do about half of one.
+  {
+    const DriverConfig dc{};
+    const RunResult warm = run_strategy(JoinTouch{p}, make_config(calib_seed + 91, latency, median_ns),
+                                        std::min(events, 100'000));
+    const double dt   = warm.budget_floor_s(dc.quote_every);
+    const double hold = warm.mean_hold_s();
+    const double want = table.header().dt_s;
+    std::printf("  epoch       %.3f ms message budget (%d events), %.3f ms mean quote life,\n"
+                "              table solved for %.3f ms\n",
+                1e3 * dt, dc.quote_every, 1e3 * hold, 1e3 * want);
+    if (want > 0.0 && dt > 0.0 && (dt / want > 1.25 || want / dt > 1.25))
+      std::printf("              \033[33mBudget and table differ by %.1fx. Every probability in the\n"
+                  "              table is per epoch, so the policy is being asked about a different\n"
+                  "              amount of elapsed time than it was solved for. Re-run\n"
+                  "              stats --grid-ms and mdp_params --dt-ms at %.3f to match.\033[0m\n",
+                  dt > want ? dt / want : want / dt, 1e3 * dt);
+  }
+
   for (int s = 0; s < seeds; ++s) {
     // Stay in uint64_t throughout: mixing in ULL literals makes this an
     // unsigned long long expression, which is a different type from uint64_t
     // on this platform and trips -Wconversion on the way back.
     const std::uint64_t seed =
-        calib_seed + std::uint64_t{1000} + static_cast<std::uint64_t>(s) * std::uint64_t{7919};
+        calib_seed + seed_base + static_cast<std::uint64_t>(s) * std::uint64_t{7919};
     const SimConfig cfg = make_config(seed, latency, median_ns);
 
     record(rows[0], run_strategy(ConstantSpread{p, 1},    cfg, events));

@@ -22,7 +22,7 @@
 
 namespace lob::policy {
 
-inline constexpr std::uint32_t kTableSchema = 1;
+inline constexpr std::uint32_t kTableSchema = 2;
 
 struct TableHeader {
   char          magic[8];          // "LOBPOL\0"
@@ -38,8 +38,18 @@ struct TableHeader {
   double        discount;
   double        residual;          // max-norm at the last sweep
   std::uint64_t sweeps;
+  // The reference depth queue_bucket() divides by. It travels with the table
+  // so the executor cannot bucket on a different scale than the solver did —
+  // which would put every lookup in the wrong row while looking fine.
+  std::int64_t  queue_scale;
+  // The decision epoch the process was measured over, in seconds. Every
+  // probability in the model is per epoch, so a policy consulted twice as often
+  // as it was solved for is answering a question about twice as much time as has
+  // actually passed. Nothing about that looks wrong from either side, which is
+  // why the number travels with the table rather than living in two places.
+  double        dt_s;
 };
-static_assert(sizeof(TableHeader) == 72);
+static_assert(sizeof(TableHeader) == 88);
 
 class PolicyTable {
  public:
@@ -49,7 +59,7 @@ class PolicyTable {
   [[nodiscard]] static bool save(const std::string& path, const std::vector<std::uint8_t>& policy,
                                  const std::vector<double>& value, std::uint64_t param_hash,
                                  double discount, double residual, std::uint64_t sweeps,
-                                 std::string* why);
+                                 std::int64_t queue_scale, double dt_s, std::string* why);
 
   [[nodiscard]] bool load(const std::string& path, std::string* why);
 

@@ -16,7 +16,7 @@
 //   3. if it moved, it moved THROUGH one of our quotes: that side is filled and
 //      the other side is left one tick further from the touch
 //   4. if it did not move, each side may be filled where it stands, and
-//      otherwise the queue in front of it may drain by a quartile
+//      otherwise the queue in front of it may drain into the next bucket
 //   5. imbalance transitions
 //
 // Adverse selection is not a parameter here. It falls out: a fill caused by the
@@ -47,20 +47,35 @@ struct MdpParams {
   double imb_transition[kImbBuckets][kImbBuckets] = {};
 
   // Probability our order is filled where it stands during one epoch, by price
-  // level and queue quartile. Measured: front of the touch queue 3-10%, deepest
-  // quartile 0.00%.
+  // level and queue bucket. Bucketed by the ABSOLUTE volume ahead, because that
+  // is what a market order has to consume before reaching us; the first version
+  // of this bucketed by quartile among the market's own resting orders and was
+  // wrong by a factor of twenty for our own.
   double p_fill[kQuoteLevels][kQueueBuckets] = {};
 
-  // Probability the queue ahead drains by a quartile in one epoch. This is the
-  // free progress that cancels provide, and it is why the cancel/fill split had
-  // to be measured rather than assumed.
-  double p_advance = 0.0;
+  // Probability the queue ahead drains into the next bucket down, in one epoch.
+  // This is the free progress that cancels provide, and it is why the
+  // cancel/fill split had to be measured rather than assumed.
+  //
+  // PER BUCKET, because the buckets are not equally wide: escaping the deepest
+  // one means draining most of a full queue, escaping the shallowest means
+  // draining two per cent of one. A single rate made the front of the queue as
+  // hard to reach as the back. Index 0 is unused — nothing is ahead of you
+  // there — and the solver derives the rest from one measured drain rate and
+  // the bucket geometry in state.hpp.
+  double p_advance[kQueueBuckets] = {};
 
   // Half-spread captured by a fill at each level, in ticks.
-  double edge_ticks[kQuoteLevels] = {0.5, 1.5};
+  double edge_ticks[kQuoteLevels] = {0.5, 1.5, 2.5};
 
-  // Penalty on held inventory, per epoch, in ticks per lot squared. The one
-  // parameter here that is a preference rather than a measurement.
+  // Penalty on held inventory, PER EPOCH, in ticks per lot squared. The one
+  // parameter here that is a preference rather than a measurement — and the one
+  // that must not be set directly, because "per epoch" is not a unit anybody
+  // holds a preference in. Halving the epoch halves the number of ticks a lot
+  // costs per second while leaving this constant, so the same 0.01 meant 10
+  // ticks/lot^2/s at a 1 ms epoch and 20 at 0.5 ms. It duly made the policy
+  // twice as afraid of inventory, and it pulled a side in a third of all states.
+  // apps/solve takes the preference per SECOND and multiplies by dt_s here.
   double inventory_penalty = 0.01;
 
   double discount = 0.999;
@@ -94,10 +109,26 @@ struct SolveResult {
   int    sweeps    = 0;
   double residual  = 0.0;
   bool   converged = false;
+  // The iteration ran away rather than merely running out of sweeps. It can
+  // only happen if the process is not a probability distribution, so it is a
+  // different diagnosis and gets a different flag.
+  bool   diverged  = false;
 };
 
-// Value iteration to a max-norm residual. Deterministic: same parameters in,
-// same table out, which is what makes the hash in the artefact meaningful.
-SolveResult solve(const MdpParams& p, double tol = 1e-9, int max_sweeps = 20000);
+// Checks that every admissible state-action's successors sum to one, before any
+// value iteration happens. One sweep's worth of arithmetic, and it turns the
+// failure mode above into a sentence naming the state instead of twenty
+// thousand sweeps ending in a residual of 2e+57.
+[[nodiscard]] bool stochastic(const MdpParams& p, std::string* why);
+
+// Solves to a max-norm residual. Deterministic: same parameters in, same table
+// out, which is what makes the hash in the artefact meaningful.
+//
+// `max_sweeps` counts BACKUPS, not outer iterations, and the number needed is
+// set by the discount: reaching 1e-9 at 0.9995 per epoch takes about 35,000 of
+// them. The old cap of 20,000 was not a safety limit, it was a silent ceiling
+// the solve ran into and stopped at 2e-6 — which apps/solve then correctly
+// refused to ship, having produced nothing after ten minutes.
+SolveResult solve(const MdpParams& p, double tol = 1e-9, int max_sweeps = 200000);
 
 }  // namespace lob::policy
