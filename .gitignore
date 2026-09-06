@@ -28,3 +28,8 @@ data/*
 csv/
 simcsv/
 simpolicy/
+
+# Python bytecode, created whenever a tool is imported (the recorder's offline
+# tests import it directly).
+__pycache__/
+*.pyc
