@@ -13,6 +13,7 @@
 
 #include "lob/measure/tsc.hpp"
 #include "lob/sim/simulator.hpp"
+#include "lob/strat/driver.hpp"
 #include "lob/strat/pnl.hpp"
 #include "lob/strat/quoting.hpp"
 
@@ -26,14 +27,6 @@ void banner(const char* t) {
   std::putchar('\n');
 }
 
-struct Result {
-  std::string  name;
-  Attribution  attr;
-  BootstrapCI  per_fill;
-  SimStats     stats;
-  std::size_t  requotes = 0;
-};
-
 SimConfig make_config(bool latency) {
   SimConfig c;
   c.use_latency       = latency;
@@ -46,75 +39,14 @@ SimConfig make_config(bool latency) {
   return c;
 }
 
-// Drives one strategy: quote, requote with hysteresis, track markouts, attribute.
+using Result = RunResult;
+
+// The driver moved to lob/strat/driver.hpp so Phase 5's evaluation could use
+// the identical one. A comparison whose strategies are driven differently
+// measures the drivers.
 template <typename Strat>
 Result run(Strat strat, int n, bool latency) {
-  Simulator      sim{make_config(latency)};
-  MarkoutTracker mk;
-
-  std::size_t   seen       = 0;
-  std::size_t   requotes   = 0;
-  OrderId       next_id    = 900'000'000ULL;
-  OrderId       bid_id     = 0, ask_id = 0;
-  Ticks         cur_bid    = 0, cur_ask = 0;
-  std::uint64_t ev         = 0, last_quote = 0;
-  double        last_mid   = 0.0;
-
-  auto agent = [&](const AgentView& v, Simulator& s) {
-    // Markouts are an economic measurement of what actually happened, so they
-    // use the TRUE mid, not the agent's lagged view.
-    double true_mid = 0.0;
-    if (s.true_book().has_bid() && s.true_book().has_ask()) {
-      true_mid = 0.5 * (static_cast<double>(s.true_book().best_bid()) +
-                        static_cast<double>(s.true_book().best_ask()));
-      last_mid = true_mid;
-      mk.advance(v.now, true_mid);
-    }
-
-    for (; seen < s.fills().size(); ++seen) {
-      const Fill& f = s.fills()[seen];
-      if (!f.resting_mine && !f.aggressor_mine) continue;
-      const Side our = f.resting_mine ? f.resting_side : opposite(f.resting_side);
-      mk.on_fill(f.ts, f.price, f.qty, sign_of(our), f.resting_mine,
-                 true_mid > 0.0 ? true_mid : static_cast<double>(f.price));
-    }
-
-    if (!v.book.has_bid() || !v.book.has_ask()) return;
-    ++ev;
-    if (ev - last_quote < 200) return;      // message budget: do not requote every event
-
-    const Quote q = strat.quote(v);
-
-    // Hysteresis: a requote costs queue position, so only move when the target
-    // has actually moved. Without this the strategy churns its own priority away.
-    const bool bid_moved = q.bid_on != (bid_id != 0) || (q.bid_on && q.bid != cur_bid);
-    const bool ask_moved = q.ask_on != (ask_id != 0) || (q.ask_on && q.ask != cur_ask);
-    if (!bid_moved && !ask_moved) return;
-    last_quote = ev;
-    ++requotes;
-
-    if (bid_moved && bid_id) { s.send_cancel(bid_id); bid_id = 0; }
-    if (ask_moved && ask_id) { s.send_cancel(ask_id); ask_id = 0; }
-    if (bid_moved && q.bid_on) { bid_id = next_id++; cur_bid = q.bid; s.send_limit(bid_id, Side::Bid, q.bid, q.bid_qty); }
-    if (ask_moved && q.ask_on) { ask_id = next_id++; cur_ask = q.ask; s.send_limit(ask_id, Side::Ask, q.ask, q.ask_qty); }
-  };
-
-  sim.run(agent, n);
-
-  Result r;
-  r.name  = Strat::name();
-  r.stats = sim.stats();
-  r.requotes = requotes;
-  // Horizon index 3 = 100 ms. Long enough for information to show, short enough
-  // that a maker plausibly still holds the position.
-  r.attr = attribute(mk.fills(), 3, FeeSchedule{}, last_mid, sim.stats().inventory);
-
-  std::vector<double> per_fill;
-  per_fill.reserve(mk.fills().size());
-  for (const auto& f : mk.fills())
-    if (f.filled[3]) per_fill.push_back(f.markout(3) / static_cast<double>(f.qty));
-  r.per_fill = block_bootstrap(per_fill);
-  return r;
+  return run_strategy(strat, make_config(latency), n);
 }
 
 void print_table(const std::vector<Result>& rs) {

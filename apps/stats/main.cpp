@@ -1,5 +1,12 @@
 // Emits the measurement plane's raw records as CSV, for analysis and plotting.
 //
+// Two sources, one accumulator. A real Bitstamp capture, or the synthetic flow
+// generator the simulator runs on. The second exists because Phase 5's
+// acceptance test needs the SIMULATOR's process measured: a policy solved for
+// xrpusd and run against synthetic flow tests neither the policy nor the flow,
+// only the distance between them. Both sources feed the same accumulation code,
+// because a second estimator is a second thing that can be wrong.
+//
 // Same rule as apps/tape: the numbers come out of the pipeline, and whatever
 // draws them only draws. Nothing downstream recomputes book state, because a
 // second implementation of the book is a second thing that can be wrong, and
@@ -34,6 +41,8 @@
 #include "lob/book/order_book.hpp"
 #include "lob/feed/bitstamp.hpp"
 #include "lob/feed/line_reader.hpp"
+#include "lob/sim/flow.hpp"
+#include "lob/sim/matching.hpp"
 
 using namespace lob;
 
@@ -50,6 +59,121 @@ struct Rec {
   Qty   size   = 0;   // size on arrival
   Qty   filled = 0;
   int   side   = 0;
+};
+
+// Everything both sources share. The book is passed in rather than owned so the
+// caller can drive it however its source requires — a decoder for a capture, a
+// matching engine for synthetic aggressive flow.
+class Accumulator {
+ public:
+  Accumulator(std::FILE* ord, std::FILE* trd, std::FILE* mid, std::FILE* arr)
+      : f_ord_(ord), f_trd_(trd), f_mid_(mid), f_arr_(arr) {}
+
+  // Call BEFORE applying the event to the book: an order's queue position on
+  // arrival is the volume resting at its level at that moment, and once it has
+  // been applied its own size is in there too.
+  void before_apply(const OrderBook& book, const BookEvent& e, Nanos rel, bool warm) {
+    if (e.type != EventType::Add || !warm || !book.has_bid() || !book.has_ask()) return;
+    const Ticks same = (e.side == Side::Bid) ? book.best_bid() : book.best_ask();
+    Rec r;
+    r.ts = rel; r.px = e.price; r.size = e.qty; r.side = (e.side == Side::Bid) ? 0 : 1;
+    r.dist   = (e.side == Side::Bid) ? (same - e.price) : (e.price - same);
+    r.spread = book.best_ask() - book.best_bid();
+    r.ahead  = book.qty_at(e.side, e.price);
+    live_[e.order_id] = r;
+  }
+
+  void after_apply(const OrderBook& book, const BookEvent& e, Nanos rel) {
+    if (e.type == EventType::Execute) {
+      auto it = live_.find(e.order_id);
+      if (it != live_.end()) it->second.filled += e.qty;
+      return;
+    }
+    if (e.type != EventType::Delete && e.type != EventType::Reduce) return;
+    auto it = live_.find(e.order_id);
+    if (it == live_.end()) return;
+    const bool gone = (e.type == EventType::Delete) || book.qty_of(e.order_id) == 0;
+    if (!gone) return;
+    close(it->second, rel);
+    live_.erase(it);
+  }
+
+  // A resting order that was consumed by a match rather than by a Delete event.
+  void on_consumed(OrderId id, Qty qty, Nanos rel, bool gone) {
+    auto it = live_.find(id);
+    if (it == live_.end()) return;
+    it->second.filled += qty;
+    if (gone) { close(it->second, rel); live_.erase(it); }
+  }
+
+  void on_trade(const OrderBook& book, Nanos rel, Ticks px, int taker_side, Qty qty) {
+    if (!book.has_bid() || !book.has_ask()) return;
+    std::fprintf(f_trd_, "%lld,%lld,%d,%lld,%lld,%lld\n",
+                 static_cast<long long>(rel / 1'000'000), static_cast<long long>(px),
+                 taker_side, static_cast<long long>(qty),
+                 static_cast<long long>(book.best_bid()), static_cast<long long>(book.best_ask()));
+    ++n_trd_;
+  }
+
+  void on_gap(Nanos gap_ns) { std::fprintf(f_arr_, "%lld\n", static_cast<long long>(gap_ns / 1000)); }
+
+  void on_grid(const OrderBook& book, Nanos rel) {
+    if (!book.has_bid() || !book.has_ask()) return;
+    std::fprintf(f_mid_, "%lld,%lld,%lld,%lld,%lld\n", static_cast<long long>(rel / 1'000'000),
+                 static_cast<long long>(book.best_bid()), static_cast<long long>(book.best_ask()),
+                 static_cast<long long>(book.best_bid_qty()),
+                 static_cast<long long>(book.best_ask_qty()));
+    ++n_mid_;
+    Ticks px_buf[kProfileDepth];
+    Qty   qty_buf[kProfileDepth];
+    for (int s = 0; s < 2; ++s) {
+      const Side side = (s == 0) ? Side::Bid : Side::Ask;
+      const Ticks same = (s == 0) ? book.best_bid() : book.best_ask();
+      const std::uint32_t n = book.depth(side, kProfileDepth, px_buf, qty_buf);
+      for (std::uint32_t k = 0; k < n; ++k) {
+        const Ticks dist = (s == 0) ? (same - px_buf[k]) : (px_buf[k] - same);
+        if (dist < 0 || dist >= static_cast<Ticks>(kProfileDepth)) continue;
+        const std::size_t idx = static_cast<std::size_t>(s) * kProfileDepth
+                              + static_cast<std::size_t>(dist);
+        prof_sum_[idx] += static_cast<double>(qty_buf[k]);
+        ++prof_n_[idx];
+      }
+    }
+  }
+
+  void write_depth(std::FILE* f) const {
+    std::fprintf(f, "side,dist_ticks,mean_qty,samples\n");
+    for (int s = 0; s < 2; ++s)
+      for (std::uint32_t k = 0; k < kProfileDepth; ++k) {
+        const std::size_t i = static_cast<std::size_t>(s) * kProfileDepth + k;
+        if (prof_n_[i] == 0) continue;
+        std::fprintf(f, "%d,%u,%.1f,%llu\n", s, k, prof_sum_[i] / static_cast<double>(prof_n_[i]),
+                     static_cast<unsigned long long>(prof_n_[i]));
+      }
+  }
+
+  [[nodiscard]] std::uint64_t orders() const noexcept { return n_ord_; }
+  [[nodiscard]] std::uint64_t trades() const noexcept { return n_trd_; }
+  [[nodiscard]] std::uint64_t mids()   const noexcept { return n_mid_; }
+
+ private:
+  void close(const Rec& r, Nanos rel) {
+    const Qty cancelled = std::max<Qty>(0, r.size - r.filled);
+    std::fprintf(f_ord_, "%lld,%lld,%d,%lld,%lld,%lld,%lld,%lld,%lld\n",
+                 static_cast<long long>(r.ts / 1'000'000),
+                 static_cast<long long>((rel - r.ts) / 1'000'000),
+                 r.side, static_cast<long long>(r.dist),
+                 static_cast<long long>(r.spread), static_cast<long long>(r.ahead),
+                 static_cast<long long>(r.size), static_cast<long long>(r.filled),
+                 static_cast<long long>(cancelled));
+    ++n_ord_;
+  }
+
+  std::FILE *f_ord_, *f_trd_, *f_mid_, *f_arr_;
+  std::unordered_map<OrderId, Rec> live_;
+  std::vector<double>        prof_sum_ = std::vector<double>(2 * kProfileDepth, 0.0);
+  std::vector<std::uint64_t> prof_n_   = std::vector<std::uint64_t>(2 * kProfileDepth, 0);
+  std::uint64_t n_ord_ = 0, n_trd_ = 0, n_mid_ = 0;
 };
 
 bool slurp(const char* path, std::string& out) {
@@ -85,8 +209,11 @@ std::FILE* open_out(const std::string& dir, const std::string& pair, const char*
 
 int main(int argc, char** argv) {
   const char* capture = nullptr;
-  std::string dir = ".";
+  std::string dir = ".", label;
   double warmup_sec = 60.0, grid_ms = 100.0;
+  int synthetic = 0;
+  double drift = 0.02;
+  std::uint64_t seed = 20260904;
 
   for (int i = 1; i < argc; ++i) {
     const bool nx = (i + 1 < argc);
@@ -94,183 +221,155 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--outdir")  == 0 && nx) dir = argv[++i];
     else if (std::strcmp(argv[i], "--warmup")  == 0 && nx) warmup_sec = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--grid-ms") == 0 && nx) grid_ms = std::atof(argv[++i]);
+    else if (std::strcmp(argv[i], "--synthetic") == 0 && nx) synthetic = std::atoi(argv[++i]);
+    else if (std::strcmp(argv[i], "--seed")    == 0 && nx) seed = std::strtoull(argv[++i], nullptr, 10);
+    else if (std::strcmp(argv[i], "--drift")   == 0 && nx) drift = std::atof(argv[++i]);
+    else if (std::strcmp(argv[i], "--label")   == 0 && nx) label = argv[++i];
     else {
-      std::fprintf(stderr, "stats --capture <file> [--outdir .] [--warmup 60] [--grid-ms 100]\n");
+      std::fprintf(stderr,
+        "stats --capture <file> | --synthetic <n_events>   [--outdir .] [--warmup 60]\n"
+        "      [--grid-ms 100] [--seed N] [--label NAME]\n"
+        "\n"
+        "Writes orders/trades/mid/depth/arrivals CSVs. --synthetic measures the\n"
+        "simulator's own flow instead of a capture, which is what Phase 5's\n"
+        "evaluation calibrates against.\n");
       return 2;
     }
   }
-  if (capture == nullptr) { std::fprintf(stderr, "--capture is required\n"); return 2; }
+  if (capture == nullptr && synthetic <= 0) {
+    std::fprintf(stderr, "one of --capture or --synthetic is required\n");
+    return 2;
+  }
 
-  std::string snap;
-  if (!slurp(snapshot_beside(capture).c_str(), snap)) return 2;
-
-  BitstampConfig cfg;
-  if (!BitstampDecoder::detect_decimals(snap, &cfg.price_decimals, &cfg.qty_decimals)) return 2;
-  Ticks bb = 0, ba = 0;
-  if (!BitstampDecoder::snapshot_touch(snap, cfg, &bb, &ba)) return 2;
-  const Ticks mid0 = (bb + ba) / 2;
-  Ticks band = (mid0 / 25) & ~Ticks{63};
-  if (band < 4096) band = 4096;
-  cfg.window_ticks = band;
-  cfg.window_base  = mid0 - band / 2;
-  cfg.seed_guard   = static_cast<Ticks>(static_cast<double>(mid0) * 0.003);
-
-  BitstampDecoder dec{cfg};
-  OrderBook book{cfg.window_base, static_cast<std::uint32_t>(band), 1 << 21};
-
-  std::vector<BookEvent> seed;
-  dec.load_snapshot(snap, seed);
-  for (const BookEvent& e : seed) book.apply(e);
-
-  const std::string pair = pair_of(capture);
-  std::FILE* f_ord = open_out(dir, pair, "orders");
-  std::FILE* f_trd = open_out(dir, pair, "trades");
-  std::FILE* f_mid = open_out(dir, pair, "mid");
-  std::FILE* f_dep = open_out(dir, pair, "depth");
-  std::FILE* f_arr = open_out(dir, pair, "arrivals");
+  const std::string name = !label.empty() ? label
+                         : (capture ? pair_of(capture) : std::string("synthetic"));
+  std::FILE* f_ord = open_out(dir, name, "orders");
+  std::FILE* f_trd = open_out(dir, name, "trades");
+  std::FILE* f_mid = open_out(dir, name, "mid");
+  std::FILE* f_dep = open_out(dir, name, "depth");
+  std::FILE* f_arr = open_out(dir, name, "arrivals");
   if (!f_ord || !f_trd || !f_mid || !f_dep || !f_arr) return 2;
-
   std::fprintf(f_ord, "t_ms,lifetime_ms,side,dist_ticks,spread_ticks,q_ahead,size,filled,cancelled\n");
   std::fprintf(f_trd, "t_ms,px,side,qty,bid,ask\n");
   std::fprintf(f_mid, "t_ms,bid,ask,bid_qty,ask_qty\n");
   std::fprintf(f_arr, "gap_us\n");
 
-  std::unordered_map<OrderId, Rec> live;
-  // Mean resting size by tick distance from the touch, both sides.
-  std::vector<double> prof_sum(2 * kProfileDepth, 0.0);
-  std::vector<std::uint64_t> prof_n(2 * kProfileDepth, 0);
-  // Only orders that arrived AFTER the warm-up are measurable: one that was
-  // seeded or was already resting has no observable arrival time, and counting
-  // it would bias every lifetime downward.
-  std::unordered_map<OrderId, char> measurable;
-
-  LineReader reader;
-  if (!reader.open(capture)) { std::fprintf(stderr, "%s\n", reader.error().c_str()); return 2; }
-
-  Ticks px_buf[kProfileDepth];
-  Qty   qty_buf[kProfileDepth];
-  std::string_view line;
-  Nanos first_ts = 0, prev_ts = 0, next_grid = 0;
+  Accumulator acc{f_ord, f_trd, f_mid, f_arr};
   const Nanos warm = static_cast<Nanos>(warmup_sec * 1e9);
   const Nanos grid = static_cast<Nanos>(grid_ms * 1e6);
-  std::uint64_t n_ord = 0, n_trd = 0, n_mid = 0;
 
-  while (reader.next(&line)) {
-    const BookTouch touch{book.has_bid(), book.has_ask(),
-                          book.has_bid() ? book.best_bid() : 0,
-                          book.has_ask() ? book.best_ask() : 0};
-    Decoded d;
-    if (!dec.decode_line(line, touch, d)) continue;
-    if (d.ts != 0 && first_ts == 0) { first_ts = d.ts; next_grid = d.ts; }
-    const Nanos rel = (first_ts == 0) ? 0 : d.ts - first_ts;
-    const bool warmed = rel >= warm;
+  if (synthetic > 0) {
+    // ---- the simulator's own process ----
+    // Driven exactly as Simulator drives it, including routing aggressive flow
+    // through the matcher: without that path nothing ever fills passively, and
+    // a fill rate of zero is not a measurement of this process.
+    FlowConfig fc;
+    fc.seed = seed; fc.mid = 10'000; fc.levels = 8; fc.target_live = 4'000;
+    fc.drift_prob = drift;
+    FlowGenerator gen{fc};
+    OrderBook book{5'000, 10'240, 1 << 18};
+    MatchingEngine match{book};
 
-    if (warmed && d.ts != 0 && prev_ts != 0 && d.ts > prev_ts)
-      std::fprintf(f_arr, "%lld\n", static_cast<long long>((d.ts - prev_ts) / 1000));
-    if (d.ts != 0) prev_ts = d.ts;
+    Nanos first_ts = 0, prev_ts = 0, next_grid = 0;
+    std::size_t fills_seen = 0;
+    for (int i = 0; i < synthetic; ++i) {
+      const BookEvent e = gen.next();
+      if (first_ts == 0) { first_ts = e.ts; next_grid = e.ts; }
+      const Nanos rel = e.ts - first_ts;
+      const bool warmed = rel >= warm;
+      if (warmed && prev_ts != 0 && e.ts > prev_ts) acc.on_gap(e.ts - prev_ts);
+      prev_ts = e.ts;
 
-    if (d.is_trade && d.trade_qty > 0 && warmed && book.has_bid() && book.has_ask()) {
-      std::fprintf(f_trd, "%lld,%lld,%d,%lld,%lld,%lld\n",
-                   static_cast<long long>(rel / 1'000'000), static_cast<long long>(d.trade_price),
-                   d.taker == Side::Bid ? 0 : 1, static_cast<long long>(d.trade_qty),
-                   static_cast<long long>(book.best_bid()), static_cast<long long>(book.best_ask()));
-      ++n_trd;
-    }
-
-    for (int i = 0; i < d.n; ++i) {
-      const BookEvent& e = d.ev[i];
-      const bool had_touch = book.has_bid() && book.has_ask();
-
-      if (e.type == EventType::Add && warmed && had_touch) {
-        const Ticks same = (e.side == Side::Bid) ? book.best_bid() : book.best_ask();
-        Rec r;
-        r.ts = rel; r.px = e.price; r.size = e.qty; r.side = (e.side == Side::Bid) ? 0 : 1;
-        // Positive means behind the touch, which is where a passive order sits.
-        r.dist   = (e.side == Side::Bid) ? (same - e.price) : (e.price - same);
-        // Avellaneda-Stoikov measures the quote's distance from the REFERENCE
-        // price, not from the same-side touch, so the spread has to travel with
-        // the record or delta cannot be reconstructed later.
-        r.spread = book.best_ask() - book.best_bid();
-        // Read BEFORE the event is applied: this is the volume that has to be
-        // consumed or cancelled before a print can reach this order. In a book
-        // whose spread is one tick 99% of the time, this — not distance —
-        // is what decides whether a passive order ever trades.
-        r.ahead  = book.qty_at(e.side, e.price);
-        live[e.order_id] = r;
-        measurable[e.order_id] = 1;
-      }
-
-      book.apply(e);
-
-      if (e.type == EventType::Execute) {
-        auto it = live.find(e.order_id);
-        if (it != live.end()) it->second.filled += e.qty;
-      } else if (e.type == EventType::Delete || e.type == EventType::Reduce) {
-        auto it = live.find(e.order_id);
-        if (it != live.end()) {
-          const bool gone = (e.type == EventType::Delete) || book.qty_of(e.order_id) == 0;
-          if (gone) {
-            const Rec& r = it->second;
-            const Qty cancelled = std::max<Qty>(0, r.size - r.filled);
-            std::fprintf(f_ord, "%lld,%lld,%d,%lld,%lld,%lld,%lld,%lld,%lld\n",
-                         static_cast<long long>(r.ts / 1'000'000),
-                         static_cast<long long>((rel - r.ts) / 1'000'000),
-                         r.side, static_cast<long long>(r.dist),
-                         static_cast<long long>(r.spread), static_cast<long long>(r.ahead),
-                         static_cast<long long>(r.size), static_cast<long long>(r.filled),
-                         static_cast<long long>(cancelled));
-            ++n_ord;
-            live.erase(it);
-            measurable.erase(e.order_id);
+      if (e.type == EventType::Aggress) {
+        (void)match.submit_market(e.ts, e.order_id, e.side, e.qty, /*mine=*/false);
+        for (std::size_t k = fills_seen; k < match.fills().size(); ++k) {
+          const Fill& f = match.fills()[k];
+          const bool gone = book.qty_of(f.resting_id) == 0;
+          if (warmed) {
+            acc.on_consumed(f.resting_id, f.qty, rel, gone);
+            // The taker's side is the opposite of the resting order's.
+            acc.on_trade(book, rel, f.price, f.resting_side == Side::Bid ? 0 : 1, f.qty);
           }
+          if (gone) gen.forget_order(f.resting_id);
         }
+        fills_seen = match.fills().size();
+      } else {
+        acc.before_apply(book, e, rel, warmed);
+        (void)book.apply(e);
+        if (warmed) acc.after_apply(book, e, rel);
       }
-    }
+      gen.on_applied(e, book.qty_of(e.order_id));
+      gen.observe(book.has_bid(), book.best_bid(), book.has_ask(), book.best_ask());
 
-    // ---- grid samples ----
-    if (d.ts != 0 && d.ts >= next_grid) {
-      next_grid = d.ts + grid;
-      if (warmed && book.has_bid() && book.has_ask()) {
-        // Touch sizes as well as prices: the MDP's state carries imbalance, and
-        // it cannot be recovered from prices alone.
-        std::fprintf(f_mid, "%lld,%lld,%lld,%lld,%lld\n", static_cast<long long>(rel / 1'000'000),
-                     static_cast<long long>(book.best_bid()), static_cast<long long>(book.best_ask()),
-                     static_cast<long long>(book.best_bid_qty()),
-                     static_cast<long long>(book.best_ask_qty()));
-        ++n_mid;
-        for (int s = 0; s < 2; ++s) {
-          const Side side = (s == 0) ? Side::Bid : Side::Ask;
-          const Ticks same = (s == 0) ? book.best_bid() : book.best_ask();
-          const std::uint32_t n = book.depth(side, kProfileDepth, px_buf, qty_buf);
-          for (std::uint32_t k = 0; k < n; ++k) {
-            const Ticks dist = (s == 0) ? (same - px_buf[k]) : (px_buf[k] - same);
-            if (dist < 0 || dist >= static_cast<Ticks>(kProfileDepth)) continue;
-            const std::size_t idx = static_cast<std::size_t>(s) * kProfileDepth
-                                  + static_cast<std::size_t>(dist);
-            prof_sum[idx] += static_cast<double>(qty_buf[k]);
-            ++prof_n[idx];
-          }
-        }
+      if (e.ts >= next_grid) {
+        next_grid = e.ts + grid;
+        if (warmed) acc.on_grid(book, rel);
       }
     }
+  } else {
+    // ---- a recorded venue capture ----
+    std::string snap;
+    if (!slurp(snapshot_beside(capture).c_str(), snap)) return 2;
+
+    BitstampConfig cfg;
+    if (!BitstampDecoder::detect_decimals(snap, &cfg.price_decimals, &cfg.qty_decimals)) return 2;
+    Ticks bb = 0, ba = 0;
+    if (!BitstampDecoder::snapshot_touch(snap, cfg, &bb, &ba)) return 2;
+    const Ticks mid0 = (bb + ba) / 2;
+    Ticks band = (mid0 / 25) & ~Ticks{63};
+    if (band < 4096) band = 4096;
+    cfg.window_ticks = band;
+    cfg.window_base  = mid0 - band / 2;
+    cfg.seed_guard   = static_cast<Ticks>(static_cast<double>(mid0) * 0.003);
+
+    BitstampDecoder dec{cfg};
+    OrderBook book{cfg.window_base, static_cast<std::uint32_t>(band), 1 << 21};
+    std::vector<BookEvent> seed_ev;
+    dec.load_snapshot(snap, seed_ev);
+    for (const BookEvent& e : seed_ev) book.apply(e);
+
+    LineReader reader;
+    if (!reader.open(capture)) { std::fprintf(stderr, "%s\n", reader.error().c_str()); return 2; }
+    std::string_view line;
+    Nanos first_ts = 0, prev_ts = 0, next_grid = 0;
+    while (reader.next(&line)) {
+      const BookTouch touch{book.has_bid(), book.has_ask(),
+                            book.has_bid() ? book.best_bid() : 0,
+                            book.has_ask() ? book.best_ask() : 0};
+      Decoded d;
+      if (!dec.decode_line(line, touch, d)) continue;
+      if (d.ts != 0 && first_ts == 0) { first_ts = d.ts; next_grid = d.ts; }
+      const Nanos rel = (first_ts == 0) ? 0 : d.ts - first_ts;
+      const bool warmed = rel >= warm;
+
+      if (warmed && d.ts != 0 && prev_ts != 0 && d.ts > prev_ts) acc.on_gap(d.ts - prev_ts);
+      if (d.ts != 0) prev_ts = d.ts;
+
+      if (d.is_trade && d.trade_qty > 0 && warmed)
+        acc.on_trade(book, rel, d.trade_price, d.taker == Side::Bid ? 0 : 1, d.trade_qty);
+
+      for (int i = 0; i < d.n; ++i) {
+        acc.before_apply(book, d.ev[i], rel, warmed);
+        book.apply(d.ev[i]);
+        if (warmed) acc.after_apply(book, d.ev[i], rel);
+      }
+
+      if (d.ts != 0 && d.ts >= next_grid) {
+        next_grid = d.ts + grid;
+        if (warmed) acc.on_grid(book, rel);
+      }
+    }
+    const auto& ds = dec.stats();
+    std::fprintf(stderr, "  chain gaps %llu, size violations %llu\n",
+                 static_cast<unsigned long long>(ds.chain_gaps),
+                 static_cast<unsigned long long>(ds.size_violations));
   }
 
-  std::fprintf(f_dep, "side,dist_ticks,mean_qty,samples\n");
-  for (int s = 0; s < 2; ++s)
-    for (std::uint32_t k = 0; k < kProfileDepth; ++k) {
-      const std::size_t i = static_cast<std::size_t>(s) * kProfileDepth + k;
-      if (prof_n[i] == 0) continue;
-      std::fprintf(f_dep, "%d,%u,%.1f,%llu\n", s, k, prof_sum[i] / static_cast<double>(prof_n[i]),
-                   static_cast<unsigned long long>(prof_n[i]));
-    }
-
+  acc.write_depth(f_dep);
   for (std::FILE* f : {f_ord, f_trd, f_mid, f_dep, f_arr}) std::fclose(f);
-  const auto& ds = dec.stats();
-  std::fprintf(stderr, "%s: %llu orders, %llu trades, %llu mid samples"
-                       " | chain gaps %llu, size violations %llu\n",
-               pair.c_str(), static_cast<unsigned long long>(n_ord),
-               static_cast<unsigned long long>(n_trd), static_cast<unsigned long long>(n_mid),
-               static_cast<unsigned long long>(ds.chain_gaps),
-               static_cast<unsigned long long>(ds.size_violations));
+  std::fprintf(stderr, "%s: %llu orders, %llu trades, %llu mid samples\n", name.c_str(),
+               static_cast<unsigned long long>(acc.orders()),
+               static_cast<unsigned long long>(acc.trades()),
+               static_cast<unsigned long long>(acc.mids()));
   return 0;
 }

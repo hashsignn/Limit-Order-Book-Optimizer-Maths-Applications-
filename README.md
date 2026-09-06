@@ -105,6 +105,20 @@ quartile, while an Avellaneda–Stoikov `k` could not be identified on two of th
 instruments. The resulting policy skews hard on inventory — at the position limit it pulls
 the quote on the side that would add to the position and works the other at the touch.
 
+```bash
+./build/stats --synthetic 3000000 --drift 0.0003 --grid-ms 1 --label simcal --outdir simcsv
+py tools/mdp_params.py --csv simcsv --out simpolicy --dt-ms 1 --only simcal
+./build/solve --params simpolicy/mdp.json --pair simcal --out simpolicy/simcal.bin
+./build/evaluate --table simpolicy/simcal.bin --drift 0.0003        # the acceptance test
+```
+
+`evaluate` runs every strategy through the identical driver on identical flow, on seeds
+the policy was **not** calibrated on, and settles the comparison on session P&L with a
+bootstrap over seeds. The verdict is in
+[`docs/05-roadmap.md`](docs/05-roadmap.md#phase-5--the-optimiser): **the criterion as
+written is not met, and it is degenerate on this test bed** — the best baseline takes zero
+fills. Among baselines that actually trade, the policy is the best of them.
+
 **`solve` refuses to run on a process the data could not identify**, naming the parameter.
 btcusd fails on mid dynamics (the reconstructed touch teleports rather than moves) and
 ethusd on the fill rate one tick behind the touch (one observed fill). Only xrpusd solves

@@ -30,7 +30,8 @@ import pathlib
 import numpy as np
 import pandas as pd
 
-DT_MS = 100.0            # decision epoch, matching the mid grid apps/stats writes
+DT_MS = 100.0            # decision epoch; --dt-ms overrides, and must match the
+                         # --grid-ms apps/stats sampled on
 N_IMB = 5                # imbalance buckets
 N_QUEUE = 4              # queue-position quartiles, front to back
 IMB_EDGES = [-1.0, -0.6, -0.2, 0.2, 0.6, 1.0]
@@ -229,13 +230,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default="csv")
     ap.add_argument("--out", default="policy")
+    ap.add_argument("--dt-ms", type=float, default=None,
+                    help="decision epoch in ms; must match the grid apps/stats used")
+    ap.add_argument("--only", default=None, help="one instrument label")
     ap.add_argument("--max-spread", type=float, default=3.0,
                     help="trust a mid step only if the spread is this narrow at both ends")
     a = ap.parse_args()
+    global DT_MS
+    if a.dt_ms:
+        DT_MS = a.dt_ms
     outdir = pathlib.Path(a.out); outdir.mkdir(parents=True, exist_ok=True)
 
-    pairs = [p for p in ("btcusd", "ethusd", "xrpusd")
-             if (pathlib.Path(a.csv) / f"{p}_orders.csv").exists()]
+    if a.only:
+        pairs = [a.only]
+    else:
+        pairs = sorted(q.name[: -len("_orders.csv")]
+                       for q in pathlib.Path(a.csv).glob("*_orders.csv"))
     all_out = {}
     for p in pairs:
         r = estimate(a.csv, p, a.max_spread)

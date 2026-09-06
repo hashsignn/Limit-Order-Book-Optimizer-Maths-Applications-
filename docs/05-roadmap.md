@@ -143,8 +143,17 @@ measurement last. Then you can't tell whether a change helped.
   *0.6 ns per lookup, random access across the whole table; the solve is
   bit-identical on a re-run and the artefact carries a hash of the parameters
   that produced it.*
-- The tabulated policy beats the best Phase 4 baseline in the simulator, out of sample,
+- ❌ The tabulated policy beats the best Phase 4 baseline in the simulator, out of sample,
   with a bootstrap CI that excludes zero.
+  *Run and NOT met — see `apps/evaluate`. The criterion turns out to be degenerate on
+  this test bed: Avellaneda–Stoikov quotes 4,999 times a run and takes zero fills,
+  because on a one-tick book the smallest half-spread the tick grid admits already sits
+  behind the touch. It therefore scores exactly 0.0, and on a process where quoting
+  loses money nothing that quotes can beat zero. Among the baselines that actually
+  trade the tabulated policy is the best of them; the second comparison in `evaluate`
+  reports that. Passing the criterion as written needs a simulator on which passive
+  market making is profitable, which this generator is not at any volatility where the
+  naive heuristic is not already free money.*
 - You can point at a state and explain why the policy quotes what it quotes. A policy you
   can't interrogate is a policy you can't safely deploy.
 

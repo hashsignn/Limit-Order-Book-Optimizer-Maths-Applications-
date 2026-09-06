@@ -7,6 +7,7 @@
 #include "lob/policy/mdp.hpp"
 #include "lob/policy/state.hpp"
 #include "lob/policy/table.hpp"
+#include "lob/strat/tabulated.hpp"
 #include "lob/measure/tsc.hpp"
 #include "test_util.hpp"
 
@@ -143,7 +144,7 @@ int main() {
         const std::uint32_t long_max = encode(State{kMaxInventory, b, b, i});
         const std::uint32_t short_max = encode(State{-kMaxInventory, b, b, i});
         for (std::uint8_t a = 0; a < kNumActions; ++a) {
-          const Action ac = decode_action(a);
+          const policy::Action ac = decode_action(a);
           if (ac.bid != 0) CHECK(!admissible(long_max, a));
           if (ac.ask != 0) CHECK(!admissible(short_max, a));
         }
@@ -253,6 +254,113 @@ int main() {
                       std::to_string(ns) + " ns/lookup over " + std::to_string(kNumStates) + " states");
     std::printf("  policy lookup: %.1f ns each, random access over %u states\n", ns, kNumStates);
     std::remove(path.c_str());
+  }
+
+  // ---- the table as a strategy ----
+  {
+    OrderBook book{9'000, 2048, 8192};
+    FeatureEngine fe;
+    // A one-tick book, which is the regime this policy exists for.
+    CHECK(book.add(1, Side::Bid, 10'000, 500) == BookError::Ok);
+    CHECK(book.add(2, Side::Ask, 10'001, 500) == BookError::Ok);
+    fe.update(book, 1000);
+    const AgentView v{book, fe.get(), 1000, 0};
+
+    // No table is not a licence to invent a quote.
+    {
+      TabulatedPolicy t;
+      const Quote q = t.quote(v);
+      CHECK(!q.bid_on); CHECK(!q.ask_on);
+    }
+
+    const std::string path = "test_tabulated.bin";
+    std::string why;
+
+    // A table that says "quote both at the touch" everywhere.
+    {
+      std::vector<std::uint8_t> pol(kNumStates, encode_action(policy::Action{1, 1}));
+      std::vector<double> val(kNumStates, 0.0);
+      CHECK(PolicyTable::save(path, pol, val, 7, 0.99, 0.0, 1, &why));
+      PolicyTable t; CHECK(t.load(path, &why));
+      TabulatedPolicy s2; s2.table = &t; s2.p.size = 10;
+      s2.p.max_inventory = kMaxInventory * s2.p.size;
+      const Quote q = s2.quote(v);
+      CHECK(q.bid_on); CHECK(q.ask_on);
+      CHECK_EQ(q.bid, 10'000);      // at the touch, not behind it
+      CHECK_EQ(q.ask, 10'001);
+
+      // The position limit is enforced here as well as in the solve. A table is
+      // not a place to discover that a constraint was dropped.
+      const AgentView long_max{book, fe.get(), 1000, kMaxInventory * s2.p.size};
+      const Quote ql = s2.quote(long_max);
+      CHECK(!ql.bid_on);
+      const AgentView short_max{book, fe.get(), 1000, -kMaxInventory * s2.p.size};
+      const Quote qs = s2.quote(short_max);
+      CHECK(!qs.ask_on);
+    }
+
+    // "One tick behind" means behind, on both sides.
+    {
+      std::vector<std::uint8_t> pol(kNumStates, encode_action(policy::Action{2, 2}));
+      std::vector<double> val(kNumStates, 0.0);
+      CHECK(PolicyTable::save(path, pol, val, 7, 0.99, 0.0, 1, &why));
+      PolicyTable t; CHECK(t.load(path, &why));
+      TabulatedPolicy s2; s2.table = &t; s2.p.size = 10;
+      const Quote q = s2.quote(v);
+      CHECK_EQ(q.bid, 9'999);
+      CHECK_EQ(q.ask, 10'002);
+      CHECK(q.bid < q.ask);
+    }
+
+    // Queue tracking only ever shrinks: a level growing behind us is not
+    // progress up the queue, and treating it as such would flatter every fill
+    // probability the state feeds on.
+    {
+      std::vector<std::uint8_t> pol(kNumStates, encode_action(policy::Action{1, 1}));
+      std::vector<double> val(kNumStates, 0.0);
+      CHECK(PolicyTable::save(path, pol, val, 7, 0.99, 0.0, 1, &why));
+      PolicyTable t; CHECK(t.load(path, &why));
+      TabulatedPolicy s2; s2.table = &t; s2.p.size = 10;
+
+      s2.set_resting(v, true, 10'000, false, 0);
+      const Qty joined = s2.bid_ahead;
+      CHECK_EQ(joined, 500);
+
+      CHECK(book.add(3, Side::Bid, 10'000, 400) == BookError::Ok);   // arrives BEHIND us
+      fe.update(book, 1100);
+      const AgentView v2{book, fe.get(), 1100, 0};
+      s2.set_resting(v2, true, 10'000, false, 0);
+      CHECK_EQ(s2.bid_ahead, joined);          // not 900
+
+      CHECK(book.remove(1) == BookError::Ok);  // someone ahead of us cancels
+      fe.update(book, 1200);
+      const AgentView v3{book, fe.get(), 1200, 0};
+      s2.set_resting(v3, true, 10'000, false, 0);
+      CHECK_EQ(s2.bid_ahead, 400);             // and that IS progress
+
+      // Moving the quote surrenders the position and rejoins at the back.
+      s2.set_resting(v3, true, 9'999, false, 0);
+      CHECK_EQ(s2.bid_ahead, book.qty_at(Side::Bid, 9'999));
+    }
+    std::remove(path.c_str());
+  }
+
+  // ---- JoinTouch, the baseline the policy has to beat ----
+  {
+    OrderBook book{9'000, 2048, 8192};
+    FeatureEngine fe;
+    CHECK(book.add(1, Side::Bid, 10'000, 500) == BookError::Ok);
+    CHECK(book.add(2, Side::Ask, 10'001, 500) == BookError::Ok);
+    fe.update(book, 1000);
+    QuoteParams qp; qp.size = 10; qp.max_inventory = 50;
+    JoinTouch jt{qp};
+
+    const Quote q = jt.quote(AgentView{book, fe.get(), 1000, 0});
+    CHECK(q.bid_on); CHECK(q.ask_on);
+    CHECK_EQ(q.bid, 10'000);
+    CHECK_EQ(q.ask, 10'001);
+    CHECK(!jt.quote(AgentView{book, fe.get(), 1000, 50}).bid_on);
+    CHECK(!jt.quote(AgentView{book, fe.get(), 1000, -50}).ask_on);
   }
 
   return lobtest::summary("policy");
