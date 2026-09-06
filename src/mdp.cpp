@@ -7,6 +7,12 @@
 namespace lob::policy {
 namespace {
 
+// A max-norm residual no bounded-reward discounted MDP can reach. The rewards
+// here are ticks per epoch and the discount is below one, so the value
+// function is bounded by reward/(1-discount) — a few thousand at the very
+// most. Anything past this is divergence, not slow progress.
+constexpr double kDivergent = 1e12;
+
 // FNV-1a. Not cryptographic and does not need to be: its job is to make a
 // table that was solved from different parameters fail to match, not to resist
 // an adversary.
@@ -27,7 +33,7 @@ std::uint64_t fnv(std::uint64_t h, const void* data, std::size_t n) noexcept {
 // removals are cancels, that is the central trade-off of the whole problem.
 [[nodiscard]] int apply_action(int side_state, int act) noexcept {
   if (act == 0) return kNoQuote;
-  const int want_level = act - 1;                    // 1 -> touch, 2 -> behind
+  const int want_level = act - 1;                    // 1 -> touch, 2..3 -> ticks behind
   if (quoting(side_state) && level_of(side_state) == want_level) return side_state;
   return make_side(want_level, kBackOfQueue);
 }
@@ -47,6 +53,12 @@ std::uint64_t fnv(std::uint64_t h, const void* data, std::size_t n) noexcept {
 // quoting behind look strictly better than quoting at the touch: three times
 // the edge for the same certainty of being filled by any move. The policy duly
 // quoted behind in a third of all states.
+//
+// Falling out of the modelled window is not the same as being cancelled, and
+// with only two levels it happened after a single adverse move — so the model
+// priced being left behind as free, and never learned that a stale quote is a
+// liability. Three levels is still a window, but a move now has to go twice as
+// far before the state stops describing the order.
 [[nodiscard]] int step_away(int side_state) noexcept {
   if (!quoting(side_state)) return kNoQuote;
   const int lvl = level_of(side_state);
@@ -60,6 +72,25 @@ std::uint64_t fnv(std::uint64_t h, const void* data, std::size_t n) noexcept {
   if (!quoting(side_state)) return kNoQuote;
   const int lvl = level_of(side_state);
   return lvl == 0 ? kNoQuote : make_side(lvl - 1, queue_of(side_state));
+}
+
+// Indexing the parameter arrays by a side state.
+//
+// level_of() and queue_of() are -1 on a flat side, and they are plain
+// arithmetic on the state code, so nothing in the type system stops a caller
+// using one as a subscript — which is exactly what happened: edge_ticks[-1] was
+// read in every state where one side was not quoting, which is most of them.
+// These three are the only way the process touches those arrays, and each
+// answers "flat" rather than reading whatever is next to the table.
+[[nodiscard]] double fill_prob(const MdpParams& p, int ss) noexcept {
+  return quoting(ss) ? p.p_fill[level_of(ss)][queue_of(ss)] : 0.0;
+}
+[[nodiscard]] double edge_of(const MdpParams& p, int ss) noexcept {
+  return quoting(ss) ? p.edge_ticks[level_of(ss)] : 0.0;
+}
+// Bucket 0 is alone at the level: there is nothing in front to drain.
+[[nodiscard]] double advance_prob(const MdpParams& p, int ss) noexcept {
+  return (quoting(ss) && queue_of(ss) > 0) ? p.p_advance[queue_of(ss)] : 0.0;
 }
 
 // Only a quote at the touch is filled by a one-level move.
@@ -96,7 +127,7 @@ std::uint64_t MdpParams::hash() const noexcept {
   h = fnv(h, &move_ticks, sizeof move_ticks);
   h = fnv(h, imb_transition, sizeof imb_transition);
   h = fnv(h, p_fill, sizeof p_fill);
-  h = fnv(h, &p_advance, sizeof p_advance);
+  h = fnv(h, p_advance, sizeof p_advance);
   h = fnv(h, edge_ticks, sizeof edge_ticks);
   h = fnv(h, &inventory_penalty, sizeof inventory_penalty);
   h = fnv(h, &discount, sizeof discount);
@@ -127,7 +158,8 @@ bool MdpParams::validate(std::string* why) const {
     for (int q = 0; q < kQueueBuckets; ++q)
       if (!prob(p_fill[l][q])) return fail("p_fill outside [0,1]");
   }
-  if (!prob(p_advance)) return fail("p_advance outside [0,1]");
+  for (int q = 0; q < kQueueBuckets; ++q)
+    if (!prob(p_advance[q])) return fail("p_advance outside [0,1]");
   return true;
 }
 
@@ -177,26 +209,72 @@ void expand(const MdpParams& p, std::uint32_t state, std::uint8_t action,
   }
   // ---- the mid held: we may be filled where we stand ----
   if (pf > 0.0) {
-    const double pb = quoting(b0) ? p.p_fill[level_of(b0)][queue_of(b0)] : 0.0;
-    const double pa = quoting(a0) ? p.p_fill[level_of(a0)][queue_of(a0)] : 0.0;
+    const double pb = fill_prob(p, b0);
+    const double pa = fill_prob(p, a0);
+    const double eb = edge_of(p, b0), ea = edge_of(p, a0);
+    const double qb = advance_prob(p, b0), qa = advance_prob(p, a0);
 
-    emit(pf * pb, s.inventory + 1, kNoQuote, a0, p.edge_ticks[level_of(b0)], 0.0);
-    emit(pf * pa, s.inventory - 1, b0, kNoQuote, p.edge_ticks[level_of(a0)], 0.0);
+    // THE TWO SIDES FILL INDEPENDENTLY. Both can trade in the same epoch, and
+    // on a fast book at the front of the queue they routinely do — the measured
+    // per-epoch fill probability at the touch on this process is 0.92.
+    //
+    // The first version treated the sides as mutually exclusive and called the
+    // remainder (1 - pb - pa). Against real numbers that remainder is NEGATIVE,
+    // emit() discarded the negative branch as it discards any impossible one,
+    // and the surviving probabilities summed to 1.8. A transition function that
+    // creates probability is not a contraction: the effective discount exceeds
+    // one and value iteration diverges. It did, silently, to a residual of
+    // 2e+57 after twenty thousand sweeps, and the only symptom was a solve that
+    // "did not converge" — which reads like it needed more sweeps.
+    //
+    // Four outcomes, and the best of them is the one the old form could not
+    // express at all: both sides fill, the full spread is captured, and there is
+    // no inventory left over. That is the market maker's whole business, and a
+    // model that gives it zero probability cannot value being at the touch.
+    emit(pf * pb * pa, s.inventory, kNoQuote, kNoQuote, eb + ea, 0.0);
+    // Only the bid: we bought. The ask still rests and its queue may drain.
+    emit(pf * pb * (1.0 - pa) * (1.0 - qa), s.inventory + 1, kNoQuote, a0,          eb, 0.0);
+    emit(pf * pb * (1.0 - pa) * qa,         s.inventory + 1, kNoQuote, advance(a0), eb, 0.0);
+    // Only the ask: we sold.
+    emit(pf * (1.0 - pb) * pa * (1.0 - qb), s.inventory - 1, b0,          kNoQuote, ea, 0.0);
+    emit(pf * (1.0 - pb) * pa * qb,         s.inventory - 1, advance(b0), kNoQuote, ea, 0.0);
+    // Neither traded, so each side's queue may have drained into the next
+    // bucket. The two sides advance independently, which is four outcomes.
+    const double rest = pf * (1.0 - pb) * (1.0 - pa);
+    emit(rest * (1.0 - qb) * (1.0 - qa), s.inventory, b0,          a0,          0.0, 0.0);
+    emit(rest * qb         * (1.0 - qa), s.inventory, advance(b0), a0,          0.0, 0.0);
+    emit(rest * (1.0 - qb) * qa,         s.inventory, b0,          advance(a0), 0.0, 0.0);
+    emit(rest * qb         * qa,         s.inventory, advance(b0), advance(a0), 0.0, 0.0);
+  }
+}
 
-    // Neither side traded, so each side's queue may have drained a quartile.
-    // Both sides are advanced independently, which is four outcomes.
-    const double rest = pf * (1.0 - pb - pa);
-    if (rest > 0.0) {
-      const bool can_b = quoting(b0) && queue_of(b0) > 0;
-      const bool can_a = quoting(a0) && queue_of(a0) > 0;
-      const double qb = can_b ? p.p_advance : 0.0;
-      const double qa = can_a ? p.p_advance : 0.0;
-      emit(rest * (1 - qb) * (1 - qa), s.inventory, b0,          a0,          0.0, 0.0);
-      emit(rest * qb       * (1 - qa), s.inventory, advance(b0), a0,          0.0, 0.0);
-      emit(rest * (1 - qb) * qa,       s.inventory, b0,          advance(a0), 0.0, 0.0);
-      emit(rest * qb       * qa,       s.inventory, advance(b0), advance(a0), 0.0, 0.0);
+bool stochastic(const MdpParams& p, std::string* why) {
+  std::vector<Transition> tr;
+  tr.reserve(64);
+  double worst = 0.0;
+  std::uint32_t worst_s = 0;
+  std::uint8_t worst_a = 0;
+  for (std::uint32_t s = 0; s < kNumStates; ++s) {
+    for (std::uint8_t a = 0; a < kNumActions; ++a) {
+      if (!admissible(s, a)) continue;
+      tr.clear();
+      expand(p, s, a, tr);
+      double sum = 0.0;
+      for (const Transition& t : tr) sum += t.prob;
+      if (std::fabs(sum - 1.0) > worst) { worst = std::fabs(sum - 1.0); worst_s = s; worst_a = a; }
     }
   }
+  if (worst <= 1e-9) return true;
+  if (why != nullptr) {
+    const State st = decode(worst_s);
+    const Action ac = decode_action(worst_a);
+    *why = "the successors of one state-action do not sum to 1 (off by "
+         + std::to_string(worst) + "): inventory " + std::to_string(st.inventory)
+         + ", bid state " + std::to_string(st.bid) + ", ask state " + std::to_string(st.ask)
+         + ", imbalance " + std::to_string(st.imb)
+         + ", action (bid " + std::to_string(ac.bid) + ", ask " + std::to_string(ac.ask) + ")";
+  }
+  return false;
 }
 
 SolveResult solve(const MdpParams& p, double tol, int max_sweeps) {
@@ -207,17 +285,38 @@ SolveResult solve(const MdpParams& p, double tol, int max_sweeps) {
   std::vector<Transition> tr;
   tr.reserve(256);
 
-  for (int sweep = 0; sweep < max_sweeps; ++sweep) {
+  // Modified policy iteration (Puterman, Markov Decision Processes, section 6.5).
+  //
+  // One greedy improvement, then kEval evaluations of the policy it just chose.
+  // An evaluation backup expands ONE action where an improvement expands all
+  // sixteen, so the evaluations cost a sixteenth each while contracting the
+  // error as far as a full sweep would.
+  //
+  // This is not a micro-optimisation, it is what makes the problem solvable on
+  // the grid it has to be solved on. A one-second horizon on a half-millisecond
+  // epoch is a per-epoch discount of 0.9995, and plain value iteration needs
+  // upwards of forty thousand sweeps to reach a 1e-9 residual there — it hit the
+  // twenty-thousand cap at 2e-6 and shipped nothing at all. The fixed point is
+  // identical; only the route to it is shorter.
+  constexpr int kEval = 32;
+
+  auto backup = [&](std::uint32_t s, std::uint8_t a) {
+    tr.clear();
+    expand(p, s, a, tr);
+    double q = 0.0;
+    for (const Transition& t : tr) q += t.prob * (t.reward + p.discount * r.value[t.next]);
+    return q;
+  };
+
+  while (r.sweeps < max_sweeps) {
+    // ---- improvement: greedy in the current value ----
     double residual = 0.0;
     for (std::uint32_t s = 0; s < kNumStates; ++s) {
       double best = -1e300;
       std::uint8_t best_a = 0;
       for (std::uint8_t a = 0; a < kNumActions; ++a) {
         if (!admissible(s, a)) continue;
-        tr.clear();
-        expand(p, s, a, tr);
-        double q = 0.0;
-        for (const Transition& t : tr) q += t.prob * (t.reward + p.discount * r.value[t.next]);
+        const double q = backup(s, a);
         // Ties go to the lower-numbered action, which orders "do not quote"
         // first. A policy that flips between equally-valued actions on floating
         // point noise is not deterministic, and determinism is what the hash in
@@ -229,9 +328,22 @@ SolveResult solve(const MdpParams& p, double tol, int max_sweeps) {
       residual = std::max(residual, std::fabs(next[s] - r.value[s]));
     }
     r.value.swap(next);
-    r.sweeps = sweep + 1;
+    ++r.sweeps;
     r.residual = residual;
     if (residual < tol) { r.converged = true; break; }
+    // Stop the moment the iteration is clearly not contracting, and say which it
+    // was. "Did not converge in N sweeps" reads like it needed more sweeps; a
+    // residual past anything a bounded reward and a discount below one can
+    // produce means the process is not a probability distribution, and no number
+    // of sweeps fixes that.
+    if (!std::isfinite(residual) || residual > kDivergent) { r.diverged = true; break; }
+
+    // ---- evaluation: hold that policy and let the values settle ----
+    for (int k = 0; k < kEval && r.sweeps < max_sweeps; ++k) {
+      for (std::uint32_t s = 0; s < kNumStates; ++s) next[s] = backup(s, r.policy[s]);
+      r.value.swap(next);
+      ++r.sweeps;
+    }
   }
   return r;
 }

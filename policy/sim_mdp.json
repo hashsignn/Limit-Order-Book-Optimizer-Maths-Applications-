@@ -1,76 +1,110 @@
 {
   "simcal": {
     "pair": "simcal",
-    "dt_ms": 1.0,
+    "dt_ms": 0.5,
     "mid": {
-      "p_up": 0.01796242972713561,
-      "p_down": 0.01851090086384204,
-      "p_flat": 0.9635266694090223,
+      "p_up": 0.009581638905910534,
+      "p_down": 0.009971589326499917,
+      "p_flat": 0.9804467717675895,
       "median_abs_move_ticks": 0.5,
-      "winsorised_sd_ticks": 0.1400279412687631,
-      "raw_sd_ticks": 0.1400279412687631,
+      "winsorised_sd_ticks": 0.09543651125700867,
+      "raw_sd_ticks": 0.09543651125700867,
       "max_abs_move_ticks": 1.0,
-      "samples": 7293,
+      "samples": 17951,
       "steps_kept_pct": 100.0,
       "max_spread_ticks": 3.0
     },
     "spread": {
       "median_ticks": 1.0,
       "p90_ticks": 2.0,
-      "share_at_one_tick": 0.792020839045791
+      "share_at_one_tick": 0.778631907308378
     },
     "queue": {
-      "mean_touch_size": 29193.8,
-      "removed_per_s": 3442218.6173853525,
-      "drain_fraction_per_step": 0.11790923474797227,
-      "note": "fraction of a full touch queue that leaves per epoch, both sides pooled"
+      "mean_touch_size": 29159.9,
+      "removed_per_s": 3369795.6544010597,
+      "drain_fraction_per_step": 0.05778133077275744,
+      "note": "fraction of a full touch queue that leaves per epoch, both sides pooled",
+      "scale_note": "mean_touch_size is the scale queue buckets are fractions of; it is written into the policy table header so the executor cannot bucket on another one",
+      "bucket_edges": [
+        0.02,
+        0.1,
+        0.35
+      ]
     },
     "hazard_size_band": {
       "target": 10.0,
-      "n": 4360,
+      "n": 5261,
       "applied": true
     },
     "fill_hazard": [
       {
-        "bucket": "q1",
-        "n": 1090,
-        "fills": 639,
-        "exposure_s": 12.347000000000001,
-        "hazard_per_s": 51.75346237952539,
-        "p_fill_per_step": 0.050437059024376896
+        "bucket": "<2%",
+        "index": 1,
+        "n": 23,
+        "fills": 23,
+        "exposure_s": 0.019167000000000003,
+        "hazard_per_s": 1199.979130797725,
+        "mean_ahead": 333.0,
+        "p_fill_per_step": 0.4511826372455736
       },
       {
-        "bucket": "q2",
-        "n": 1089,
-        "fills": 271,
-        "exposure_s": 19.887999999999998,
-        "hazard_per_s": 13.626307320997588,
-        "p_fill_per_step": 0.013533889443090974
+        "bucket": "<10%",
+        "index": 2,
+        "n": 122,
+        "fills": 110,
+        "exposure_s": 0.352162,
+        "hazard_per_s": 312.3562451371812,
+        "mean_ahead": 1637.1475409836066,
+        "p_fill_per_step": 0.14459319045791652
       },
       {
-        "bucket": "q3",
-        "n": 1090,
-        "fills": 205,
-        "exposure_s": 20.737000000000002,
-        "hazard_per_s": 9.885711530115252,
-        "p_fill_per_step": 0.009837008504033462
+        "bucket": "<35%",
+        "index": 3,
+        "n": 406,
+        "fills": 278,
+        "exposure_s": 3.464283,
+        "hazard_per_s": 80.24748555473094,
+        "mean_ahead": 6612.283251231527,
+        "p_fill_per_step": 0.03932944424570828
       },
       {
-        "bucket": "q4",
-        "n": 1090,
-        "fills": 119,
-        "exposure_s": 22.031,
-        "hazard_per_s": 5.401479733103355,
-        "p_fill_per_step": 0.005386917971600291
+        "bucket": "deep",
+        "index": 4,
+        "n": 4704,
+        "fills": 1085,
+        "exposure_s": 89.922703,
+        "hazard_per_s": 12.065918436637743,
+        "mean_ahead": 45901.757015306124,
+        "p_fill_per_step": 0.006014797461254995
       }
     ],
     "level_ratio": {
-      "hazard_at_touch_per_s": 14.76839898631877,
-      "hazard_one_behind_per_s": 6.314578305729723,
-      "ratio": 0.42757365314814805,
-      "fills_one_behind": 13753,
+      "volume_share_by_level": {
+        "0": {
+          "volume": 8795731.0,
+          "prints": 267511,
+          "share": 1.0
+        },
+        "1": {
+          "volume": 18583.0,
+          "prints": 362,
+          "share": 0.0021127294593252114
+        },
+        "2": {
+          "volume": 0.0,
+          "prints": 0,
+          "share": 0.0
+        },
+        "3": {
+          "volume": 0.0,
+          "prints": 0,
+          "share": 0.0
+        }
+      },
+      "ratio": 0.0021127294593252114,
+      "prints_one_behind": 362,
       "measured": true,
-      "note": "fill hazard one tick behind the touch over the hazard at it; unmeasured unless it lands in (0,1) on at least 3 fills"
+      "note": "share of traded volume that reaches one tick past the touch, measured at the moment of each print. Unmeasured unless it lands in (0,1) on at least 20 prints. The solver compounds it geometrically for the levels beyond that"
     },
     "imbalance": {
       "edges": [
@@ -82,47 +116,47 @@
         1.0
       ],
       "stationary": [
-        0.2107211406635591,
-        0.14820400329037564,
-        0.29160954208938855,
-        0.1505346860433233,
-        0.19893062791335345
+        0.20710784313725492,
+        0.14939839572192512,
+        0.2994095365418895,
+        0.14806149732620322,
+        0.19602272727272727
       ],
       "transition": [
         [
-          0.8802862719583604,
-          0.06115810019518542,
-          0.016916070266753416,
-          0.014964216005204945,
-          0.026675341574495772
+          0.9373318988703604,
+          0.03523399677245831,
+          0.007799892415277031,
+          0.006455083378160301,
+          0.013179128563743949
         ],
         [
-          0.09907407407407408,
-          0.787962962962963,
-          0.10833333333333334,
-          0.000925925925925926,
-          0.003703703703703704
-        ],
-        [
-          0.015514809590973202,
-          0.05218617771509168,
-          0.8660084626234132,
-          0.05077574047954866,
-          0.015514809590973202
-        ],
-        [
-          0.0036429872495446266,
+          0.04662439388287952,
+          0.8907124207385304,
+          0.05930622901902275,
           0.0,
-          0.10655737704918032,
-          0.7932604735883424,
-          0.0965391621129326
+          0.0033569563595673255
         ],
         [
-          0.027567195037904894,
-          0.01722949689869056,
-          0.01722949689869056,
-          0.0647829083390765,
-          0.8731909028256375
+          0.008186046511627907,
+          0.025674418604651163,
+          0.9324651162790698,
+          0.025116279069767444,
+          0.008558139534883722
+        ],
+        [
+          0.0030097817908201654,
+          0.0,
+          0.05568096313017306,
+          0.8920240782543266,
+          0.04928517682468021
+        ],
+        [
+          0.015913611821540212,
+          0.0068201193520886615,
+          0.0076726342710997444,
+          0.036373969877806195,
+          0.9332196646774652
         ]
       ],
       "median_next_move_ticks": [
@@ -134,30 +168,30 @@
       ],
       "p_next_move_up": [
         0.0,
-        0.001851851851851852,
-        0.015044663845792195,
-        0.0036429872495446266,
-        0.06409372846312887
+        0.0003729951510630362,
+        0.008186046511627907,
+        0.0030097817908201654,
+        0.033816425120772944
       ],
       "p_next_move_down": [
-        0.06115810019518542,
-        0.003703703703703704,
-        0.015514809590973202,
-        0.0036429872495446266,
+        0.03200645508337816,
+        0.0033569563595673255,
+        0.008558139534883722,
+        0.0018811136192626034,
         0.0
       ]
     },
     "adverse_selection": {
       "markout_0.5s_ticks_median": 0.0,
-      "markout_0.5s_bps": 0.01036807363644653,
-      "p_adverse_0.5s": 0.468418362883807,
+      "markout_0.5s_bps": 0.004563005862825148,
+      "p_adverse_0.5s": 0.4705451364616782,
       "markout_1.0s_ticks_median": 0.0,
-      "markout_1.0s_bps": 0.011358943433716491,
-      "p_adverse_1.0s": 0.4766090083287676,
+      "markout_1.0s_bps": 0.001172186121163896,
+      "p_adverse_1.0s": 0.47642153032959395,
       "markout_5.0s_ticks_median": 0.0,
-      "markout_5.0s_bps": -0.012780089188941607,
-      "p_adverse_5.0s": 0.48329872605306656,
-      "n_prints": 217199
+      "markout_5.0s_bps": 0.005861805134919637,
+      "p_adverse_5.0s": 0.47750559790064706,
+      "n_prints": 267511
     },
     "usable_for_mdp": true,
     "unusable_because": []

@@ -106,12 +106,32 @@ class Accumulator {
     if (gone) { close(it->second, rel); live_.erase(it); }
   }
 
-  void on_trade(const OrderBook& book, Nanos rel, Ticks px, int taker_side, Qty qty) {
-    if (!book.has_bid() || !book.has_ask()) return;
-    std::fprintf(f_trd_, "%lld,%lld,%d,%lld,%lld,%lld\n",
-                 static_cast<long long>(rel / 1'000'000), static_cast<long long>(px),
+  // The touch is passed in rather than read off the book, and it must be the
+  // touch BEFORE the aggressive order started consuming.
+  //
+  // `dist` is how far past the resting side's touch this print happened: 0 means
+  // the top of the book traded, 1 means the sweep went a tick deeper. It is the
+  // only honest way to measure how often a quote one tick behind the touch
+  // actually trades THERE. Measuring it from where an order was placed counts
+  // every order that was placed behind, was later promoted when the touch came
+  // to it, and filled at the front — which is not a fill one tick behind the
+  // touch at all, and the model already accounts for promotion separately. That
+  // double count is worth about a factor of two, and it points the wrong way:
+  // it makes quoting behind the touch look better than being at it.
+  void on_trade(Ticks pre_bid, Ticks pre_ask, Nanos rel, Ticks px, int taker_side, Qty qty) {
+    if (pre_bid <= 0 || pre_ask <= 0) return;
+    // Taker buy (0) lifts the ask, so the resting side is the ask.
+    const Ticks dist = (taker_side == 0) ? (px - pre_ask) : (pre_bid - px);
+    // A print cannot happen in front of the touch it consumed. If it does, the
+    // aggressor's side is mislabelled or the touch is stale, and every level
+    // measurement built on this column is wrong. Counted, and reported at the
+    // end, rather than left to be discovered by a number that looks plausible.
+    if (dist < 0) ++n_neg_dist_;
+    std::fprintf(f_trd_, "%.3f,%lld,%d,%lld,%lld,%lld,%lld\n",
+                 static_cast<double>(rel) / 1e6, static_cast<long long>(px),
                  taker_side, static_cast<long long>(qty),
-                 static_cast<long long>(book.best_bid()), static_cast<long long>(book.best_ask()));
+                 static_cast<long long>(pre_bid), static_cast<long long>(pre_ask),
+                 static_cast<long long>(dist));
     ++n_trd_;
   }
 
@@ -119,7 +139,7 @@ class Accumulator {
 
   void on_grid(const OrderBook& book, Nanos rel) {
     if (!book.has_bid() || !book.has_ask()) return;
-    std::fprintf(f_mid_, "%lld,%lld,%lld,%lld,%lld\n", static_cast<long long>(rel / 1'000'000),
+    std::fprintf(f_mid_, "%.3f,%lld,%lld,%lld,%lld\n", static_cast<double>(rel) / 1e6,
                  static_cast<long long>(book.best_bid()), static_cast<long long>(book.best_ask()),
                  static_cast<long long>(book.best_bid_qty()),
                  static_cast<long long>(book.best_ask_qty()));
@@ -153,15 +173,23 @@ class Accumulator {
   }
 
   [[nodiscard]] std::uint64_t orders() const noexcept { return n_ord_; }
+  [[nodiscard]] std::uint64_t prints_before_touch() const noexcept { return n_neg_dist_; }
   [[nodiscard]] std::uint64_t trades() const noexcept { return n_trd_; }
   [[nodiscard]] std::uint64_t mids()   const noexcept { return n_mid_; }
 
  private:
+  // Times are milliseconds to microsecond precision, NOT integer milliseconds.
+  // An order's lifetime is its exposure in a hazard estimate, and 4.3% of these
+  // orders live less than a millisecond: rounded down they contributed a fill
+  // event with no time at risk, which is a division by zero wearing the shape of
+  // an infinite hazard. It also makes any epoch below a millisecond impossible
+  // to calibrate — the mid series would have two samples at the same timestamp
+  // and half the steps would be discarded as zero-length.
   void close(const Rec& r, Nanos rel) {
     const Qty cancelled = std::max<Qty>(0, r.size - r.filled);
-    std::fprintf(f_ord_, "%lld,%lld,%d,%lld,%lld,%lld,%lld,%lld,%lld\n",
-                 static_cast<long long>(r.ts / 1'000'000),
-                 static_cast<long long>((rel - r.ts) / 1'000'000),
+    std::fprintf(f_ord_, "%.3f,%.3f,%d,%lld,%lld,%lld,%lld,%lld,%lld\n",
+                 static_cast<double>(r.ts) / 1e6,
+                 static_cast<double>(rel - r.ts) / 1e6,
                  r.side, static_cast<long long>(r.dist),
                  static_cast<long long>(r.spread), static_cast<long long>(r.ahead),
                  static_cast<long long>(r.size), static_cast<long long>(r.filled),
@@ -173,7 +201,7 @@ class Accumulator {
   std::unordered_map<OrderId, Rec> live_;
   std::vector<double>        prof_sum_ = std::vector<double>(2 * kProfileDepth, 0.0);
   std::vector<std::uint64_t> prof_n_   = std::vector<std::uint64_t>(2 * kProfileDepth, 0);
-  std::uint64_t n_ord_ = 0, n_trd_ = 0, n_mid_ = 0;
+  std::uint64_t n_ord_ = 0, n_trd_ = 0, n_mid_ = 0, n_neg_dist_ = 0;
 };
 
 bool slurp(const char* path, std::string& out) {
@@ -254,7 +282,7 @@ int main(int argc, char** argv) {
   std::FILE* f_arr = open_out(dir, name, "arrivals");
   if (!f_ord || !f_trd || !f_mid || !f_dep || !f_arr) return 2;
   std::fprintf(f_ord, "t_ms,lifetime_ms,side,dist_ticks,spread_ticks,q_ahead,size,filled,cancelled\n");
-  std::fprintf(f_trd, "t_ms,px,side,qty,bid,ask\n");
+  std::fprintf(f_trd, "t_ms,px,side,qty,bid,ask,dist_ticks\n");
   std::fprintf(f_mid, "t_ms,bid,ask,bid_qty,ask_qty\n");
   std::fprintf(f_arr, "gap_us\n");
 
@@ -286,14 +314,27 @@ int main(int argc, char** argv) {
       prev_ts = e.ts;
 
       if (e.type == EventType::Aggress) {
+        // Before the sweep. Every print in it is measured against the book the
+        // aggressor arrived at, not the one it left behind — the capture path
+        // already did this, and reading the touch back out of the consumed book
+        // made the two sources disagree about what the columns meant.
+        const Ticks pre_bid = book.has_bid() ? book.best_bid() : 0;
+        const Ticks pre_ask = book.has_ask() ? book.best_ask() : 0;
         (void)match.submit_market(e.ts, e.order_id, e.side, e.qty, /*mine=*/false);
         for (std::size_t k = fills_seen; k < match.fills().size(); ++k) {
           const Fill& f = match.fills()[k];
           const bool gone = book.qty_of(f.resting_id) == 0;
           if (warmed) {
             acc.on_consumed(f.resting_id, f.qty, rel, gone);
-            // The taker's side is the opposite of the resting order's.
-            acc.on_trade(book, rel, f.price, f.resting_side == Side::Bid ? 0 : 1, f.qty);
+            // The taker's side is the OPPOSITE of the resting order's: a
+            // resting bid is hit by a seller. This said Bid -> 0 (buy), which
+            // labelled every synthetic print with the wrong aggressor and so
+            // flipped the sign of the adverse-selection markout computed from
+            // them. It surfaced the moment prints were measured against the
+            // pre-trade touch: a "taker buy" printing a tick BELOW the ask is
+            // not a thing that can happen.
+            acc.on_trade(pre_bid, pre_ask, rel, f.price,
+                         f.resting_side == Side::Bid ? 1 : 0, f.qty);
           }
           if (gone) gen.forget_order(f.resting_id);
         }
@@ -351,7 +392,9 @@ int main(int argc, char** argv) {
       if (d.ts != 0) prev_ts = d.ts;
 
       if (d.is_trade && d.trade_qty > 0 && warmed)
-        acc.on_trade(book, rel, d.trade_price, d.taker == Side::Bid ? 0 : 1, d.trade_qty);
+        acc.on_trade(book.has_bid() ? book.best_bid() : 0,
+                     book.has_ask() ? book.best_ask() : 0,
+                     rel, d.trade_price, d.taker == Side::Bid ? 0 : 1, d.trade_qty);
 
       for (int i = 0; i < d.n; ++i) {
         acc.before_apply(book, d.ev[i], rel, warmed);
@@ -376,5 +419,22 @@ int main(int argc, char** argv) {
                static_cast<unsigned long long>(acc.orders()),
                static_cast<unsigned long long>(acc.trades()),
                static_cast<unsigned long long>(acc.mids()));
+  if (acc.prints_before_touch() > 0) {
+    const double share = 100.0 * static_cast<double>(acc.prints_before_touch())
+                       / static_cast<double>(acc.trades() + acc.prints_before_touch());
+    // A print in front of the touch means the touch we know about is not the
+    // real one. On a book rebuilt from a stream that is expected at a few per
+    // cent: it holds only what has churned since recording started, so a level
+    // inside our best is simply not there yet. These rows are dropped from the
+    // level measurement rather than counted at a negative distance. A LARGE
+    // share is a different thing — the aggressor's side is mislabelled — and the
+    // colour changes to say which one this is.
+    std::fprintf(stderr, "  \033[%sm%llu prints (%.1f%%) landed in front of the touch they "
+                         "consumed: the reconstructed touch was inside the real one. %s\033[0m\n",
+                 share > 20.0 ? "31" : "33",
+                 static_cast<unsigned long long>(acc.prints_before_touch()), share,
+                 share > 20.0 ? "At this share it is the aggressor side that is wrong, not the book."
+                              : "Dropped from the level measurement.");
+  }
   return 0;
 }

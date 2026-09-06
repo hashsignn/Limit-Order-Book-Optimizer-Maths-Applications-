@@ -11,22 +11,21 @@
 //
 //   inventory     what the position penalty acts on, and the reason a market
 //                 maker skews quotes at all.
-//   bid, ask      per side: not quoting, or (which of two price levels) x
-//                 (which quartile of the queue). Queue position is in the state
-//                 because measurement put it there — P(fill) runs 3-10% at the
-//                 front of the touch queue and 0.00% in the deepest quartile,
-//                 while tools/calibrate.py could not identify an
-//                 Avellaneda-Stoikov k on two of three instruments, because
-//                 these books sit at a one-tick spread and delta has nowhere to
-//                 vary. Distance is the small-tick state variable; this is the
-//                 large-tick one.
+//   bid, ask      per side: not quoting, or (which of three price levels) x
+//                 (how much volume is ahead of us, in five buckets). Queue
+//                 position is in the state because measurement put it there —
+//                 the realised fill hazard runs 1,019/s with nothing ahead and
+//                 16/s with 50k ahead, a factor of sixty — while
+//                 tools/calibrate.py could not identify an Avellaneda-Stoikov k
+//                 on two of three instruments, because these books sit at a
+//                 one-tick spread and delta has nowhere to vary. Distance is the
+//                 small-tick state variable; this is the large-tick one.
 //   imbalance     touch imbalance, five buckets. It earns its place: on ethusd
 //                 P(next mid move is up) runs 0.3% at the ask-heavy end to 3.0%
 //                 at the bid-heavy end.
 //
-// The action set is deliberately tiny. A one-tick spread leaves nowhere to
-// quote except the touch or one tick behind it, so per side there are three
-// choices and nine in total.
+// The action set is deliberately tiny: per side, pull or quote at one of the
+// three modelled levels, so four choices a side and sixteen in total.
 #pragma once
 
 #include <cstdint>
@@ -35,16 +34,31 @@ namespace lob::policy {
 
 inline constexpr int kMaxInventory   = 5;                        // lots, each way
 inline constexpr int kInventoryStates = 2 * kMaxInventory + 1;   // 11
-inline constexpr int kQueueBuckets   = 4;                        // 0 = front of queue
-inline constexpr int kQuoteLevels    = 2;                        // 0 = at touch, 1 = one behind
-inline constexpr int kSideStates     = 1 + kQuoteLevels * kQueueBuckets;   // 9: none, plus 2x4
+// Queue position is bucketed by the ABSOLUTE volume ahead, as a fraction of a
+// reference depth — not by quartile among the market's own resting orders,
+// which is what this did first and which was wrong by a factor of twenty.
+//
+// Fill hazard depends on how much size must trade before the queue reaches you.
+// That is an absolute quantity. Quartiles are a ranking, and a ranking taken
+// over the WRONG POPULATION at that: a market maker re-quotes the moment a
+// level clears, so its orders sit at small absolute queues far more often than
+// the book's own orders do. Measured against a touch-joining strategy's real
+// placements, the hazard at the front ran 1,019/s while the quartile-calibrated
+// model said 52/s, and the policy duly concluded that quoting behind the touch
+// was better than being in front of it.
+inline constexpr int kQueueBuckets   = 5;   // 0 = alone at the level
+// Three levels, not two. With two, a quote pushed further out simply vanished
+// from the state and the model treated that as free — so it never priced the
+// cost of being left behind, only of never having quoted.
+inline constexpr int kQuoteLevels    = 3;   // 0 = at touch, 1..2 = ticks behind
+inline constexpr int kSideStates     = 1 + kQuoteLevels * kQueueBuckets;   // 16: none, plus 3x5
 inline constexpr int kImbBuckets     = 5;
 
 inline constexpr std::uint32_t kNumStates =
     static_cast<std::uint32_t>(kInventoryStates) * kSideStates * kSideStates * kImbBuckets;
 
-inline constexpr int kSideActions = 3;                 // 0 none, 1 at touch, 2 one behind
-inline constexpr int kNumActions  = kSideActions * kSideActions;   // 9
+inline constexpr int kSideActions = 1 + kQuoteLevels;  // 0 none, then one per level
+inline constexpr int kNumActions  = kSideActions * kSideActions;   // 16
 
 // Imbalance bucket edges, matching tools/mdp_params.py. If these two ever
 // disagree the policy is solved against one book and applied to another.
@@ -63,7 +77,12 @@ struct Action {
 };
 
 // ---- side-state helpers ---------------------------------------------------
-[[nodiscard]] constexpr bool quoting(int side_state) noexcept { return side_state != 0; }
+// A side state is an index into a table, so anything negative is not a quote —
+// and saying `!= 0` meant the arithmetic below could be handed one and produce
+// a negative array subscript. In range, or flat.
+[[nodiscard]] constexpr bool quoting(int side_state) noexcept {
+  return side_state > 0 && side_state < kSideStates;
+}
 [[nodiscard]] constexpr int  level_of(int side_state) noexcept {
   return side_state == 0 ? -1 : (side_state - 1) / kQueueBuckets;
 }
@@ -117,13 +136,43 @@ inline constexpr int kBackOfQueue = kQueueBuckets - 1;
   return b;
 }
 
-// Which quartile of a level's queue our order sits in. 0 is the front, and an
-// empty level is the front rather than a special case: being alone at a price
-// IS being first in line.
-[[nodiscard]] constexpr int queue_bucket(long long ahead, long long level_size) noexcept {
-  if (level_size <= 0 || ahead <= 0) return 0;
-  const long long b = (ahead * kQueueBuckets) / level_size;
-  return b >= kQueueBuckets ? kQueueBuckets - 1 : static_cast<int>(b);
+// Volume ahead of us, as a fraction of a reference depth, in five buckets.
+//
+// `scale` is the mean touch depth the table was calibrated against, and it
+// travels in the table header so the solver and the execution path cannot
+// disagree about what "half a queue ahead" means. Being alone gets its own
+// bucket because it is a different state, not a small number: nothing has to
+// trade before you do.
+inline constexpr double kQueueEdges[kQueueBuckets - 2] = {0.02, 0.10, 0.35};
+
+[[nodiscard]] constexpr int queue_bucket(long long ahead, long long scale) noexcept {
+  if (ahead <= 0) return 0;                       // alone at the level
+  if (scale <= 0) return kQueueBuckets - 1;       // no scale: assume the worst
+  const double f = static_cast<double>(ahead) / static_cast<double>(scale);
+  int b = 1;
+  for (int i = 0; i < kQueueBuckets - 2; ++i)
+    if (f > kQueueEdges[i]) b = i + 2;
+  return b;
+}
+
+// Where a bucket begins, and where a typical order inside it sits, both in
+// fractions of `scale`. Derived from kQueueEdges rather than written out again,
+// because two lists of the same numbers is one list and a bug waiting.
+//
+// The buckets are deliberately UNEQUAL — the front of a queue is where the
+// hazard changes fastest — so a single "probability of advancing one bucket per
+// epoch" cannot be right for all of them. These let the solver turn one
+// measured drain rate into a per-bucket transition; see MdpParams::p_advance.
+[[nodiscard]] constexpr double queue_floor(int b) noexcept {
+  return b <= 1 ? 0.0 : kQueueEdges[b - 2];
+}
+[[nodiscard]] constexpr double queue_typical(int b) noexcept {
+  if (b <= 0) return 0.0;
+  // The deepest bucket is unbounded above. A full queue is the honest
+  // representative: it is exactly what joining the back of a level puts in
+  // front of you, which is the state kBackOfQueue names.
+  if (b >= kQueueBuckets - 1) return 1.0;
+  return 0.5 * (queue_floor(b) + kQueueEdges[b - 1]);
 }
 
 }  // namespace lob::policy

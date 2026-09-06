@@ -145,22 +145,65 @@ measurement last. Then you can't tell whether a change helped.
   that produced it.*
 - ❌ The tabulated policy beats the best Phase 4 baseline in the simulator, out of sample,
   with a bootstrap CI that excludes zero.
-  *Run and NOT met. The first run was on a simulator with no informed flow, where
-  market making was unprofitable at any setting and the best baseline was whichever
-  one traded least — the criterion had no answer there. Phase 3's generator now has
-  the Glosten–Milgrom structure it was missing, and on it a touch-joining maker earns
-  +7.1 ticks a fill against uninformed flow and −8.9 against 70% informed, crossing
-  zero near a 25% informed share.*
+  *Run and NOT met — but the failure changed shape completely. It now **ties** the best
+  baseline: **−30.3 against JoinTouch, CI [−118.9, +52.2], 11 of 24 seeds positive**,
+  where it previously lost by **−1,055.9, CI [−1,212.8, −897.1], 0 of 24**. It takes 121
+  passive fills to JoinTouch's 128; it used to take 7 to its 381. The criterion asks for
+  an interval excluding zero and this one spans it, so the answer is still no.*
 
-  *On that simulator the policy still loses: **−1,056 against JoinTouch, CI
-  [−1,213, −897], 0 of 24 seeds positive**. Both are profitable per fill; the policy
-  simply does not participate, taking 7 fills to JoinTouch's 381, because at flat
-  inventory it quotes one tick behind the touch. By its own arithmetic that is right —
-  1.5 ticks of edge at 0.43× the fill rate beats 0.5 at 1×. The model is what is
-  wrong: with only two quote levels and hold-in-place semantics it never prices the
-  value of being AT the touch when the touch moves, and of re-entering the queue after
-  every fill. Widening the quote window and modelling re-entry is the next piece of
-  work, and it is a modelling change rather than a tuning one.*
+  *What was wrong was four separate things, none of them the solver:*
+
+  *1. **Queue position was bucketed by rank, not volume.** The state said which quartile
+  of the market's own resting orders our queue position fell in. Fill hazard depends on
+  how much size must trade before the queue reaches you — an absolute quantity — and a
+  market maker re-quotes the moment a level clears, so its orders sit at small absolute
+  queues far more often than the book's own do. `evaluate --probe` measured our own
+  placements against the model: **1,019 fills/s at the front where the model said 52**.
+  Buckets are now fractions of a reference depth carried in the table header; realised and
+  modelled hazard agree within 3× across the range.*
+
+  *2. **The level ratio double-counted promotion.** The fill rate one tick behind the touch
+  was measured from where orders were PLACED, so an order placed behind, promoted when the
+  touch came to it, and filled at the front counted as a fill one tick behind. The MDP
+  already models promotion as its own transition, so it paid for the same event twice.
+  Measured instead from each print's distance past the touch at the moment it happened,
+  the share of volume reaching one tick past the touch is **0.2%, not 42%** — and quoting
+  behind the touch, which the old policy did at flat inventory, stops being attractive.*
+
+  *3. **The two sides' fills were mutually exclusive.** "Neither side filled" was computed
+  as 1 − p_bid − p_ask. Calibrated on real numbers those are 0.92 each, the remainder goes
+  negative, the impossible branch was dropped, and the surviving probabilities summed to
+  **1.8**. A transition function that creates probability is not a contraction: value
+  iteration diverged to a residual of **2e+57** and reported it as "did not converge",
+  which reads like it needed more sweeps. The sides are independent now, so both filling
+  in one epoch — the market maker's whole business — is a state the model can represent.
+  `stochastic()` checks the successors sum to one before any iteration happens.*
+
+  *4. **Three preferences were expressed per epoch.** The inventory penalty, the discount
+  and the executor's message budget each meant something different depending on a decision
+  grid set in another file. Matching the model's epoch to the executor's actual cadence
+  (0.5 ms, measured, not assumed) silently doubled the risk aversion and made the policy
+  worse. The penalty is now per second and the discount is a horizon in seconds; both
+  travel with the table, and `evaluate` warns when the executor's cadence and the table's
+  epoch disagree.*
+
+  *What remains is not a bug. On this generator the mid is a martingale, so inventory
+  carries variance but no expected cost, and the criterion is measured on the MEAN. Every
+  amount of risk aversion is therefore a pure drag: sweeping it on a held-out seed family
+  gives −128 at 40 ticks/lot²/s, −68 at 2.5, and +1.4 at zero, monotone throughout. At
+  zero the solved policy quotes both sides at the touch in 73% of states — it has largely
+  rediscovered JoinTouch — and the 9% where it quotes behind for adverse-selection reasons
+  is where the remaining gap lives. Beating a touch-joiner needs a process where the
+  optimiser has something to optimise: more informed flow, a real spread distribution, or
+  a criterion that prices the risk it actually avoids. The policy holds **half the peak
+  inventory** for the same P&L at a moderate penalty, and nothing in the criterion sees
+  that.*
+
+  *The solver is also 14× faster — modified policy iteration rather than plain value
+  iteration, because a one-second horizon on a half-millisecond epoch is a per-epoch
+  discount of 0.9995 and needs 35,000 backups, where the old 20,000-sweep cap stopped at
+  2e-6 and shipped nothing.*
+
 - You can point at a state and explain why the policy quotes what it quotes. A policy you
   can't interrogate is a policy you can't safely deploy.
 

@@ -30,7 +30,7 @@ MdpParams demo() {
   p.move_ticks = 0.5;
   p.discount = 0.995;
   p.inventory_penalty = 0.02;
-  p.p_advance = 0.4;
+  for (int q = 1; q < kQueueBuckets; ++q) p.p_advance[q] = 0.4 / static_cast<double>(q);
   for (int i = 0; i < kImbBuckets; ++i) {
     p.p_up[i]   = 0.01 + 0.008 * i;      // bid-heavy leans up, as measured
     p.p_down[i] = 0.05 - 0.008 * i;
@@ -39,12 +39,15 @@ MdpParams demo() {
   }
   for (int q = 0; q < kQueueBuckets; ++q) {
     p.p_fill[0][q] = 0.004 / static_cast<double>(q + 1);
-    p.p_fill[1][q] = p.p_fill[0][q] * 0.4;
+    for (int l = 1; l < kQuoteLevels; ++l) p.p_fill[l][q] = p.p_fill[l - 1][q] * 0.4;
   }
-  p.edge_ticks[0] = 0.5;
-  p.edge_ticks[1] = 1.5;
+  for (int l = 0; l < kQuoteLevels; ++l) p.edge_ticks[l] = 0.5 + l;
   return p;
 }
+
+// The scale queue buckets are fractions of. Any positive number does; the tests
+// that care fix it so the bucket boundaries land where they expect.
+constexpr std::int64_t kTestScale = 1000;
 
 }  // namespace
 
@@ -83,15 +86,40 @@ int main() {
       const int b = imb_bucket(x);
       CHECK(b >= 0 && b < kImbBuckets);
     }
-    // Alone at a price is the FRONT of the queue, not a special case.
+    // Volume ahead, as a fraction of the reference depth — not a rank. Alone
+    // gets its own bucket: nothing has to trade before we do, which is a
+    // different state from "a little has to", not a small amount of it.
     CHECK_EQ(queue_bucket(0, 1000), 0);
     CHECK_EQ(queue_bucket(0, 0), 0);
+    CHECK_EQ(queue_bucket(1, 1000), 1);        // 0.1% of a queue
+    CHECK_EQ(queue_bucket(20, 1000), 1);       // 2.0%, on the edge, still bucket 1
+    CHECK_EQ(queue_bucket(21, 1000), 2);       // just past it
+    CHECK_EQ(queue_bucket(100, 1000), 2);      // 10%, on the edge
+    CHECK_EQ(queue_bucket(101, 1000), 3);
+    CHECK_EQ(queue_bucket(350, 1000), 3);      // 35%, on the edge
+    CHECK_EQ(queue_bucket(351, 1000), kQueueBuckets - 1);
     CHECK_EQ(queue_bucket(999, 1000), kQueueBuckets - 1);
     CHECK_EQ(queue_bucket(5000, 1000), kQueueBuckets - 1);   // never past the end
-    for (long long a = 0; a <= 1000; a += 37) {
+    // No scale is not an excuse to guess a good bucket.
+    CHECK_EQ(queue_bucket(1, 0), kQueueBuckets - 1);
+    // Monotone in volume ahead. If this ever fails the buckets are not ordered
+    // and every comparison the solver makes between them is meaningless.
+    int prev = 0;
+    for (long long a = 0; a <= 2000; a += 7) {
       const int b = queue_bucket(a, 1000);
       CHECK(b >= 0 && b < kQueueBuckets);
+      CHECK(b >= prev);
+      prev = b;
     }
+    // The bucket geometry the solver turns a drain rate into transitions with.
+    for (int b = 1; b < kQueueBuckets; ++b) {
+      CHECK(queue_typical(b) > queue_floor(b));
+      CHECK(queue_floor(b) >= queue_floor(b - 1));
+      // A bucket's representative volume must actually land in that bucket.
+      if (b < kQueueBuckets - 1)
+        CHECK_EQ(queue_bucket(static_cast<long long>(queue_typical(b) * 1e6), 1'000'000), b);
+    }
+    CHECK_EQ(queue_typical(0), 0.0);
   }
 
   // ---- the process is a process ----
@@ -122,6 +150,52 @@ int main() {
     ::lobtest::report(worst < 1e-9, "successor probabilities sum to 1", __FILE__, __LINE__,
                       "worst deviation " + std::to_string(worst));
     CHECK(checked > kNumStates);   // every state had at least one legal action
+    CHECK(stochastic(p, &why));    // and the shipped check agrees
+  }
+
+  // ---- the same, with fill probabilities a real calibration produces ----
+  //
+  // The demo process above fills at 0.4% an epoch, and at those numbers almost
+  // any transition function sums to one by accident. Calibrated on a 1 ms epoch
+  // this process fills at 92% at the front of the queue, and there the earlier
+  // model — which treated the two sides as mutually exclusive and called the
+  // remainder (1 - p_bid - p_ask) — produced a NEGATIVE remainder, dropped it,
+  // and summed to 1.8. Value iteration on that diverged to 2e+57.
+  //
+  // A market maker at the touch on a fast book gets both sides filled in the
+  // same epoch all the time. That is the business. The test is that the model
+  // can represent it.
+  {
+    MdpParams p = demo();
+    for (int l = 0; l < kQuoteLevels; ++l)
+      for (int q = 0; q < kQueueBuckets; ++q)
+        p.p_fill[l][q] = 0.92;                 // both sides, near-certain, every epoch
+    for (int q = 1; q < kQueueBuckets; ++q) p.p_advance[q] = 1.0;
+    std::string why;
+    CHECK(p.validate(&why));
+    ::lobtest::report(stochastic(p, &why), "a fast process is still a probability distribution",
+                      __FILE__, __LINE__, why);
+
+    // Both sides filling in one epoch is a REACHABLE outcome, not a rounding
+    // error. Quoting both at the touch with nothing ahead, it is the single most
+    // likely thing that happens.
+    std::vector<Transition> tr;
+    const State s0{0, make_side(0, 0), make_side(0, 0), 2};
+    expand(p, encode(s0), encode_action(policy::Action{1, 1}), tr);
+    double both = 0.0;
+    for (const Transition& t : tr) {
+      const State n = decode(t.next);
+      if (n.inventory == 0 && !quoting(n.bid) && !quoting(n.ask)) both += t.prob;
+    }
+    ::lobtest::report(both > 0.5, "both sides can fill in one epoch", __FILE__, __LINE__,
+                      "P(both filled) = " + std::to_string(both));
+
+    // And it converges, which the mutually-exclusive form did not.
+    const SolveResult fast = solve(p, 1e-6, 60000);
+    ::lobtest::report(fast.converged && !fast.diverged, "a fast process still converges",
+                      __FILE__, __LINE__,
+                      "residual " + std::to_string(fast.residual) + " after "
+                      + std::to_string(fast.sweeps) + " sweeps");
   }
 
   // ---- a malformed process is refused, not solved ----
@@ -130,6 +204,7 @@ int main() {
     MdpParams p = demo(); p.imb_transition[0][0] += 0.5;
     CHECK(!p.validate(&why));
     p = demo(); p.p_fill[0][0] = 1.4;                  CHECK(!p.validate(&why));
+    p = demo(); p.p_advance[2] = 1.4;                  CHECK(!p.validate(&why));
     p = demo(); p.discount = 1.0;                      CHECK(!p.validate(&why));
     p = demo(); p.p_up[1] = 0.7; p.p_down[1] = 0.7;    CHECK(!p.validate(&why));
     p = demo(); p.inventory_penalty = -1.0;            CHECK(!p.validate(&why));
@@ -191,13 +266,18 @@ int main() {
     const std::string path = "test_policy_table.bin";
     std::string why;
     CHECK(PolicyTable::save(path, r.policy, r.value, 0xABCDEF0123456789ULL, 0.995,
-                            r.residual, static_cast<std::uint64_t>(r.sweeps), &why));
+                            r.residual, static_cast<std::uint64_t>(r.sweeps), kTestScale, 0.1, &why));
     PolicyTable t;
     CHECK(t.load(path, &why));
     CHECK(t.loaded());
     CHECK_EQ(t.header().param_hash, 0xABCDEF0123456789ULL);
     CHECK_EQ(t.header().num_states, kNumStates);
     CHECK_EQ(t.header().max_inventory, static_cast<std::uint32_t>(kMaxInventory));
+    // The scale the buckets were solved against travels with the table. An
+    // executor that divides by a different one reads a different row for every
+    // state, and nothing about that looks like a failure.
+    CHECK_EQ(t.header().queue_scale, kTestScale);
+    CHECK_NEAR(t.header().dt_s, 0.1, 1e-12);
     for (std::uint32_t s = 0; s < kNumStates; ++s) {
       CHECK_EQ(t.action_for(s), r.policy[s]);
       CHECK_NEAR(t.value_of(s), r.value[s], 1e-12);
@@ -221,7 +301,7 @@ int main() {
       ::lobtest::report(!bad.load(path, &why), "corrupt header is rejected", __FILE__, __LINE__, why);
       // Put it back for the next case.
       CHECK(PolicyTable::save(path, r.policy, r.value, 0xABCDEF0123456789ULL, 0.995,
-                              r.residual, static_cast<std::uint64_t>(r.sweeps), &why));
+                              r.residual, static_cast<std::uint64_t>(r.sweeps), kTestScale, 0.1, &why));
     }
     CHECK(!PolicyTable{}.load("no_such_policy_table.bin", &why));
     std::remove(path.c_str());
@@ -231,7 +311,7 @@ int main() {
   {
     const std::string path = "test_policy_latency.bin";
     std::string why;
-    CHECK(PolicyTable::save(path, r.policy, r.value, 1, 0.995, 0.0, 1, &why));
+    CHECK(PolicyTable::save(path, r.policy, r.value, 1, 0.995, 0.0, 1, kTestScale, 0.1, &why));
     PolicyTable t;
     CHECK(t.load(path, &why));
 
@@ -280,7 +360,7 @@ int main() {
     {
       std::vector<std::uint8_t> pol(kNumStates, encode_action(policy::Action{1, 1}));
       std::vector<double> val(kNumStates, 0.0);
-      CHECK(PolicyTable::save(path, pol, val, 7, 0.99, 0.0, 1, &why));
+      CHECK(PolicyTable::save(path, pol, val, 7, 0.99, 0.0, 1, kTestScale, 0.1, &why));
       PolicyTable t; CHECK(t.load(path, &why));
       TabulatedPolicy s2; s2.table = &t; s2.p.size = 10;
       s2.p.max_inventory = kMaxInventory * s2.p.size;
@@ -303,7 +383,7 @@ int main() {
     {
       std::vector<std::uint8_t> pol(kNumStates, encode_action(policy::Action{2, 2}));
       std::vector<double> val(kNumStates, 0.0);
-      CHECK(PolicyTable::save(path, pol, val, 7, 0.99, 0.0, 1, &why));
+      CHECK(PolicyTable::save(path, pol, val, 7, 0.99, 0.0, 1, kTestScale, 0.1, &why));
       PolicyTable t; CHECK(t.load(path, &why));
       TabulatedPolicy s2; s2.table = &t; s2.p.size = 10;
       const Quote q = s2.quote(v);
@@ -318,7 +398,7 @@ int main() {
     {
       std::vector<std::uint8_t> pol(kNumStates, encode_action(policy::Action{1, 1}));
       std::vector<double> val(kNumStates, 0.0);
-      CHECK(PolicyTable::save(path, pol, val, 7, 0.99, 0.0, 1, &why));
+      CHECK(PolicyTable::save(path, pol, val, 7, 0.99, 0.0, 1, kTestScale, 0.1, &why));
       PolicyTable t; CHECK(t.load(path, &why));
       TabulatedPolicy s2; s2.table = &t; s2.p.size = 10;
 

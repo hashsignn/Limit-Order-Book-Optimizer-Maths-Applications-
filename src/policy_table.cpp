@@ -8,7 +8,7 @@ namespace {
 constexpr char kMagic[8] = {'L', 'O', 'B', 'P', 'O', 'L', '\0', '\0'};
 
 TableHeader make_header(std::uint64_t param_hash, double discount, double residual,
-                        std::uint64_t sweeps) {
+                        std::uint64_t sweeps, std::int64_t queue_scale, double dt_s) {
   TableHeader h{};
   std::memcpy(h.magic, kMagic, sizeof kMagic);
   h.schema        = kTableSchema;
@@ -22,20 +22,23 @@ TableHeader make_header(std::uint64_t param_hash, double discount, double residu
   h.discount      = discount;
   h.residual      = residual;
   h.sweeps        = sweeps;
+  h.queue_scale   = queue_scale;
+  h.dt_s          = dt_s;
   return h;
 }
 }  // namespace
 
 bool PolicyTable::save(const std::string& path, const std::vector<std::uint8_t>& policy,
                        const std::vector<double>& value, std::uint64_t param_hash,
-                       double discount, double residual, std::uint64_t sweeps, std::string* why) {
+                       double discount, double residual, std::uint64_t sweeps,
+                       std::int64_t queue_scale, double dt_s, std::string* why) {
   auto fail = [&](const char* m) { if (why) *why = m; return false; };
   if (policy.size() != kNumStates || value.size() != kNumStates)
     return fail("policy/value length does not match the state space");
 
   std::FILE* f = std::fopen(path.c_str(), "wb");
   if (f == nullptr) return fail("cannot open the table for writing");
-  const TableHeader h = make_header(param_hash, discount, residual, sweeps);
+  const TableHeader h = make_header(param_hash, discount, residual, sweeps, queue_scale, dt_s);
   bool ok = std::fwrite(&h, sizeof h, 1, f) == 1
          && std::fwrite(policy.data(), 1, policy.size(), f) == policy.size()
          && std::fwrite(value.data(), sizeof(double), value.size(), f) == value.size();

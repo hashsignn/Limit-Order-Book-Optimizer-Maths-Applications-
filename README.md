@@ -91,45 +91,56 @@ rather than measured. See [`docs/02`](docs/02-data-and-protocols.md) §3.1–3.2
 ## Phase 5 — the optimiser
 
 ```bash
-py tools/mdp_params.py --csv csv --out policy      # the process, measured
-./build/solve --pair xrpusd --out policy/xrpusd.bin # value iteration, offline
+py tools/mdp_params.py --csv csv --out policy       # the process, measured
+./build/solve --pair ethusd --out policy/ethusd.bin # solved offline
 ```
 
-An MDP over `(inventory, bid quote, ask quote, imbalance)` — 4,455 states, 9 actions —
-solved offline by value iteration and shipped as a byte per state. Reading it is a bounds
-check and an index: **0.6 ns**, random access, measured. No solving in the hot path, ever.
+An MDP over `(inventory, bid quote, ask quote, imbalance)` — 14,080 states, 16 actions —
+solved offline and shipped as a byte per state. Reading it is a bounds check and an index:
+**0.6 ns**, random access, measured. No solving in the hot path, ever.
 
 Queue position is in the state and distance from the mid is not, because that is what the
-data said: P(fill) runs 3–10% at the front of the touch queue and 0.00% in the deepest
-quartile, while an Avellaneda–Stoikov `k` could not be identified on two of three
-instruments. The resulting policy skews hard on inventory — at the position limit it pulls
-the quote on the side that would add to the position and works the other at the touch.
+data said: an Avellaneda–Stoikov `k` could not be identified on two of three instruments,
+these books sitting at a one-tick spread 70–99% of the time. What varies is how much
+volume is queued in front of you.
+
+**How that is bucketed is the thing that decides whether the policy works.** The first
+version ranked queue position by quartile among the market's own resting orders. Fill
+hazard does not care where you rank, it cares how much size has to trade before it reaches
+you — and a market maker re-quotes the moment a level clears, so its orders sit at small
+absolute queues far more often than the book's own do. Measured against a touch-joining
+strategy's real placements, the hazard at the front ran **1,019/s where the model said 52**.
+The buckets are now fractions of a reference depth that travels in the table header, and
+realised and modelled hazard agree within 3× across the whole range.
 
 ```bash
-./build/stats --synthetic 3000000 --drift 0.0003 --grid-ms 1 --label simcal --outdir simcsv
-py tools/mdp_params.py --csv simcsv --out simpolicy --dt-ms 1 --only simcal
+./build/stats --synthetic 4000000 --grid-ms 0.5 --warmup 1 --label simcal --outdir simcsv
+py tools/mdp_params.py --csv simcsv --out simpolicy --dt-ms 0.5 --only simcal --order-size 10
 ./build/solve --params simpolicy/mdp.json --pair simcal --out simpolicy/simcal.bin
-./build/evaluate --table simpolicy/simcal.bin --drift 0.0003        # the acceptance test
+./build/evaluate --table simpolicy/simcal.bin --tune   # choose preferences here
+./build/evaluate --table simpolicy/simcal.bin          # the acceptance test
 ```
 
 `evaluate` runs every strategy through the identical driver on identical flow, on seeds
 the policy was **not** calibrated on, and settles the comparison on session P&L with a
-bootstrap over seeds. The verdict is in
-[`docs/05-roadmap.md`](docs/05-roadmap.md#phase-5--the-optimiser): **not met.** On a
-simulator where market making is a real business the policy loses to naive touch-joining
-by 1,056 (CI [−1,213, −897], 0 of 24 seeds positive) — not because it quotes badly but
-because it barely quotes, taking 7 fills to JoinTouch's 381.
+bootstrap over seeds. `--tune` moves to a different seed family, so anything chosen by
+looking at the answer is chosen away from the test. The verdict is in
+[`docs/05-roadmap.md`](docs/05-roadmap.md#phase-5--the-optimiser): **not met, but no
+longer failed.** The policy ties naive touch-joining at −30 (CI [−119, +52], 11 of 24
+seeds positive) where it previously lost by 1,056 (CI [−1,213, −897], 0 of 24) — and the
+reason it lost was four separate bugs, listed there.
 
-`evaluate --sweep-informed` measures the market itself: a touch-joining maker earns
-**+7.1 ticks a fill** against wholly uninformed flow and **−8.9** against 70% informed,
-crossing zero near a 25% informed share. That curve is the check that the simulator has a
-compensation structure at all; flat or negative everywhere means nothing solved against it
-can be interpreted.
+`evaluate --probe` is what found the first of them: it records what OUR orders experience
+and prints it beside what the model was told they would. `evaluate --sweep-informed`
+measures the market itself: a touch-joining maker earns **+7.1 ticks a fill** against
+wholly uninformed flow and **−8.9** against 70% informed, crossing zero near a 25%
+informed share.
 
 **`solve` refuses to run on a process the data could not identify**, naming the parameter.
-btcusd fails on mid dynamics (the reconstructed touch teleports rather than moves) and
-ethusd on the fill rate one tick behind the touch (one observed fill). Only xrpusd solves
-from measurement alone. A table built on a guess is indistinguishable from a calibrated one
+On ten minutes of Bitstamp, two of three instruments fail: btcusd on mid dynamics (the
+reconstructed touch teleports rather than moves) and xrpusd because its fill hazard does
+not fall with volume ahead — 19 fills at the front against 10 in the deepest bucket orders
+the buckets by noise. A table built on a guess is indistinguishable from a calibrated one
 once it is a file on disk.
 
 ## Calibration

@@ -14,61 +14,97 @@
       "steps_kept_pct": 92.87827557058327,
       "max_spread_ticks": 3.0
     },
+    "spread": {
+      "median_ticks": 1.0,
+      "p90_ticks": 1.0,
+      "share_at_one_tick": 0.9399957743503063
+    },
     "queue": {
       "mean_touch_size": 50958657.9,
       "removed_per_s": 24285136.9611496,
       "drain_fraction_per_step": 0.04765654740909022,
-      "note": "fraction of a full touch queue that leaves per epoch, both sides pooled"
+      "note": "fraction of a full touch queue that leaves per epoch, both sides pooled",
+      "scale_note": "mean_touch_size is the scale queue buckets are fractions of; it is written into the policy table header so the executor cannot bucket on another one",
+      "bucket_edges": [
+        0.02,
+        0.1,
+        0.35
+      ]
+    },
+    "hazard_size_band": {
+      "target": 10.0,
+      "n": 0,
+      "applied": false
     },
     "fill_hazard": [
       {
-        "bucket": "empty",
+        "bucket": "alone",
+        "index": 0,
         "n": 238,
         "fills": 31,
         "exposure_s": 873.0719999999999,
         "hazard_per_s": 0.035506808144116414,
+        "mean_ahead": 0.0,
         "p_fill_per_step": 0.0035443846014406866
       },
       {
-        "bucket": "q1",
-        "n": 111,
-        "fills": 4,
-        "exposure_s": 439.998,
-        "hazard_per_s": 0.00909095041341097,
-        "p_fill_per_step": 0.0009086819396363355
+        "bucket": "<2%",
+        "index": 1,
+        "n": 19,
+        "fills": 3,
+        "exposure_s": 79.569,
+        "hazard_per_s": 0.03770312558911133,
+        "mean_ahead": 184198.36842105264,
+        "p_fill_per_step": 0.003763213854761971
       },
       {
-        "bucket": "q2",
-        "n": 135,
-        "fills": 9,
-        "exposure_s": 875.0379999999999,
-        "hazard_per_s": 0.01028526761123517,
-        "p_fill_per_step": 0.0010279980087685159
+        "bucket": "<35%",
+        "index": 3,
+        "n": 147,
+        "fills": 6,
+        "exposure_s": 663.877,
+        "hazard_per_s": 0.00903781875257013,
+        "mean_ahead": 9707589.612244898,
+        "p_fill_per_step": 0.0009033735874283133
       },
       {
-        "bucket": "q3",
-        "n": 105,
-        "fills": 1,
-        "exposure_s": 351.628,
-        "hazard_per_s": 0.0028439145915569865,
-        "p_fill_per_step": 0.00028435102373791654
-      },
-      {
-        "bucket": "q4",
-        "n": 141,
-        "fills": 0,
-        "exposure_s": 580.95,
-        "hazard_per_s": 0.0,
-        "p_fill_per_step": 0.0
+        "bucket": "deep",
+        "index": 4,
+        "n": 317,
+        "fills": 5,
+        "exposure_s": 1479.621,
+        "hazard_per_s": 0.0033792437387682385,
+        "mean_ahead": 49268363.71293376,
+        "p_fill_per_step": 0.0003378672838665331
       }
     ],
     "level_ratio": {
-      "hazard_at_touch_per_s": 0.00622882754779068,
-      "hazard_one_behind_per_s": 0.0,
-      "ratio": 0.0,
-      "fills_one_behind": 0,
-      "measured": false,
-      "note": "fill hazard one tick behind the touch over the hazard at it; unmeasured unless it lands in (0,1) on at least 3 fills"
+      "volume_share_by_level": {
+        "0": {
+          "volume": 454904811.0,
+          "prints": 211,
+          "share": 1.0
+        },
+        "1": {
+          "volume": 158803598.0,
+          "prints": 33,
+          "share": 0.34909192903655617
+        },
+        "2": {
+          "volume": 158674152.0,
+          "prints": 32,
+          "share": 0.3488073728022191
+        },
+        "3": {
+          "volume": 158674152.0,
+          "prints": 32,
+          "share": 0.3488073728022191
+        }
+      },
+      "ratio": 0.34909192903655617,
+      "prints_one_behind": 33,
+      "measured": true,
+      "note": "share of traded volume that reaches one tick past the touch, measured at the moment of each print. Unmeasured unless it lands in (0,1) on at least 20 prints. The solver compounds it geometrically for the levels beyond that"
     },
     "imbalance": {
       "edges": [
@@ -177,61 +213,87 @@
       "steps_kept_pct": 85.41799617102744,
       "max_spread_ticks": 3.0
     },
+    "spread": {
+      "median_ticks": 1.0,
+      "p90_ticks": 1.0,
+      "share_at_one_tick": 0.9148325358851674
+    },
     "queue": {
       "mean_touch_size": 2439954.9,
       "removed_per_s": 1316091.3041623465,
       "drain_fraction_per_step": 0.05393916519368234,
-      "note": "fraction of a full touch queue that leaves per epoch, both sides pooled"
+      "note": "fraction of a full touch queue that leaves per epoch, both sides pooled",
+      "scale_note": "mean_touch_size is the scale queue buckets are fractions of; it is written into the policy table header so the executor cannot bucket on another one",
+      "bucket_edges": [
+        0.02,
+        0.1,
+        0.35
+      ]
+    },
+    "hazard_size_band": {
+      "target": 10.0,
+      "n": 0,
+      "applied": false
     },
     "fill_hazard": [
       {
-        "bucket": "empty",
+        "bucket": "alone",
+        "index": 0,
         "n": 227,
         "fills": 10,
         "exposure_s": 683.425,
         "hazard_per_s": 0.014632183487580936,
+        "mean_ahead": 0.0,
         "p_fill_per_step": 0.0014621483667260904
       },
       {
-        "bucket": "q1",
-        "n": 34,
+        "bucket": "<2%",
+        "index": 1,
+        "n": 11,
         "fills": 0,
-        "exposure_s": 112.253,
+        "exposure_s": 52.817,
         "hazard_per_s": 0.0,
+        "mean_ahead": 43799.90909090909,
         "p_fill_per_step": 0.0
       },
       {
-        "bucket": "q2",
-        "n": 160,
-        "fills": 3,
-        "exposure_s": 607.682,
-        "hazard_per_s": 0.004936792598760536,
-        "p_fill_per_step": 0.000493557420320978
-      },
-      {
-        "bucket": "q3",
-        "n": 92,
-        "fills": 3,
-        "exposure_s": 599.145,
-        "hazard_per_s": 0.00500713516761385,
-        "p_fill_per_step": 0.0005005881806684487
-      },
-      {
-        "bucket": "q4",
-        "n": 104,
-        "fills": 0,
-        "exposure_s": 356.025,
-        "hazard_per_s": 0.0,
-        "p_fill_per_step": 0.0
+        "bucket": "deep",
+        "index": 4,
+        "n": 378,
+        "fills": 6,
+        "exposure_s": 1622.1710000000003,
+        "hazard_per_s": 0.003698746926187189,
+        "mean_ahead": 3896260.1613756614,
+        "p_fill_per_step": 0.00036980629740746007
       }
     ],
     "level_ratio": {
-      "hazard_at_touch_per_s": 0.004070711752319289,
-      "hazard_one_behind_per_s": 0.004580873022780681,
-      "ratio": 1.1253248329780972,
-      "fills_one_behind": 1,
+      "volume_share_by_level": {
+        "0": {
+          "volume": 24716894.0,
+          "prints": 54,
+          "share": 1.0
+        },
+        "1": {
+          "volume": 1781926.0,
+          "prints": 6,
+          "share": 0.07209344345612358
+        },
+        "2": {
+          "volume": 747116.0,
+          "prints": 5,
+          "share": 0.030226937090072886
+        },
+        "3": {
+          "volume": 747116.0,
+          "prints": 5,
+          "share": 0.030226937090072886
+        }
+      },
+      "ratio": 0.07209344345612358,
+      "prints_one_behind": 6,
       "measured": false,
-      "note": "fill hazard one tick behind the touch over the hazard at it; unmeasured unless it lands in (0,1) on at least 3 fills"
+      "note": "share of traded volume that reaches one tick past the touch, measured at the moment of each print. Unmeasured unless it lands in (0,1) on at least 20 prints. The solver compounds it geometrically for the levels beyond that"
     },
     "imbalance": {
       "edges": [
@@ -338,61 +400,87 @@
       "steps_kept_pct": 79.52689383272318,
       "max_spread_ticks": 3.0
     },
+    "spread": {
+      "median_ticks": 1.0,
+      "p90_ticks": 5.0,
+      "share_at_one_tick": 0.7007319819819819
+    },
     "queue": {
       "mean_touch_size": 145335370753.7,
       "removed_per_s": 215592864449.87082,
       "drain_fraction_per_step": 0.14834163447742962,
-      "note": "fraction of a full touch queue that leaves per epoch, both sides pooled"
+      "note": "fraction of a full touch queue that leaves per epoch, both sides pooled",
+      "scale_note": "mean_touch_size is the scale queue buckets are fractions of; it is written into the policy table header so the executor cannot bucket on another one",
+      "bucket_edges": [
+        0.02,
+        0.1,
+        0.35
+      ]
+    },
+    "hazard_size_band": {
+      "target": 10.0,
+      "n": 0,
+      "applied": false
     },
     "fill_hazard": [
       {
-        "bucket": "empty",
+        "bucket": "alone",
+        "index": 0,
         "n": 563,
         "fills": 19,
         "exposure_s": 1366.683,
         "hazard_per_s": 0.013902272875275392,
+        "mean_ahead": 0.0,
         "p_fill_per_step": 0.0013892613692392253
       },
       {
-        "bucket": "q1",
-        "n": 69,
-        "fills": 7,
-        "exposure_s": 211.52799999999996,
-        "hazard_per_s": 0.033092545667713025,
-        "p_fill_per_step": 0.003303785018916372
+        "bucket": "<10%",
+        "index": 2,
+        "n": 41,
+        "fills": 3,
+        "exposure_s": 127.97599999999998,
+        "hazard_per_s": 0.023441895355379137,
+        "mean_ahead": 7318597363.097561,
+        "p_fill_per_step": 0.002341444068965637
       },
       {
-        "bucket": "q2",
-        "n": 65,
-        "fills": 4,
-        "exposure_s": 193.506,
-        "hazard_per_s": 0.020671193658077784,
-        "p_fill_per_step": 0.002064984345938492
-      },
-      {
-        "bucket": "q3",
-        "n": 72,
-        "fills": 2,
-        "exposure_s": 114.123,
-        "hazard_per_s": 0.01752495114919867,
-        "p_fill_per_step": 0.0017509603920182748
-      },
-      {
-        "bucket": "q4",
-        "n": 69,
-        "fills": 0,
-        "exposure_s": 151.82399999999996,
-        "hazard_per_s": 0.0,
-        "p_fill_per_step": 0.0
+        "bucket": "deep",
+        "index": 4,
+        "n": 227,
+        "fills": 10,
+        "exposure_s": 531.418,
+        "hazard_per_s": 0.0188175786292523,
+        "mean_ahead": 322152089506.73566,
+        "p_fill_per_step": 0.0018799884666304
       }
     ],
     "level_ratio": {
-      "hazard_at_touch_per_s": 0.02061634628864534,
-      "hazard_one_behind_per_s": 0.007982927179738267,
-      "ratio": 0.3872134794386406,
-      "fills_one_behind": 3,
-      "measured": true,
-      "note": "fill hazard one tick behind the touch over the hazard at it; unmeasured unless it lands in (0,1) on at least 3 fills"
+      "volume_share_by_level": {
+        "0": {
+          "volume": 4371544918559.0,
+          "prints": 143,
+          "share": 1.0
+        },
+        "1": {
+          "volume": 929428876535.0,
+          "prints": 15,
+          "share": 0.21260879022178028
+        },
+        "2": {
+          "volume": 355633536715.0,
+          "prints": 2,
+          "share": 0.08135191181616135
+        },
+        "3": {
+          "volume": 13146302163.0,
+          "prints": 1,
+          "share": 0.003007243985344531
+        }
+      },
+      "ratio": 0.21260879022178028,
+      "prints_one_behind": 15,
+      "measured": false,
+      "note": "share of traded volume that reaches one tick past the touch, measured at the moment of each print. Unmeasured unless it lands in (0,1) on at least 20 prints. The solver compounds it geometrically for the levels beyond that"
     },
     "imbalance": {
       "edges": [
@@ -481,7 +569,9 @@
       "p_adverse_5.0s": 0.5816993464052288,
       "n_prints": 153
     },
-    "usable_for_mdp": true,
-    "unusable_because": []
+    "usable_for_mdp": false,
+    "unusable_because": [
+      "fill hazard does not fall with volume ahead (alone 1.39e-02/s on 19 fills vs deep 1.88e-02/s on 10) \u2014 queue position is not identified in this sample"
+    ]
   }
 }

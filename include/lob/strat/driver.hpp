@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <vector>
 
 #include "lob/sim/simulator.hpp"
 #include "lob/strat/pnl.hpp"
@@ -34,6 +35,28 @@ struct RunResult {
   BootstrapCI         per_fill;
   SimStats            stats;
   std::size_t         requotes = 0;
+  // The run's wall span, so the cadences below can be derived rather than
+  // assumed. The MDP's probabilities are all per decision epoch, and the epoch
+  // the executor actually runs at is set in three different files — the message
+  // budget here (in events), the event rate in FlowConfig, and the grid
+  // apps/stats sampled on. Nothing compared them until one of them was wrong.
+  Nanos               span_ns   = 0;
+
+  // The shortest time in which the policy can change its action: the message
+  // budget converted from events into seconds. The policy is CONSULTED far more
+  // often than this — the budget only starts counting again once a quote
+  // actually moves, so between requotes the strategy is asked on every update —
+  // but it cannot act again until the budget clears, which makes this the
+  // granularity the model's epoch should match.
+  [[nodiscard]] double budget_floor_s(int quote_every) const noexcept {
+    if (stats.market_events == 0 || span_ns <= 0) return 0.0;
+    return static_cast<double>(quote_every) * static_cast<double>(span_ns)
+         / static_cast<double>(stats.market_events) / 1e9;
+  }
+  // How long a quote actually stayed put, on average.
+  [[nodiscard]] double mean_hold_s() const noexcept {
+    return requotes == 0 ? 0.0 : static_cast<double>(span_ns) / static_cast<double>(requotes) / 1e9;
+  }
   std::vector<double> per_fill_pnl;   // kept so runs can be differenced pairwise
   double              final_mid = 0.0;
   // Peak absolute position reached during the run. A limit that is only
@@ -41,6 +64,20 @@ struct RunResult {
   // between strategies that breached it by different amounts is a comparison
   // between risk appetites.
   std::int64_t        peak_inventory = 0;
+
+  // What OUR orders actually experienced: how much was queued ahead when each
+  // one was placed, how long it rested, and whether it traded. The MDP is
+  // calibrated on the hazard the market's own orders see, and that is only the
+  // hazard OURS see if the two populations look alike. Recording it is how you
+  // find out instead of assuming.
+  struct Placement {
+    Qty   ahead    = 0;   // resting at our price when we joined
+    Qty   level    = 0;   // total at that level then
+    Nanos rest_ns  = 0;   // how long it stayed
+    Qty   filled   = 0;
+    bool  at_touch = false;
+  };
+  std::vector<Placement> placements;
 
   // Session P&L: cash actually exchanged, plus whatever position is left over
   // marked at the closing mid.
@@ -75,9 +112,15 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
   std::uint64_t ev       = 0, last_quote = 0;
   double        last_mid = 0.0;
   std::int64_t  peak = 0;
+  Nanos         first_ts = 0, last_ts = 0;
   Qty           bid_left = 0, ask_left = 0;
+  RunResult::Placement bid_p{}, ask_p{};
+  Nanos         bid_at = 0, ask_at = 0;
+  std::vector<RunResult::Placement> places;
 
   auto agent = [&](const AgentView& v, Simulator& s) {
+    if (first_ts == 0) first_ts = v.now;
+    last_ts = v.now;
     // Markouts are an economic measurement of what actually happened, so they
     // use the TRUE mid, not the agent's lagged view.
     double true_mid = 0.0;
@@ -95,8 +138,8 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
       mk.on_fill(f.ts, f.price, f.qty, sign_of(our), f.resting_mine,
                  true_mid > 0.0 ? true_mid : static_cast<double>(f.price));
       if (f.resting_mine) {
-        if (f.resting_id == bid_id) bid_left -= f.qty;
-        if (f.resting_id == ask_id) ask_left -= f.qty;
+        if (f.resting_id == bid_id) { bid_left -= f.qty; bid_p.filled += f.qty; }
+        if (f.resting_id == ask_id) { ask_left -= f.qty; ask_p.filled += f.qty; }
       }
     }
 
@@ -116,8 +159,12 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
     // Executions are the only sound signal, and they are what a venue actually
     // reports. Size is counted down as fills arrive; the order is done when it
     // reaches zero, whether or not it has arrived anywhere yet.
-    if (bid_id != 0 && bid_left <= 0) bid_id = 0;
-    if (ask_id != 0 && ask_left <= 0) ask_id = 0;
+    if (bid_id != 0 && bid_left <= 0) {
+      bid_p.rest_ns = v.now - bid_at; places.push_back(bid_p); bid_id = 0;
+    }
+    if (ask_id != 0 && ask_left <= 0) {
+      ask_p.rest_ns = v.now - ask_at; places.push_back(ask_p); ask_id = 0;
+    }
 
     if (std::llabs(s.stats().inventory) > peak) peak = std::llabs(s.stats().inventory);
 
@@ -139,14 +186,26 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
     last_quote = ev;
     ++requotes;
 
-    if (bid_moved && bid_id) { s.send_cancel(bid_id); bid_id = 0; bid_left = 0; }
-    if (ask_moved && ask_id) { s.send_cancel(ask_id); ask_id = 0; ask_left = 0; }
+    if (bid_moved && bid_id) {
+      bid_p.rest_ns = v.now - bid_at; places.push_back(bid_p);
+      s.send_cancel(bid_id); bid_id = 0; bid_left = 0;
+    }
+    if (ask_moved && ask_id) {
+      ask_p.rest_ns = v.now - ask_at; places.push_back(ask_p);
+      s.send_cancel(ask_id); ask_id = 0; ask_left = 0;
+    }
     if (bid_moved && q.bid_on) {
-      bid_id = next_id++; cur_bid = q.bid; bid_left = q.bid_qty;
+      bid_id = next_id++; cur_bid = q.bid; bid_left = q.bid_qty; bid_at = v.now;
+      bid_p = RunResult::Placement{v.book.qty_at(Side::Bid, q.bid),
+                                   v.book.qty_at(Side::Bid, q.bid), 0, 0,
+                                   q.bid == v.book.best_bid()};
       s.send_limit(bid_id, Side::Bid, q.bid, q.bid_qty);
     }
     if (ask_moved && q.ask_on) {
-      ask_id = next_id++; cur_ask = q.ask; ask_left = q.ask_qty;
+      ask_id = next_id++; cur_ask = q.ask; ask_left = q.ask_qty; ask_at = v.now;
+      ask_p = RunResult::Placement{v.book.qty_at(Side::Ask, q.ask),
+                                   v.book.qty_at(Side::Ask, q.ask), 0, 0,
+                                   q.ask == v.book.best_ask()};
       s.send_limit(ask_id, Side::Ask, q.ask, q.ask_qty);
     }
   };
@@ -157,8 +216,10 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
   r.name     = Strat::name();
   r.stats    = sim.stats();
   r.requotes = requotes;
+  r.span_ns   = last_ts > first_ts ? last_ts - first_ts : 0;
   r.final_mid = last_mid;
   r.peak_inventory = peak;
+  r.placements = std::move(places);
   r.attr     = attribute(mk.fills(), dc.markout_idx, FeeSchedule{}, last_mid, sim.stats().inventory);
   for (const auto& f : mk.fills())
     if (f.filled[dc.markout_idx])
