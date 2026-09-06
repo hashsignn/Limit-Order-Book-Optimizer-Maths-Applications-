@@ -293,7 +293,12 @@ class Recorder:
         print(f"  order_deleted   {self.deleted}")
         print(f"  trade           {self.trades}")
         print(f"rate              {self.messages/elapsed if elapsed else 0:.0f}/s")
-        print(f"raw size          {self.bytes_written/1e6:.1f} MB (gzipped on disk)")
+        on_disk = sum(f.stat().st_size for f in self.outdir.glob(f"{self.pair}_*.jsonl.gz"))
+        print(f"uncompressed      {self.bytes_written/1e6:.1f} MB of JSON")
+        print(f"on disk           {on_disk/1e6:.1f} MB gzipped"
+              f"  ({self.bytes_written/max(on_disk,1):.1f}x)")
+        if elapsed > 0:
+            print(f"projected 8 h     {on_disk/1e6 * (8*3600/elapsed):.0f} MB on disk")
         print(f"files             {self.file_index}")
         if self.session > 1:
             print("\nThis capture is a SEQUENCE of sessions, not one stream.")
