@@ -74,6 +74,9 @@ target_link_libraries(jitter_probe PRIVATE lob)
 add_executable(replay apps/replay/main.cpp)
 target_link_libraries(replay PRIVATE lob)
 
+add_executable(evaluate apps/evaluate/main.cpp)
+target_link_libraries(evaluate PRIVATE lob)
+
 add_executable(solve apps/solve/main.cpp)
 target_link_libraries(solve PRIVATE lob)
 

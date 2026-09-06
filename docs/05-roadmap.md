@@ -143,8 +143,24 @@ measurement last. Then you can't tell whether a change helped.
   *0.6 ns per lookup, random access across the whole table; the solve is
   bit-identical on a re-run and the artefact carries a hash of the parameters
   that produced it.*
-- The tabulated policy beats the best Phase 4 baseline in the simulator, out of sample,
+- ❌ The tabulated policy beats the best Phase 4 baseline in the simulator, out of sample,
   with a bootstrap CI that excludes zero.
+  *Run and NOT met. The first run was on a simulator with no informed flow, where
+  market making was unprofitable at any setting and the best baseline was whichever
+  one traded least — the criterion had no answer there. Phase 3's generator now has
+  the Glosten–Milgrom structure it was missing, and on it a touch-joining maker earns
+  +7.1 ticks a fill against uninformed flow and −8.9 against 70% informed, crossing
+  zero near a 25% informed share.*
+
+  *On that simulator the policy still loses: **−1,056 against JoinTouch, CI
+  [−1,213, −897], 0 of 24 seeds positive**. Both are profitable per fill; the policy
+  simply does not participate, taking 7 fills to JoinTouch's 381, because at flat
+  inventory it quotes one tick behind the touch. By its own arithmetic that is right —
+  1.5 ticks of edge at 0.43× the fill rate beats 0.5 at 1×. The model is what is
+  wrong: with only two quote levels and hold-in-place semantics it never prices the
+  value of being AT the touch when the touch moves, and of re-entering the queue after
+  every fill. Widening the quote window and modelling re-entry is the next piece of
+  work, and it is a modelling change rather than a tuning one.*
 - You can point at a state and explain why the policy quotes what it quotes. A policy you
   can't interrogate is a policy you can't safely deploy.
 

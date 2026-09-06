@@ -197,6 +197,23 @@ int main(int argc, char** argv) {
     std::printf("  level ratio  %.3f %s\n", ratio, measured && level_ratio < 0 ? "(measured)" : "(given)");
   }
 
+  // What a fill is worth, from the measured spread rather than an assumption.
+  //
+  // MdpParams defaults these to {0.5, 1.5}, which is right only for a one-tick
+  // book. On a two-tick book it halves the edge at the touch while leaving the
+  // edge one tick behind nearly correct, and the solver duly concludes that
+  // quoting behind is optimal — which it then did, taking a thirty-eighth of
+  // the fills the naive touch-joiner took.
+  {
+    const json::View SP = json::find(P, "spread");
+    const double med = to_double(json::find_scalar(SP, "median_ticks"), 1.0);
+    const double half = (med > 0.0 ? med : 1.0) / 2.0;
+    p.edge_ticks[0] = half;          // at the touch
+    p.edge_ticks[1] = half + 1.0;    // one tick behind it
+    std::printf("  spread       %.0f ticks median -> edge %.2f at touch, %.2f one behind\n",
+                med, p.edge_ticks[0], p.edge_ticks[1]);
+  }
+
   // Advancing one quartile means a quarter of the queue in front leaving.
   {
     const json::View Q = json::find(P, "queue");

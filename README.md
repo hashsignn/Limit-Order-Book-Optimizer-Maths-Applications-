@@ -105,6 +105,27 @@ quartile, while an Avellaneda–Stoikov `k` could not be identified on two of th
 instruments. The resulting policy skews hard on inventory — at the position limit it pulls
 the quote on the side that would add to the position and works the other at the touch.
 
+```bash
+./build/stats --synthetic 3000000 --drift 0.0003 --grid-ms 1 --label simcal --outdir simcsv
+py tools/mdp_params.py --csv simcsv --out simpolicy --dt-ms 1 --only simcal
+./build/solve --params simpolicy/mdp.json --pair simcal --out simpolicy/simcal.bin
+./build/evaluate --table simpolicy/simcal.bin --drift 0.0003        # the acceptance test
+```
+
+`evaluate` runs every strategy through the identical driver on identical flow, on seeds
+the policy was **not** calibrated on, and settles the comparison on session P&L with a
+bootstrap over seeds. The verdict is in
+[`docs/05-roadmap.md`](docs/05-roadmap.md#phase-5--the-optimiser): **not met.** On a
+simulator where market making is a real business the policy loses to naive touch-joining
+by 1,056 (CI [−1,213, −897], 0 of 24 seeds positive) — not because it quotes badly but
+because it barely quotes, taking 7 fills to JoinTouch's 381.
+
+`evaluate --sweep-informed` measures the market itself: a touch-joining maker earns
+**+7.1 ticks a fill** against wholly uninformed flow and **−8.9** against 70% informed,
+crossing zero near a 25% informed share. That curve is the check that the simulator has a
+compensation structure at all; flat or negative everywhere means nothing solved against it
+can be interpreted.
+
 **`solve` refuses to run on a process the data could not identify**, naming the parameter.
 btcusd fails on mid dynamics (the reconstructed touch teleports rather than moves) and
 ethusd on the fill rate one tick behind the touch (one observed fill). Only xrpusd solves

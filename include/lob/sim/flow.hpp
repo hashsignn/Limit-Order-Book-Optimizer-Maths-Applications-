@@ -44,7 +44,83 @@ struct FlowConfig {
   // the one thing a market-making simulator has to get right.
   double        w_aggress      = 0.06;
   Qty           aggress_max    = 400;
-  double        drift_prob     = 0.02;     // chance the mid steps a tick
+
+  // ---- informed and uninformed flow (Glosten & Milgrom 1985) --------------
+  //
+  // A market maker is paid by traders who trade for reasons unrelated to value
+  // and taxed by traders who know something. Both populations have to exist or
+  // quoting makes no sense: with no informed flow there is no adverse selection
+  // to price, and with nothing but informed flow there is no reason to quote at
+  // all.
+  //
+  // This generator had NEITHER. Its mid stepped on an independent coin flip,
+  // uncorrelated with any trade, so a fill carried no information and the price
+  // moved for reasons a maker could neither anticipate nor be compensated for.
+  // Every strategy lost money, the optimal action was to stop quoting, and
+  // Phase 5's acceptance test was therefore unanswerable on it — the best
+  // baseline was whichever one traded least.
+  //
+  // Now a share of aggressive orders are informed: the value moved, and this
+  // order is the first sign of it, so the mid FOLLOWS the trade. The rest are
+  // uninformed and the mid does not move behind them. A maker keeps the spread
+  // from the second group and pays impact to the first, which is the whole
+  // economics of the business and the thing that was missing.
+  //
+  // Not every informed trade moves the price. Information arrives in pieces and
+  // the price moves when enough of it accumulates, so an informed order moves
+  // the mid a tick only with probability informed_impact_prob.
+  //
+  // That second parameter is not decoration, it is what makes the market
+  // quotable. The volatility a resting quote is exposed to over its lifetime L
+  // has to stay under the half-spread it earns, and every source counts:
+  //
+  //     L * (drift_prob + p_aggress * pi * informed_impact_prob)  <  half_spread^2
+  //
+  // L is the quote's EXPOSURE lifetime, not the requote interval. A driver that
+  // requotes every 200 events still holds a quote whose target has not moved —
+  // that hysteresis is the point, since requoting surrenders queue position —
+  // so a touch-joining quote here rests about 15 ms, or L = 7500 events at ~2 us
+  // apart. Using the requote interval instead put the bound at pi < 0.6 when
+  // the measured crossover was below 0.1, which is how the error surfaced.
+  //
+  // With L = 7500, aggressive orders at ~5.7% of the stream and half_spread of
+  // 1 tick, the bound is  pi * informed_impact_prob < 0.0021 once exogenous
+  // drift is small. At informed_impact_prob = 0.01 that leaves pi up to ~0.2,
+  // which is a realistic informed share and a quotable market.
+  //
+  // One informed order in a hundred moving the price a tick is also the right
+  // order of magnitude for a real book: on the Bitstamp captures the touch
+  // moves far more often than trades occur, because most of what moves it is
+  // quotes being pulled rather than anything trading.
+  //
+  // sweep-informed measures the curve rather than trusting this algebra, and
+  // it is the thing to re-run if any of these change.
+  double        informed_frac        = 0.20;   // pi
+  double        informed_impact_prob = 0.01;   // chance an informed order moves the mid
+  Ticks         informed_impact      = 1;      // ticks it moves when it does
+
+  // Exogenous news: the mid moving with no trade behind it at all. Real prices
+  // do that, so it is kept — but it has a ceiling, and the ceiling is
+  // derivable rather than a matter of taste.
+  //
+  // A resting quote does not move with the mid. Whenever the mid walks away
+  // from it the quote is picked off, and CONDITIONAL ON BEING FILLED the walk
+  // is adverse — that is a cost with no offsetting revenue, unlike informed
+  // flow, which at least pays the spread on the way through. Over a quote's
+  // lifetime L events the walk is sqrt(L * drift_prob) ticks, and for a maker
+  // to survive it that has to stay under the half-spread it earns:
+  //
+  //     L * drift_prob  <  half_spread^2
+  //
+  // Quotes here live about 15 ms, which at ~2 us between events is L = 7500,
+  // and half_spread is 1 tick. So L * drift_prob must stay well under 1, and
+  // it has to leave room for the informed flow below rather than spending the
+  // whole budget itself.
+  //
+  // It was 0.02 — a 12-tick walk against a 1-tick edge, a hundred and fifty
+  // times over. That single number was why every strategy lost money in the
+  // Phase 5 evaluation and why the optimal action was to stop quoting.
+  double        drift_prob     = 1e-5;
   // Adds outnumber removals in these weights, so without a brake the book grows
   // without bound and every benchmark ends up measuring an absurdly deep queue.
   // Past this many resting orders, adds are suppressed and the book holds
@@ -67,6 +143,14 @@ class FlowGenerator {
     e.seq = seq_++;
     ts_  += 1 + static_cast<Nanos>(rng_() % 5000);   // ~µs-scale gaps
 
+    // Impact from the last informed trade lands before this event, so the
+    // aggressor that carried the information traded at the OLD price and
+    // whoever supplied it is now holding at the new one. That ordering is the
+    // adverse selection; reversing it would pay the maker for being run over.
+    if (pending_impact_ != 0) {
+      mid_ += pending_impact_;
+      pending_impact_ = 0;
+    }
     if (uniform() < cfg_.drift_prob) drift();
 
     // Nothing resting yet: only Add is legal.
@@ -139,6 +223,10 @@ class FlowGenerator {
 
   [[nodiscard]] std::size_t believed_live() const noexcept { return live_.size(); }
   [[nodiscard]] Ticks mid() const noexcept { return mid_; }
+  // How the aggressive flow split, so a run can report the population it was
+  // actually drawn against rather than the one that was configured.
+  [[nodiscard]] std::uint64_t informed_trades() const noexcept { return informed_; }
+  [[nodiscard]] std::uint64_t uninformed_trades() const noexcept { return uninformed_; }
 
  private:
   struct Live { OrderId id; Qty qty; Ticks price; Side side; };
@@ -186,6 +274,17 @@ class FlowGenerator {
     const bool big = (rng_() % 10) == 0;
     e.qty = big ? 1 + static_cast<Qty>(rng_() % static_cast<std::uint64_t>(cfg_.aggress_max))
                 : 1 + static_cast<Qty>(rng_() % 40);
+
+    // Informed: the value moved and this order is acting on it, so the mid
+    // follows. A Bid aggressor is buying, which lifts the ask and takes the
+    // price up.
+    if (uniform() < cfg_.informed_frac) {
+      ++informed_;
+      if (uniform() < cfg_.informed_impact_prob)
+        pending_impact_ = (e.side == Side::Bid) ? cfg_.informed_impact : -cfg_.informed_impact;
+    } else {
+      ++uninformed_;
+    }
     return e;
   }
 
@@ -237,6 +336,8 @@ class FlowGenerator {
   std::vector<Live>                       live_;
   std::unordered_map<OrderId, std::size_t> at_;   // id -> index into live_
   Ticks             mid_     = 0;
+  Ticks             pending_impact_ = 0;
+  std::uint64_t     informed_ = 0, uninformed_ = 0;
   bool              has_bid_ = false;
   bool              has_ask_ = false;
   Ticks             best_bid_ = 0;

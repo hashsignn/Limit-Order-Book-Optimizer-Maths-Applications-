@@ -10,6 +10,22 @@
 //   4 GLFT             Guéant, Lehalle & Fernandez-Tapia (arXiv:1105.3115) —
 //                      the practical A-S, with inventory bounds.
 //   5 ImbalanceSkew    GLFT plus a tilt on order book imbalance.
+//   6 JoinTouch        quote AT the touch on both sides, pull a side at the
+//                      position limit. No price optimisation at all.
+//
+// JoinTouch exists because models 1-5 cannot express it. They all quote a
+// half-spread measured from the mid, and on a book whose spread is one tick the
+// mid sits half a tick above the bid, so the smallest half-spread the tick grid
+// admits — one tick — already puts the quote one tick BEHIND the touch. Run on
+// a large-tick instrument they therefore take almost no fills, and a comparison
+// against them is a comparison against abstention.
+//
+// This is the same fact tools/calibrate.py ran into from the other direction:
+// distance from the mid has no room to vary on these books, so a family that
+// optimises distance has nothing to optimise. On a large-tick book the decision
+// is whether to be at the touch and where you stand in its queue, and JoinTouch
+// is the naive version of that — the honest thing for a queue-aware policy to
+// have to beat.
 //
 // ---------------------------------------------------------------------------
 // A AND k ARE NOT KNOWN.
@@ -208,6 +224,23 @@ struct ImbalanceSkew {
     // before the move, widen the ask so as not to sell into it.
     return detail::assemble(mid, GLFT::half_bid(q, p) - tilt,
                                  GLFT::half_ask(q, p) + tilt, p, v.inventory);
+  }
+};
+
+struct JoinTouch {
+  static const char* name() { return "JoinTouch"; }
+  QuoteParams p;
+
+  [[nodiscard]] Quote quote(const AgentView& v) const {
+    Quote q;
+    if (!v.book.has_bid() || !v.book.has_ask()) return q;
+    q.bid = v.book.best_bid();
+    q.ask = v.book.best_ask();
+    if (q.ask <= q.bid) return q;          // a stale view can arrive crossed
+    q.bid_qty = q.ask_qty = p.size;
+    q.bid_on = v.inventory <  p.max_inventory;
+    q.ask_on = v.inventory > -p.max_inventory;
+    return q;
   }
 };
 
