@@ -212,7 +212,10 @@ int main(int argc, char** argv) {
   std::string dir = ".", label;
   double warmup_sec = 60.0, grid_ms = 100.0;
   int synthetic = 0;
-  double drift = 0.02;
+  // Negative leaves the FlowConfig default in place; see apps/evaluate for why
+  // a tool holding its own copy of a default is a way to measure a process
+  // nobody configured.
+  double drift = -1.0, informed = -1.0;
   std::uint64_t seed = 20260904;
 
   for (int i = 1; i < argc; ++i) {
@@ -224,6 +227,7 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--synthetic") == 0 && nx) synthetic = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--seed")    == 0 && nx) seed = std::strtoull(argv[++i], nullptr, 10);
     else if (std::strcmp(argv[i], "--drift")   == 0 && nx) drift = std::atof(argv[++i]);
+    else if (std::strcmp(argv[i], "--informed") == 0 && nx) informed = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--label")   == 0 && nx) label = argv[++i];
     else {
       std::fprintf(stderr,
@@ -265,7 +269,8 @@ int main(int argc, char** argv) {
     // a fill rate of zero is not a measurement of this process.
     FlowConfig fc;
     fc.seed = seed; fc.mid = 10'000; fc.levels = 8; fc.target_live = 4'000;
-    fc.drift_prob = drift;
+    if (drift >= 0.0)    fc.drift_prob    = drift;
+    if (informed >= 0.0) fc.informed_frac = informed;
     FlowGenerator gen{fc};
     OrderBook book{5'000, 10'240, 1 << 18};
     MatchingEngine match{book};

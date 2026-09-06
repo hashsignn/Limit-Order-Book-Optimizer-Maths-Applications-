@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,11 @@ struct RunResult {
   std::size_t         requotes = 0;
   std::vector<double> per_fill_pnl;   // kept so runs can be differenced pairwise
   double              final_mid = 0.0;
+  // Peak absolute position reached during the run. A limit that is only
+  // checked when the strategy is consulted is not a limit, and a comparison
+  // between strategies that breached it by different amounts is a comparison
+  // between risk appetites.
+  std::int64_t        peak_inventory = 0;
 
   // Session P&L: cash actually exchanged, plus whatever position is left over
   // marked at the closing mid.
@@ -68,6 +74,8 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
   Ticks         cur_bid  = 0, cur_ask = 0;
   std::uint64_t ev       = 0, last_quote = 0;
   double        last_mid = 0.0;
+  std::int64_t  peak = 0;
+  Qty           bid_left = 0, ask_left = 0;
 
   auto agent = [&](const AgentView& v, Simulator& s) {
     // Markouts are an economic measurement of what actually happened, so they
@@ -86,23 +94,32 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
       const Side our = f.resting_mine ? f.resting_side : opposite(f.resting_side);
       mk.on_fill(f.ts, f.price, f.qty, sign_of(our), f.resting_mine,
                  true_mid > 0.0 ? true_mid : static_cast<double>(f.price));
+      if (f.resting_mine) {
+        if (f.resting_id == bid_id) bid_left -= f.qty;
+        if (f.resting_id == ask_id) ask_left -= f.qty;
+      }
     }
 
     // An order that FILLED is gone, and the hysteresis below has to know.
+    // Tracking cancellations only left the driver believing a filled quote was
+    // still resting, so it declined to replace it until the target price moved.
     //
-    // This tracked cancellations only, so after a fill the driver went on
-    // believing the quote was still resting and declined to replace it until
-    // the target price happened to move. The cost was severe and uneven: a
-    // strategy whose target follows the touch re-quoted anyway and barely
-    // noticed, while one that holds a stable target simply stopped trading —
-    // five fills against two hundred, for the same number of requotes, which is
-    // what made it visible.
+    // The obvious repair — clear the id when the order is no longer in the book
+    // — is WRONG, and wrong in a way that looks like it works. An order still in
+    // flight is not in the book either, so every quote was forgotten the moment
+    // it was sent, a fresh one went out on the next decision, and the orphan
+    // rested forever because nothing remembered its id to cancel it. Thousands
+    // of stale own-orders accumulated, position limits stopped binding entirely
+    // (peak inventory 3,740 against a limit of 50), and fill counts looked
+    // wonderful.
     //
-    // Our own order's status is not market data. A venue reports our
-    // executions to us directly, so consulting the true book for it is
-    // legitimate in a way that reading anyone else's resting size would not be.
-    if (bid_id != 0 && s.true_book().qty_of(bid_id) == 0) bid_id = 0;
-    if (ask_id != 0 && s.true_book().qty_of(ask_id) == 0) ask_id = 0;
+    // Executions are the only sound signal, and they are what a venue actually
+    // reports. Size is counted down as fills arrive; the order is done when it
+    // reaches zero, whether or not it has arrived anywhere yet.
+    if (bid_id != 0 && bid_left <= 0) bid_id = 0;
+    if (ask_id != 0 && ask_left <= 0) ask_id = 0;
+
+    if (std::llabs(s.stats().inventory) > peak) peak = std::llabs(s.stats().inventory);
 
     if (!v.book.has_bid() || !v.book.has_ask()) return;
     ++ev;
@@ -122,10 +139,16 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
     last_quote = ev;
     ++requotes;
 
-    if (bid_moved && bid_id) { s.send_cancel(bid_id); bid_id = 0; }
-    if (ask_moved && ask_id) { s.send_cancel(ask_id); ask_id = 0; }
-    if (bid_moved && q.bid_on) { bid_id = next_id++; cur_bid = q.bid; s.send_limit(bid_id, Side::Bid, q.bid, q.bid_qty); }
-    if (ask_moved && q.ask_on) { ask_id = next_id++; cur_ask = q.ask; s.send_limit(ask_id, Side::Ask, q.ask, q.ask_qty); }
+    if (bid_moved && bid_id) { s.send_cancel(bid_id); bid_id = 0; bid_left = 0; }
+    if (ask_moved && ask_id) { s.send_cancel(ask_id); ask_id = 0; ask_left = 0; }
+    if (bid_moved && q.bid_on) {
+      bid_id = next_id++; cur_bid = q.bid; bid_left = q.bid_qty;
+      s.send_limit(bid_id, Side::Bid, q.bid, q.bid_qty);
+    }
+    if (ask_moved && q.ask_on) {
+      ask_id = next_id++; cur_ask = q.ask; ask_left = q.ask_qty;
+      s.send_limit(ask_id, Side::Ask, q.ask, q.ask_qty);
+    }
   };
 
   sim.run(agent, n_events);
@@ -135,6 +158,7 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
   r.stats    = sim.stats();
   r.requotes = requotes;
   r.final_mid = last_mid;
+  r.peak_inventory = peak;
   r.attr     = attribute(mk.fills(), dc.markout_idx, FeeSchedule{}, last_mid, sim.stats().inventory);
   for (const auto& f : mk.fills())
     if (f.filled[dc.markout_idx])

@@ -45,7 +45,13 @@ void banner(const char* t) {
   std::putchar('\n');
 }
 
-double g_drift = 0.02;   // set from --drift; see the note where it is parsed
+// Negative means "leave whatever FlowConfig declares". A tool that hardcodes
+// its own copy of a default silently overrides the header it was derived in —
+// which is what happened here: the exogenous-drift ceiling was worked out and
+// written into flow.hpp, and this file went on forcing the old value, so the
+// sweep measured a process nobody had configured.
+double g_drift = -1.0;
+double g_informed = -1.0;
 
 SimConfig make_config(std::uint64_t seed, bool latency, Nanos median_ns) {
   const double drift = g_drift;
@@ -55,7 +61,8 @@ SimConfig make_config(std::uint64_t seed, bool latency, Nanos median_ns) {
   c.flow.mid         = 10'000;
   c.flow.levels      = 8;
   c.flow.target_live = 4'000;
-  c.flow.drift_prob  = drift;
+  if (drift >= 0.0)      c.flow.drift_prob    = drift;
+  if (g_informed >= 0.0) c.flow.informed_frac = g_informed;
   c.latency.seed     = seed ^ std::uint64_t{0x9E3779B97F4A7C15};
   c.latency.median_ns = median_ns;
   return c;
@@ -76,7 +83,7 @@ struct Row {
   std::vector<double> spread;
   std::vector<double> adverse;
   std::vector<double> end_inv;
-  double passive = 0, aggressive = 0;
+  double passive = 0, aggressive = 0, peak = 0;
   std::vector<double> per_fill;   // pooled across seeds
   double fills = 0, requotes = 0;
   [[nodiscard]] double mean_net() const {
@@ -95,6 +102,7 @@ void record(Row& r, const RunResult& x) {
   r.fills      += static_cast<double>(x.attr.n_fills);
   r.passive    += static_cast<double>(x.attr.n_passive);
   r.aggressive += static_cast<double>(x.attr.n_aggressive);
+  r.peak       += static_cast<double>(x.peak_inventory);
   r.requotes += static_cast<double>(x.requotes);
 }
 
@@ -111,7 +119,7 @@ int main(int argc, char** argv) {
   // making is impossible by construction and abstaining wins. The default is
   // set proportionate to the process; --sweep-latency shows where the line is.
   Nanos median_ns = 10'000;
-  bool sweep = false, sweep_drift = false;
+  bool sweep = false, sweep_drift = false, sweep_informed = false;
 
   for (int i = 1; i < argc; ++i) {
     const bool nx = (i + 1 < argc);
@@ -131,6 +139,11 @@ int main(int argc, char** argv) {
     // weakest process on which the acceptance question is answerable.
     else if (std::strcmp(argv[i], "--drift") == 0 && nx) g_drift = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--sweep-drift") == 0) sweep_drift = true;
+    // The share of aggressive orders that are informed. This is the parameter
+    // that decides whether market making is a business at all: the maker keeps
+    // the spread from the uninformed and pays impact to the informed.
+    else if (std::strcmp(argv[i], "--informed") == 0 && nx) g_informed = std::atof(argv[++i]);
+    else if (std::strcmp(argv[i], "--sweep-informed") == 0) sweep_informed = true;
     else {
       std::fprintf(stderr,
         "evaluate --table <file.bin> [--out-of-model <file.bin>] [--seeds 24]\n"
@@ -148,6 +161,41 @@ int main(int argc, char** argv) {
   if (xmodel_path != nullptr && !have_x) std::fprintf(stderr, "out-of-model table: %s\n", why.c_str());
 
   const QuoteParams p = base_params();
+
+  if (sweep_informed) {
+    // Glosten & Milgrom, measured rather than assumed. A maker earns the spread
+    // from uninformed flow and pays impact to informed flow, so P&L should fall
+    // as pi rises and cross zero somewhere below pi = 0.5 for a half-tick
+    // spread against a one-tick impact. If this curve is flat, or negative
+    // everywhere, the generator has no compensation structure in it and no
+    // policy solved against it means anything.
+    banner("does market making pay? session P&L against the informed share");
+    std::printf("  %10s %14s %14s %9s %10s\n",
+                "informed", "JoinTouch", "TabulatedMDP", "JT pasv", "JT per fill");
+    std::printf("  %s\n", std::string(62, '-').c_str());
+    const double saved = g_informed;
+    for (const double pi : {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.7}) {
+      g_informed = pi;
+      double jt = 0.0, tb = 0.0, f = 0.0;
+      const int n = std::max(3, seeds / 4);
+      for (int s2 = 0; s2 < n; ++s2) {
+        const SimConfig c = make_config(
+            calib_seed + std::uint64_t{700} + static_cast<std::uint64_t>(s2) * std::uint64_t{104729},
+            latency, median_ns);
+        const RunResult a = run_strategy(JoinTouch{p}, c, events);
+        jt += a.pnl(); f += static_cast<double>(a.attr.n_passive);
+        TabulatedPolicy t2; t2.table = &table; t2.p = p;
+        tb += run_strategy(t2, c, events).pnl();
+      }
+      std::printf("  %9.0f%% %14.1f %14.1f %9.0f %10.3f\n",
+                  100.0 * pi, jt / n, tb / n, f / n, f > 0 ? (jt / n) / (f / n) : 0.0);
+    }
+    g_informed = saved;
+    std::printf("\n  Falling with pi is the signature of a market that pays for liquidity.\n"
+                "  Flat or negative everywhere means the generator has no compensation\n"
+                "  structure and nothing solved against it can be interpreted.\n");
+    return 0;
+  }
 
   if (sweep_drift) {
     // Choosing the process by a stated rule rather than by which answer it
@@ -239,6 +287,13 @@ int main(int argc, char** argv) {
               static_cast<unsigned long long>(calib_seed));
   std::printf("  evaluating  %d seeds x %d events, latency %s (median %.1f us)\n", seeds, events,
               latency ? "on" : "off", static_cast<double>(median_ns) / 1000.0);
+  {
+    const FlowConfig fc = make_config(0, false, 0).flow;
+    std::printf("  flow        %.0f%% of aggressive orders informed (impact %.0f%% x %lld tick),\n"
+                "              exogenous drift %.2g/event\n",
+                100.0 * fc.informed_frac, 100.0 * fc.informed_impact_prob,
+                static_cast<long long>(fc.informed_impact), fc.drift_prob);
+  }
   std::printf("  position    +-%lld shares for every strategy\n",
               static_cast<long long>(p.max_inventory));
 
@@ -273,7 +328,7 @@ int main(int argc, char** argv) {
               "  stale book, landing through the market. That is latency turning liquidity\n"
               "  provision into liquidity taking, and it is not market making.\n\n");
   std::printf("%-22s %12s %12s %12s %9s %7s %7s %8s\n",
-              "strategy", "session P&L", "spread-cap", "adv-select", "end inv",
+              "strategy", "session P&L", "spread-cap", "adv-select", "peak inv",
               "pasv", "aggr", "requotes");
   std::printf("%s\n", std::string(92, '-').c_str());
   auto mean = [](const std::vector<double>& v) {
@@ -282,7 +337,7 @@ int main(int argc, char** argv) {
   };
   for (const Row& r : rows)
     std::printf("%-22s %12.1f %12.1f %12.1f %9.1f %7.0f %7.0f %8.0f\n", r.name.c_str(),
-                r.mean_net(), mean(r.spread), mean(r.adverse), mean(r.end_inv),
+                r.mean_net(), mean(r.spread), mean(r.adverse), r.peak / seeds,
                 r.passive / seeds, r.aggressive / seeds, r.requotes / seeds);
 
   // ---- the test ----

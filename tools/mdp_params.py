@@ -41,7 +41,7 @@ def imb_bucket(x):
     return np.clip(np.digitize(x, IMB_EDGES[1:-1]), 0, N_IMB - 1)
 
 
-def estimate(csvdir, pair, max_spread):
+def estimate(csvdir, pair, max_spread, order_size):
     o = pd.read_csv(pathlib.Path(csvdir) / f"{pair}_orders.csv")
     m = pd.read_csv(pathlib.Path(csvdir) / f"{pair}_mid.csv")
     d = pd.read_csv(pathlib.Path(csvdir) / f"{pair}_depth.csv")
@@ -98,6 +98,19 @@ def estimate(csvdir, pair, max_spread):
     # which an order climbs the queue without trading — the free progress that
     # makes cancels worth separating from fills in the first place.
     drain_per_s = removed / span_s / touch_sz if touch_sz > 0 else float("nan")
+    # The half-spread a touch quote captures is not a constant: it is half of
+    # whatever the spread actually is. Hardcoding 0.5 assumes a one-tick book
+    # and silently misprices every other one — on a two-tick book it halves the
+    # edge at the touch while leaving the edge one tick behind almost right,
+    # which is exactly the bias that makes quoting behind look optimal.
+    sp = (m.ask.values - m.bid.values)
+    sp = sp[sp > 0]
+    out["spread"] = {
+        "median_ticks": float(np.median(sp)) if sp.size else 1.0,
+        "p90_ticks": float(np.percentile(sp, 90)) if sp.size else 1.0,
+        "share_at_one_tick": float((sp == 1).mean()) if sp.size else 0.0,
+    }
+
     out["queue"] = {
         "mean_touch_size": touch_sz,
         "removed_per_s": removed / span_s,
@@ -108,6 +121,23 @@ def estimate(csvdir, pair, max_spread):
     # ---- fill hazard by queue quartile ------------------------------------
     # Measured as events over exposure, so an order cancelled before filling
     # contributes time at risk without an event, which is what it is.
+    # Fill probability depends on SIZE as much as on queue position: a small
+    # order in front of a big one is consumed by a market order that barely
+    # dents its neighbour. Calibrating over every order in the book — here they
+    # run from 1 to 500 — estimates the hazard for an average-sized one, and a
+    # market maker quoting ten lots then finds itself filling far faster than
+    # the model expected. That bias is not neutral: it makes the low-fill-rate
+    # quote one tick behind the touch look better than it is.
+    #
+    # Restricted to orders of roughly our own size when one is given.
+    if order_size:
+        band = at_touch[(at_touch["size"] >= order_size * 0.4) &
+                        (at_touch["size"] <= order_size * 2.5)]
+        if len(band) >= 200:
+            at_touch = band
+        out["hazard_size_band"] = {"target": order_size, "n": int(len(band)),
+                                   "applied": bool(len(band) >= 200)}
+
     q = at_touch.q_ahead.values.astype(float)
     hz = []
     if len(at_touch) >= 60:
@@ -233,6 +263,8 @@ def main():
     ap.add_argument("--dt-ms", type=float, default=None,
                     help="decision epoch in ms; must match the grid apps/stats used")
     ap.add_argument("--only", default=None, help="one instrument label")
+    ap.add_argument("--order-size", type=float, default=None,
+                    help="restrict the fill-hazard sample to orders near this size")
     ap.add_argument("--max-spread", type=float, default=3.0,
                     help="trust a mid step only if the spread is this narrow at both ends")
     a = ap.parse_args()
@@ -248,7 +280,7 @@ def main():
                        for q in pathlib.Path(a.csv).glob("*_orders.csv"))
     all_out = {}
     for p in pairs:
-        r = estimate(a.csv, p, a.max_spread)
+        r = estimate(a.csv, p, a.max_spread, a.order_size)
         all_out[p] = r
         print(f"\n=== {p} ===")
         md = r["mid"]
@@ -257,6 +289,8 @@ def main():
         print(f"    up {100*md['p_up']:.1f}%  down {100*md['p_down']:.1f}%  flat {100*md['p_flat']:.1f}%   "
               f"median move {md['median_abs_move_ticks']:.1f}  winsorised sd {md['winsorised_sd_ticks']:.2f}  "
               f"raw sd {md['raw_sd_ticks']:.1f}  max {md['max_abs_move_ticks']:.0f} ticks")
+        print(f"  spread: median {r['spread']['median_ticks']:.0f} ticks, "
+              f"{100*r['spread']['share_at_one_tick']:.0f}% of the time at one tick")
         qq = r["queue"]
         print(f"  touch queue: mean size {qq['mean_touch_size']:,.0f}, "
               f"{100*qq['drain_fraction_per_step']:.2f}% of it leaves per epoch")
