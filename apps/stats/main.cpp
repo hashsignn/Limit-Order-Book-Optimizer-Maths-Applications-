@@ -328,6 +328,19 @@ int main(int argc, char** argv) {
   }
   const char* capture = captures.empty() ? nullptr : captures.front().c_str();
 
+  // Create the output directory rather than failing five times over. Every
+  // invocation writes five CSVs into it, so a missing directory produced five
+  // identical errors and no output -- which reads like a permissions problem
+  // rather than the one mkdir it actually is.
+  {
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+      std::fprintf(stderr, "cannot create %s: %s\n", dir.c_str(), ec.message().c_str());
+      return 2;
+    }
+  }
+
   const std::string name = !label.empty() ? label
                          : (capture ? pair_of(capture) : std::string("synthetic"));
   std::FILE* f_ord = open_out(dir, name, "orders");
