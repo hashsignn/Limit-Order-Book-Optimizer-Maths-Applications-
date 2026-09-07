@@ -35,7 +35,7 @@ The honest breakdown:
 | Order gateway + risk | **C++20/23** | Pre-trade checks are on the critical path; hard real-time |
 | **Simulator / backtester core** | **C++** (shared with live) | Must be *the same code* as live or the backtest is measuring a different system |
 | Model calibration (Hawkes MLE, QR transition matrices, fill curves) | **Python** (+ C++ kernels where needed) | Iteration speed dominates; runs offline; scipy/statsmodels/torch already have it |
-| Policy solve (HJB grid / MDP value iteration / RL) | **Python** or **C++** | Offline. Use whichever you'll finish. Output is a table either way |
+| Policy solve (HJB grid / MDP policy iteration / RL) | **Python** or **C++** | Offline. Use whichever you'll finish. Output is a table either way |
 | Analysis, plotting, research notebooks | **Python** (polars/numpy/matplotlib) | Obviously |
 | Build/orchestration | CMake + Python | — |
 
@@ -272,7 +272,7 @@ is specifically about that case.
 ├── python/
 │   ├── lobopt/                  # nanobind bindings to the C++ book & features
 │   ├── calib/                   # Hawkes, queue-reactive, fill curves, impact
-│   ├── policy/                  # HJB solver / MDP value iteration / RL training
+│   ├── policy/                  # HJB solver / MDP policy iteration / RL training
 │   └── analysis/                # notebooks, stylized-fact scorecard, latency reports
 ├── data/                        # (gitignored) captures, DBN files, calibration output
 └── docs/                        # these documents

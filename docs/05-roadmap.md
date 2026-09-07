@@ -129,9 +129,13 @@ measurement last. Then you can't tell whether a change helped.
 ## Phase 5 — The optimiser
 
 **Build**
-- Offline solver: value iteration on the discretised MDP (large-tick, following
+- Offline solver on the discretised MDP (large-tick, following
   [arXiv:1806.05849](https://arxiv.org/abs/1806.05849)) or an HJB grid solve for
   small-tick, **with latency in the state/transition model**.
+  *Built as modified policy iteration (Puterman §6.5) rather than plain value
+  iteration: a one-second horizon on a half-millisecond epoch is a per-epoch
+  discount of 0.9995 and needs ~35,000 backups, which value iteration could not
+  reach inside any sane sweep budget. Latency is still NOT in the model.*
 - Emit a **policy table** as a binary artefact with a schema version and a hash.
 - Hot path: bounds-checked lookup + guards. No solving, no branching on model internals.
 - Optional RL track as an alternative policy producer — same table interface, trained in

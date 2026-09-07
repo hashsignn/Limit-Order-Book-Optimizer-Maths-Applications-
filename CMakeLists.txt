@@ -126,6 +126,19 @@ if(LOB_BUILD_TESTS)
     message(STATUS "no data/samples captures: real-data tests skipped")
   endif()
 
+  # An hours-long recording rotates into several files with ONE snapshot beside
+  # the first. Splitting a capture and replaying the pieces must reproduce the
+  # whole, byte for byte -- if it does not, every statistic measured from a long
+  # capture is measured from a book that was reseeded or truncated mid-stream.
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND AND LOB_SAMPLE_CAPTURES)
+    add_test(NAME capture_split_replay
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_split_replay.py
+                     $<TARGET_FILE:stats> ${CMAKE_CURRENT_SOURCE_DIR}/data/samples)
+    set_tests_properties(capture_split_replay PROPERTIES TIMEOUT 300)
+  endif()
+
   # The thorough differential pass. Same code, more events — too slow to be the
   # default under a sanitizer, so it is a separate test the release CI runs.
   add_test(NAME book_differential_long COMMAND test_book_differential --long)
