@@ -175,7 +175,22 @@ class Accumulator {
       }
   }
 
+  // A reconnect means we missed messages, so every order still resting is of
+  // unknown fate: it may have filled, cancelled, or still be there. It cannot
+  // contribute an exposure-and-event pair to a hazard estimate, so it is
+  // dropped rather than closed with a guessed outcome. Returns how many, since
+  // silently discarding orders is exactly the kind of thing that should be
+  // visible in the output. Without this they would also accumulate forever
+  // across sessions, which on a long capture is a slow leak.
+  std::uint64_t on_session_reset() {
+    const std::uint64_t n = live_.size();
+    live_.clear();
+    n_abandoned_ += n;
+    return n;
+  }
+
   [[nodiscard]] std::uint64_t orders() const noexcept { return n_ord_; }
+  [[nodiscard]] std::uint64_t abandoned() const noexcept { return n_abandoned_; }
   [[nodiscard]] std::uint64_t prints_before_touch() const noexcept { return n_neg_dist_; }
   [[nodiscard]] std::uint64_t trades() const noexcept { return n_trd_; }
   [[nodiscard]] std::uint64_t mids()   const noexcept { return n_mid_; }
@@ -204,7 +219,7 @@ class Accumulator {
   std::unordered_map<OrderId, Rec> live_;
   std::vector<double>        prof_sum_ = std::vector<double>(2 * kProfileDepth, 0.0);
   std::vector<std::uint64_t> prof_n_   = std::vector<std::uint64_t>(2 * kProfileDepth, 0);
-  std::uint64_t n_ord_ = 0, n_trd_ = 0, n_mid_ = 0, n_neg_dist_ = 0;
+  std::uint64_t n_ord_ = 0, n_trd_ = 0, n_mid_ = 0, n_neg_dist_ = 0, n_abandoned_ = 0;
 };
 
 bool slurp(const char* path, std::string& out) {
@@ -449,10 +464,13 @@ int main(int argc, char** argv) {
           std::vector<BookEvent> ev2;
           dec.load_snapshot(snap2, ev2);
           for (const BookEvent& e : ev2) book.apply(e);
+          const std::uint64_t dropped = acc.on_session_reset();
           ++sessions;
-          std::fprintf(stderr, "  session %llu: reseeded from %.*s\n",
+          std::fprintf(stderr, "  session %llu: reseeded from %.*s"
+                               "  (%llu resting orders of unknown fate, dropped)\n",
                        static_cast<unsigned long long>(sessions),
-                       static_cast<int>(sname.size()), sname.data());
+                       static_cast<int>(sname.size()), sname.data(),
+                       static_cast<unsigned long long>(dropped));
         } else {
           std::fprintf(stderr, "  \033[31msession boundary with no readable snapshot -- "
                                "the book from here on is not trustworthy\033[0m\n");
@@ -495,6 +513,10 @@ int main(int argc, char** argv) {
     }
     }  // for each capture file
     const auto& ds = dec.stats();
+    if (acc.abandoned() > 0)
+      std::fprintf(stderr, "  %llu orders spanned a reconnect and were dropped: their fate is "
+                           "not in the capture\n",
+                   static_cast<unsigned long long>(acc.abandoned()));
     std::fprintf(stderr, "  %zu file(s), %llu session(s), chain gaps %llu, size violations %llu\n",
                  captures.size(), static_cast<unsigned long long>(sessions),
                  static_cast<unsigned long long>(ds.chain_gaps),
