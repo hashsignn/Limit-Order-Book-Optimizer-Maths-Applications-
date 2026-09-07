@@ -34,12 +34,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <system_error>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "lob/book/order_book.hpp"
 #include "lob/feed/bitstamp.hpp"
+#include "lob/feed/json.hpp"
 #include "lob/feed/line_reader.hpp"
 #include "lob/sim/flow.hpp"
 #include "lob/sim/matching.hpp"
@@ -212,6 +215,11 @@ bool slurp(const char* path, std::string& out) {
   return !out.empty();
 }
 
+std::string dir_of(const std::string& path) {
+  const std::size_t s = path.find_last_of("/\\");
+  return s == std::string::npos ? std::string{} : path.substr(0, s + 1);
+}
+
 std::string snapshot_beside(const std::string& capture) {
   std::string b = capture;
   if (b.size() > 3 && b.compare(b.size() - 3, 3, ".gz") == 0) b.resize(b.size() - 3);
@@ -236,9 +244,17 @@ std::FILE* open_out(const std::string& dir, const std::string& pair, const char*
 }  // namespace
 
 int main(int argc, char** argv) {
-  const char* capture = nullptr;
+  std::vector<std::string> captures;
   std::string dir = ".", label;
   double warmup_sec = 60.0, grid_ms = 100.0;
+  // Half-width of the book's price window, as a fraction of the opening mid.
+  //
+  // The window is set once from the first snapshot and never recentred, so it
+  // has to be wide enough for everything the price does during the capture. The
+  // old fixed 2% was sized for a ten-minute sample; over eight hours ETH will
+  // routinely leave it, and the events outside are REJECTED -- counted, so it is
+  // not silent, but the book then describes a market that stopped existing.
+  double band_pct = 0.02;
   int synthetic = 0;
   // Negative leaves the FlowConfig default in place; see apps/evaluate for why
   // a tool holding its own copy of a default is a way to measure a process
@@ -248,7 +264,21 @@ int main(int argc, char** argv) {
 
   for (int i = 1; i < argc; ++i) {
     const bool nx = (i + 1 < argc);
-    if      (std::strcmp(argv[i], "--capture") == 0 && nx) capture = argv[++i];
+    if      (std::strcmp(argv[i], "--capture") == 0 && nx) captures.emplace_back(argv[++i]);
+    else if (std::strcmp(argv[i], "--capture-dir") == 0 && nx) {
+      // A long recording rotates hourly, so the natural unit is a directory.
+      // Sorted by name, which is sorted by the UTC stamp the recorder embeds.
+      std::error_code ec;
+      for (const auto& e : std::filesystem::directory_iterator(argv[i + 1], ec)) {
+        const std::string n = e.path().filename().string();
+        if (n.size() > 18 && n.find("_bitstamp.jsonl") != std::string::npos)
+          captures.push_back(e.path().string());
+      }
+      if (ec) { std::fprintf(stderr, "cannot read %s: %s\n", argv[i + 1], ec.message().c_str()); return 2; }
+      std::sort(captures.begin(), captures.end());
+      ++i;
+    }
+    else if (std::strcmp(argv[i], "--band-pct") == 0 && nx) band_pct = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--outdir")  == 0 && nx) dir = argv[++i];
     else if (std::strcmp(argv[i], "--warmup")  == 0 && nx) warmup_sec = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--grid-ms") == 0 && nx) grid_ms = std::atof(argv[++i]);
@@ -259,8 +289,17 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--label")   == 0 && nx) label = argv[++i];
     else {
       std::fprintf(stderr,
-        "stats --capture <file> | --synthetic <n_events>   [--outdir .] [--warmup 60]\n"
-        "      [--grid-ms 100] [--seed N] [--label NAME]\n"
+        "stats --capture <file> [--capture <file> ...] | --capture-dir <dir>\n"
+        "      | --synthetic <n_events>\n"
+        "      [--outdir .] [--warmup 60] [--grid-ms 100] [--seed N] [--label NAME]\n"
+        "      [--band-pct 0.02]\n"
+        "\n"
+        "  --capture-dir   every *_bitstamp.jsonl.gz in a directory, in name order.\n"
+        "                  An hours-long recording rotates hourly and is seeded by a\n"
+        "                  single snapshot beside the FIRST file.\n"
+        "  --band-pct      half-width of the price window, as a fraction of the\n"
+        "                  opening mid. Prices outside it are rejected. 2%% is fine\n"
+        "                  for ten minutes and much too narrow for eight hours.\n"
         "\n"
         "Writes orders/trades/mid/depth/arrivals CSVs. --synthetic measures the\n"
         "simulator's own flow instead of a capture, which is what Phase 5's\n"
@@ -268,10 +307,11 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  if (capture == nullptr && synthetic <= 0) {
-    std::fprintf(stderr, "one of --capture or --synthetic is required\n");
+  if (captures.empty() && synthetic <= 0) {
+    std::fprintf(stderr, "one of --capture, --capture-dir or --synthetic is required\n");
     return 2;
   }
+  const char* capture = captures.empty() ? nullptr : captures.front().c_str();
 
   const std::string name = !label.empty() ? label
                          : (capture ? pair_of(capture) : std::string("synthetic"));
@@ -362,7 +402,7 @@ int main(int argc, char** argv) {
     Ticks bb = 0, ba = 0;
     if (!BitstampDecoder::snapshot_touch(snap, cfg, &bb, &ba)) return 2;
     const Ticks mid0 = (bb + ba) / 2;
-    Ticks band = (mid0 / 25) & ~Ticks{63};
+    Ticks band = static_cast<Ticks>(static_cast<double>(mid0) * 2.0 * band_pct) & ~Ticks{63};
     if (band < 4096) band = 4096;
     cfg.window_ticks = band;
     cfg.window_base  = mid0 - band / 2;
@@ -374,11 +414,53 @@ int main(int argc, char** argv) {
     dec.load_snapshot(snap, seed_ev);
     for (const BookEvent& e : seed_ev) book.apply(e);
 
-    LineReader reader;
-    if (!reader.open(capture)) { std::fprintf(stderr, "%s\n", reader.error().c_str()); return 2; }
-    std::string_view line;
+    std::printf("  window %.1f%% of the opening mid (%lld ticks, base %lld)\n",
+                100.0 * band_pct, static_cast<long long>(band),
+                static_cast<long long>(cfg.window_base));
+
     Nanos first_ts = 0, prev_ts = 0, next_grid = 0;
+    std::uint64_t sessions = 1, boundary_lines = 0;
+    // How far the TOUCH travelled, which is the only thing that decides whether
+    // the window was wide enough. Counting dropped adds does not: a book has
+    // orders resting percent away from the mid at all times, they are outside
+    // the window by design, and 13.6% of adds land there on a ten-minute sample
+    // where nothing is wrong at all.
+    Ticks lo_touch = 0, hi_touch = 0;
+    for (const std::string& path : captures) {
+    LineReader reader;
+    if (!reader.open(path.c_str())) { std::fprintf(stderr, "%s\n", reader.error().c_str()); return 2; }
+    if (captures.size() > 1)
+      std::fprintf(stderr, "  reading %s\n", path.c_str());
+    std::string_view line;
     while (reader.next(&line)) {
+      // A session boundary. The recorder writes one whenever it had to
+      // reconnect, because the gap means messages were missed and the book can
+      // no longer be repaired from the stream. Everything resting is stale, so
+      // the book is cleared and reseeded from the snapshot named on the line.
+      // Ignoring these would splice two different books together and read the
+      // join as a price move that never happened.
+      if (json::find_scalar(line, "_meta") == "session_start") {
+        ++boundary_lines;
+        const json::View sname = json::find_scalar(line, "_snapshot");
+        std::string snap2;
+        if (!sname.empty() && slurp((dir_of(path) + std::string(sname)).c_str(), snap2)) {
+          book.clear();
+          dec.reset_session();
+          std::vector<BookEvent> ev2;
+          dec.load_snapshot(snap2, ev2);
+          for (const BookEvent& e : ev2) book.apply(e);
+          ++sessions;
+          std::fprintf(stderr, "  session %llu: reseeded from %.*s\n",
+                       static_cast<unsigned long long>(sessions),
+                       static_cast<int>(sname.size()), sname.data());
+        } else {
+          std::fprintf(stderr, "  \033[31msession boundary with no readable snapshot -- "
+                               "the book from here on is not trustworthy\033[0m\n");
+        }
+        // The gap is a discontinuity in time as well as in state.
+        prev_ts = 0;
+        continue;
+      }
       const BookTouch touch{book.has_bid(), book.has_ask(),
                             book.has_bid() ? book.best_bid() : 0,
                             book.has_ask() ? book.best_ask() : 0};
@@ -401,16 +483,60 @@ int main(int argc, char** argv) {
         book.apply(d.ev[i]);
         if (warmed) acc.after_apply(book, d.ev[i], rel);
       }
+      if (book.has_bid() && book.has_ask()) {
+        if (lo_touch == 0 || book.best_bid() < lo_touch) lo_touch = book.best_bid();
+        if (book.best_ask() > hi_touch) hi_touch = book.best_ask();
+      }
 
       if (d.ts != 0 && d.ts >= next_grid) {
         next_grid = d.ts + grid;
         if (warmed) acc.on_grid(book, rel);
       }
     }
+    }  // for each capture file
     const auto& ds = dec.stats();
-    std::fprintf(stderr, "  chain gaps %llu, size violations %llu\n",
+    std::fprintf(stderr, "  %zu file(s), %llu session(s), chain gaps %llu, size violations %llu\n",
+                 captures.size(), static_cast<unsigned long long>(sessions),
                  static_cast<unsigned long long>(ds.chain_gaps),
                  static_cast<unsigned long long>(ds.size_violations));
+    (void)boundary_lines;
+    // Orders outside the price window are dropped by the DECODER, before the
+    // book ever sees them, so BookError::PriceOutOfWindow stays at zero however
+    // badly the window is chosen -- which is why this counter has to come from
+    // the decoder's own tally. Checking the book's would have reported a clean
+    // run on a capture that lost a fifth of its orders.
+    //
+    // The window is set once from the opening mid and never recentred. Over ten
+    // minutes that is fine; over eight hours the price can simply walk out of
+    // it, and everything after that point describes a market that moved on
+    // without us.
+    if (ds.out_of_window > 0)
+      std::fprintf(stderr, "  %llu adds (%.1f%%) rested outside the price window and were "
+                           "dropped, plus %llu follow-ups\n",
+                   static_cast<unsigned long long>(ds.out_of_window),
+                   100.0 * static_cast<double>(ds.out_of_window)
+                         / static_cast<double>(ds.created > 0 ? ds.created : 1),
+                   static_cast<unsigned long long>(ds.suppressed));
+    if (lo_touch > 0 && hi_touch > 0) {
+      const Ticks top = cfg.window_base + static_cast<Ticks>(cfg.window_ticks);
+      const double head_lo = 100.0 * static_cast<double>(lo_touch - cfg.window_base)
+                           / static_cast<double>(cfg.window_ticks);
+      const double head_hi = 100.0 * static_cast<double>(top - hi_touch)
+                           / static_cast<double>(cfg.window_ticks);
+      const double margin = std::min(head_lo, head_hi);
+      std::fprintf(stderr, "  touch ranged %lld..%lld, window %lld..%lld "
+                           "(%.0f%% headroom below, %.0f%% above)\n",
+                   static_cast<long long>(lo_touch), static_cast<long long>(hi_touch),
+                   static_cast<long long>(cfg.window_base), static_cast<long long>(top),
+                   head_lo, head_hi);
+      // Below this the price was close enough to the edge that a slightly
+      // different day would have walked out of it, and a touch that leaves the
+      // window does not fail loudly -- the book simply stops being told where
+      // the market is.
+      if (margin < 10.0)
+        std::fprintf(stderr, "  \033[31mthe touch came within %.0f%% of the window edge. "
+                             "Rerun with a larger --band-pct.\033[0m\n", margin);
+    }
   }
 
   acc.write_depth(f_dep);

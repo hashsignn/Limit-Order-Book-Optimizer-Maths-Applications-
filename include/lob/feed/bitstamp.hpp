@@ -228,6 +228,19 @@ class BitstampDecoder {
   // Mid price in ticks implied by a snapshot, for sizing the book's window
   // before any event is applied. Returns false if the snapshot has no
   // two-sided top.
+  // Forget every order and break the event-id chain, because a reconnect means
+  // messages were missed: the order table describes a book that has moved on,
+  // and the next event's pre_event_id will not match the last one we saw.
+  //
+  // The STATS survive. They tally problems observed across the whole capture,
+  // and zeroing them at a reconnect would hide exactly the ones a reconnect
+  // tends to cause.
+  void reset_session() noexcept {
+    live_.clear();
+    seq_ = 0;
+    last_event_id_len_ = 0;
+  }
+
   static bool snapshot_touch(std::string_view text, const BitstampConfig& cfg,
                              Ticks* best_bid, Ticks* best_ask) noexcept;
 
