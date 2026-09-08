@@ -447,7 +447,18 @@ int main(int argc, char** argv) {
                 static_cast<long long>(cfg.window_base));
 
     Nanos first_ts = 0, prev_ts = 0, next_grid = 0;
+    // The recorder writes a session_start marker at the top of EVERY session,
+    // the first included -- and that first one names the very snapshot the book
+    // was just seeded from. It is a header, not a boundary. Acting on it
+    // reseeded the book from the file it had just been built out of and counted
+    // a session that had not ended.
+    //
+    // So a marker is a boundary only once events have been decoded. That reads
+    // correctly for all three shapes: a capture with no markers at all is one
+    // session, a single-session capture with its header marker is one, and each
+    // genuine reconnect adds one.
     std::uint64_t sessions = 1, boundary_lines = 0;
+    bool seen_events = false;
     // How far the TOUCH travelled, which is the only thing that decides whether
     // the window was wide enough. Counting dropped adds does not: a book has
     // orders resting percent away from the mid at all times, they are outside
@@ -469,6 +480,7 @@ int main(int argc, char** argv) {
       // join as a price move that never happened.
       if (json::find_scalar(line, "_meta") == "session_start") {
         ++boundary_lines;
+        if (!seen_events) continue;   // the first session's own header
         const json::View sname = json::find_scalar(line, "_snapshot");
         std::string snap2;
         if (!sname.empty() && slurp((dir_of(path) + std::string(sname)).c_str(), snap2)) {
@@ -497,6 +509,7 @@ int main(int argc, char** argv) {
                             book.has_ask() ? book.best_ask() : 0};
       Decoded d;
       if (!dec.decode_line(line, touch, d)) continue;
+      seen_events = true;
       if (d.ts != 0 && first_ts == 0) { first_ts = d.ts; next_grid = d.ts; }
       const Nanos rel = (first_ts == 0) ? 0 : d.ts - first_ts;
       const bool warmed = rel >= warm;
@@ -584,18 +597,25 @@ int main(int argc, char** argv) {
     const double share = 100.0 * static_cast<double>(acc.prints_before_touch())
                        / static_cast<double>(acc.trades() + acc.prints_before_touch());
     // A print in front of the touch means the touch we know about is not the
-    // real one. On a book rebuilt from a stream that is expected at a few per
-    // cent: it holds only what has churned since recording started, so a level
-    // inside our best is simply not there yet. These rows are dropped from the
-    // level measurement rather than counted at a negative distance. A LARGE
-    // share is a different thing — the aggressor's side is mislabelled — and the
-    // colour changes to say which one this is.
+    // real one, and the usual reason is a level we never learned: the book holds
+    // only what has churned since recording started, or what the price window
+    // let in. On a ten-minute sample that is a few per cent.
+    //
+    // A large share is the same fault, larger. An eight-hour ethusd capture
+    // reported 27.6% with a 2% window whose lower edge the price came within 6%
+    // of -- adds near that edge were dropped, so our best ask sat above the real
+    // one and every print at the real touch looked like it was in front of ours.
+    // An earlier version of this message blamed the aggressor's side at that
+    // share; that was a guess, and it was wrong. Widen the window first.
     std::fprintf(stderr, "  \033[%sm%llu prints (%.1f%%) landed in front of the touch they "
-                         "consumed: the reconstructed touch was inside the real one. %s\033[0m\n",
-                 share > 20.0 ? "31" : "33",
+                         "consumed: the reconstructed touch was inside the real one.\033[0m\n"
+                         "%s",
+                 share > 10.0 ? "31" : "33",
                  static_cast<unsigned long long>(acc.prints_before_touch()), share,
-                 share > 20.0 ? "At this share it is the aggressor side that is wrong, not the book."
-                              : "Dropped from the level measurement.");
+                 share > 10.0
+                     ? "  At this share the level measurement is not usable. Check the touch\n"
+                       "  headroom below: a window the price approached is the first suspect.\n"
+                     : "  Dropped from the level measurement.\n");
   }
   return 0;
 }
