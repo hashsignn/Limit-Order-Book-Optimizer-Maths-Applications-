@@ -1,8 +1,9 @@
 # Repository audit
 
-**Instalment 1 of a multi-pass audit.** 116 tracked files, 22,088 lines. 23 files
-audited here; 93 pending and marked as such. Nothing below is asserted from
-familiarity — every finding names the line or the command that produced it.
+**Complete.** 116 tracked files, 22,088 lines, all audited. Nothing below is
+asserted from familiarity — every finding names the line, the measurement or the
+command that produced it, and three first-draft findings were corrected after
+checking rather than left standing (see section 6).
 
 **Evidence commands run** (outputs quoted in the relevant sections):
 
@@ -13,7 +14,9 @@ git ls-files -z | xargs -0 ls -l | awk '$5>50000'
 cd build && cmake .. && cmake --build . && ctest --output-on-failure
 ```
 
-Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
+Results: **no secrets found**, **no untracked files**, **25/25 tests pass**
+(26 registered; the `--long` differential pass is excluded from that run).
+The full evidence set, re-run at the close of the audit, is in section 6.
 
 ---
 
@@ -26,7 +29,7 @@ Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
 - [x] `All Rights Reserved`
 - [x] `CMakeLists.txt`
 - [x] `CMakePresets.json`
-- [ ] `README.md`
+- [x] `README.md`
 - `apps/`
   - `backtest/`
     - [x] `main.cpp`
@@ -51,31 +54,31 @@ Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
   - [x] `bench_measure.cpp`
 - `data/`
   - `samples/`
-    - [ ] `btcusd_20260904T200134Z_bitstamp.jsonl.gz`
-    - [ ] `btcusd_20260904T200134Z_snapshot.json`
-    - [ ] `ethusd_20260904T202638Z_bitstamp.jsonl.gz`
-    - [ ] `ethusd_20260904T202638Z_snapshot.json`
-    - [ ] `xrpusd_20260904T201339Z_bitstamp.jsonl.gz`
-    - [ ] `xrpusd_20260904T201339Z_snapshot.json`
+    - [x] `btcusd_20260904T200134Z_bitstamp.jsonl.gz`
+    - [x] `btcusd_20260904T200134Z_snapshot.json`
+    - [x] `ethusd_20260904T202638Z_bitstamp.jsonl.gz`
+    - [x] `ethusd_20260904T202638Z_snapshot.json`
+    - [x] `xrpusd_20260904T201339Z_bitstamp.jsonl.gz`
+    - [x] `xrpusd_20260904T201339Z_snapshot.json`
 - `docs/`
-  - [ ] `00-scope-and-architecture.md`
-  - [ ] `01-literature.md`
-  - [ ] `02-data-and-protocols.md`
-  - [ ] `03-metrics-and-estimators.md`
-  - [ ] `04-toolchain.md`
-  - [ ] `05-roadmap.md`
-  - [ ] `06-queue-reactive-plan.md`
-  - [ ] `BASELINE.md`
-  - [ ] `KNOWN-ISSUES.md`
+  - [x] `00-scope-and-architecture.md`
+  - [x] `01-literature.md`
+  - [x] `02-data-and-protocols.md`
+  - [x] `03-metrics-and-estimators.md`
+  - [x] `04-toolchain.md`
+  - [x] `05-roadmap.md`
+  - [x] `06-queue-reactive-plan.md`
+  - [x] `BASELINE.md`
+  - [x] `KNOWN-ISSUES.md`
   - `figures/`
-    - [ ] `01_order_lifetime.png`
-    - [ ] `02_cancel_vs_fill.png`
-    - [ ] `03_spread.png`
-    - [ ] `04_depth_profile.png`
-    - [ ] `05_interarrival.png`
-    - [ ] `06_markout.png`
-    - [ ] `07_ak_calibration.png`
-    - [ ] `calibration.json`
+    - [x] `01_order_lifetime.png`
+    - [x] `02_cancel_vs_fill.png`
+    - [x] `03_spread.png`
+    - [x] `04_depth_profile.png`
+    - [x] `05_interarrival.png`
+    - [x] `06_markout.png`
+    - [x] `07_ak_calibration.png`
+    - [x] `calibration.json`
 - `fuzz/`
   - [x] `decode.hpp`
   - [x] `fuzz_bitstamp.cpp`
@@ -121,11 +124,11 @@ Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
       - [x] `quoting.hpp`
       - [x] `tabulated.hpp`
 - `policy/`
-  - [ ] `ethusd.bin`
-  - [ ] `mdp.json`
-  - [ ] `queue_reactive.json`
-  - [ ] `sim_mdp.json`
-  - [ ] `simcal.bin`
+  - [x] `ethusd.bin`
+  - [x] `mdp.json`
+  - [x] `queue_reactive.json`
+  - [x] `sim_mdp.json`
+  - [x] `simcal.bin`
 - `src/`
   - [x] `bitstamp.cpp`
   - [x] `histogram.cpp`
@@ -138,7 +141,7 @@ Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
   - [x] `tsc.cpp`
 - `tests/`
   - [x] `test_arena.cpp`
-  - [ ] `test_bitstamp.cpp`
+  - [x] `test_bitstamp.cpp`
   - [x] `test_book.cpp`
   - [x] `test_book_differential.cpp`
   - [x] `test_calibration.cpp`
@@ -148,19 +151,19 @@ Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
   - [x] `test_matching.cpp`
   - [x] `test_order_map.cpp`
   - [x] `test_pnl.cpp`
-  - [ ] `test_policy.cpp`
+  - [x] `test_policy.cpp`
   - [x] `test_properties.cpp`
   - [x] `test_queue_reactive.py`
   - [x] `test_simulator.cpp`
-  - [ ] `test_split_replay.py`
+  - [x] `test_split_replay.py`
   - [x] `test_strategies.cpp`
   - [x] `test_tsc.cpp`
   - [x] `test_types.cpp`
   - [x] `test_util.hpp`
 - `tools/`
-  - [ ] `calibrate.py`
+  - [x] `calibrate.py`
   - [x] `check_capture.py`
-  - [ ] `figures.py`
+  - [x] `figures.py`
   - [x] `fit_queue_reactive.py`
   - [x] `jitter_baseline.sh`
   - [x] `mdp_params.py`
@@ -3848,66 +3851,718 @@ commit message, is what stops the next person re-evaluating it from scratch.
 
 ---
 
+### `README.md`
+
+**Status:** [x] Reviewed (399 lines, read in full)
+
+**Issues Found:** The test-count claim is stale by two orders of magnitude. The
+status paragraph is a phase behind the repository. Two path inconsistencies.
+
+- **Line 18: `ctest --preset release  # 5 suites, ~90 assertions`.** Measured:
+  ```
+  $ ctest --test-dir build -N | tail -1
+  Total Tests: 26
+  $ ctest --test-dir build -E "_long"
+  100% tests passed, 0 tests failed out of 25
+  ```
+  Twenty test files, 26 registered tests, and summing the harness's own check
+  counters across the suites gives roughly **24 million** assertions, because
+  the property and differential tests assert inside their loops. Whatever number
+  belongs here, "5 suites, ~90 assertions" is not it.
+- **Line 7: "Status: hardening — fuzzing and property tests"** and line 12's
+  summary stopping at "the baseline strategies with their P&L attribution
+  (Phase 4)". The repository has a complete Phase 5 — `apps/solve`,
+  `apps/evaluate`, `policy/ethusd.bin` — and the README documents it at line 91.
+  The status paragraph simply was not updated with the section below it.
+- **Two different binary paths in one file.** Lines 20-30 use
+  `./build/release/...`; lines 95-121 use `./build/...`.
+- **`fuzz_bitstamp` is missing from the run list** (lines 28-29 name the other
+  two), the same omission as `.github/workflows/ci.yml`.
+
+**Severity:** Minor (all — documentation drift, not defects)
+
+**Why it matters:** The assertion count is the number a reader uses to decide
+how much to trust the suite, and understating it by five orders of magnitude
+sells the work short in the one place a reader looks first.
+
+**Fix Recommendation:** Replace line 18 with `# 26 tests across 20 files`, which
+is checkable, and drop the assertion count rather than maintain it. Add
+`fuzz_bitstamp` to the run list. Move the status line forward to Phase 5 and
+state the acceptance criterion's actual result, which `docs/05-roadmap.md:150`
+already marks ❌.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** No credentials, endpoints requiring keys, or install
+instructions that would introduce one.
+
+**Market-Logic Notes:** The technical content is accurate where I checked it
+against the code — the Phase 5 description at lines 91-141, the statement that
+"the execution layer never solves an optimisation" (line 371), and the
+`evaluate --probe` explanation at lines 133-134 all match what the binaries do.
+
+---
+
+### `tools/calibrate.py`
+
+**Status:** [x] Reviewed (363 lines, read in full)
+
+**Issues Found:** None. One misplaced comment.
+
+- **`prepare()`'s comment (lines 123-126) describes an exclusion the function
+  does not perform.** Negative deltas are excluded, but in `main()` at line 149
+  (`o.delta > 0`) and counted at line 154 (`inside_spread_excluded`). The
+  comment is correct about the behaviour, it is just not in the function that
+  implements it.
+
+**Severity:** Minor
+
+**Fix Recommendation:** Move the comment to line 149.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** Nothing here is unit-tested. The estimator is the kind of
+code that would benefit from one synthetic case: generate exposures and events
+from a known `(A, k)`, fit, and assert recovery inside the reported standard
+errors. That is ten lines and it would guard every future edit to the Newton
+step.
+
+**Performance Notes:** Per-order fit rather than binned rates, vectorised over
+numpy, 100 Newton iterations maximum with an early exit. Fine.
+
+**Security Notes:** No network, no credentials. `matplotlib.use("Agg")` before
+importing `pyplot` (lines 45-47), so it is headless-safe.
+
+**Market-Logic Notes:** I checked the estimator by hand and it is correct.
+- The gradients and Hessian of `Σ(y·log μ − μ)` with `μ = T·exp(a − kδ)` are
+  transcribed correctly (lines 76-81), and the Newton step `Δ = −H⁻¹g` is
+  expanded correctly at lines 84-85.
+- **The covariance is the inverse of the *negative* Hessian** (lines 100-111),
+  and the comment records the bug that made this worth writing down: the first
+  version inverted the Hessian and clamped the resulting negative variances to
+  zero, "reports a standard error of exactly 0.0000 for every parameter. A zero
+  standard error on 15 events is not a tight fit, it is a broken one." When the
+  variance still comes out negative it is reported as `nan` rather than hidden.
+- `se_A = A·se_a` is the correct delta-method transform for `A = exp(a)`.
+- The **Wilson score interval** (lines 262-264) rather than the normal
+  approximation, which is the right choice at these counts: with 24-65 fills and
+  a small `p̂`, the normal interval routinely goes below zero.
+- Censoring is handled correctly and the header says why: "Orders cancelled
+  before filling are not missing data: they are exposure without an event, which
+  is exactly what a Poisson likelihood wants."
+- **The range problem is confronted rather than hidden** (header lines 29-37):
+  delta runs to 160,000 ticks, half of btcusd's orders rest more than 1,191
+  ticks out contributing 71,000 order-seconds against 15 fills, and "fitting an
+  exponential across that range does not measure the decay a market maker
+  experiences; it measures the fact that nobody trades $12 away from the touch."
+  So the fit is restricted, the range is printed with the answer, and it is
+  repeated at several cutoffs so instability is visible.
+- **The caveat is written into `calibration.json` itself** (lines 275-282), so
+  the artifact carries its own limitations: "Fill counts are 24-65 per
+  instrument, so these are order-of-magnitude estimates. A-S has no queue term
+  and these books sit at a one-tick spread almost always, where queue position
+  rather than distance decides fills." A calibration file that travels with its
+  own health warning is the right pattern.
+
+---
+
+### `tools/figures.py`
+
+**Status:** [x] Reviewed (315 lines, read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** The plot styling block (lines 26-44) is duplicated
+almost verbatim in `tools/calibrate.py` (lines 51-63). One shared `style.py`
+would keep the figures visually consistent as either file changes.
+
+**Tests Missing:** None warranted; the output is inspected by eye.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** `matplotlib.use("Agg")` before `pyplot` (lines 21-23), so it
+runs headless. No network, no credentials. `load()` returns `None` for a missing
+CSV rather than raising (lines 71-73), so a partial `stats` run produces the
+figures it can.
+
+**Market-Logic Notes:** `survival()` (line 76) plots order lifetime as a
+survival curve rather than a histogram, which is the correct instrument for
+censored duration data. The seven figures map one-to-one onto the estimators in
+`docs/03-metrics-and-estimators.md`.
+
+---
+
+### `docs/00-scope-and-architecture.md` through `docs/04-toolchain.md`
+
+**Status:** [x] Reviewed (300 + 292 + 242 + 278 + 161 lines, read in full)
+
+**Issues Found:** One structural drift, one label that is now half-true.
+
+- **`docs/00` §5's repository layout has diverged from the repository.** It is
+  headed "**Proposed** repository layout", so this is aspiration rather than
+  error, but the gap is now wide: `python/`, `cmake/`, `apps/calibrate/`,
+  `apps/live/`, `feed/itch.hpp`, `feed/sbe.hpp`, `book/price_level.hpp` and
+  `book/own_orders.hpp` do not exist, and the real tree has `feat/` rather than
+  `features/` and a `strat/` the layout does not mention.
+- **The same block marks `data/` "(gitignored)"**, and `data/samples/` is
+  tracked — 5.3 MB across six files. That is deliberate and `.gitignore` lines
+  6-15 explain the `data/*` plus `!data/samples/` construction and why a bare
+  `data/` would not work. The doc predates the decision.
+
+**Severity:** Minor (both)
+
+**Fix Recommendation:** Re-title §5 "Repository layout (as built)" and paste the
+current tree, or leave it as the plan and add one line saying which parts are
+built. Either is fine; silently drifting is not.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** No credentials, keys, tokens or internal hostnames in any of
+the five. `docs/02` §3 is titled "Where to get the data — **free sources
+only**", consistent with the project's stated constraint.
+
+**Market-Logic Notes:** These five are the reference the code is written
+against, and the code matches them where I checked. Three cross-references
+proved load-bearing during this audit:
+- **`docs/03` §10** specifies Total P&L as spread capture minus adverse
+  selection minus **inventory / hedging cost (mark-to-market of held
+  inventory)** minus fees minus unwind impact. `include/lob/strat/pnl.hpp`'s
+  header cites this section by name and then omits the inventory term from
+  `Attribution::total`. **The code contradicts the specification it cites** —
+  which promotes that finding from a judgement call to a defect.
+- **`docs/03` §5**, that the fill/cancel split must never be aggregated, is
+  implemented in `apps/replay` and quoted there.
+- **`docs/03` §2**'s stage taxonomy matches `Stage` in
+  `include/lob/measure/recorder.hpp` one for one.
+`docs/01`'s literature list is organised by what each paper is *for* rather than
+chronologically, with `[core]` markers, and every arXiv id I spot-checked
+against a citation in the code matched.
+
+---
+
+### `docs/05-roadmap.md`
+
+**Status:** [x] Reviewed (276 lines, read in full)
+
+**Issues Found:** None. One entry to update from this audit.
+
+- **Line 150 already marks the Phase 5 acceptance criterion ❌**: "The tabulated
+  policy beats the best Phase 4 baseline in the simulator, out of sample." That
+  is honest and current. What it does not yet record is the finding from this
+  audit — that the comparison against `JoinTouch` returns *exactly* zero, so the
+  criterion is not merely unmet, it is currently uninformative.
+
+**Severity:** Minor
+
+**Fix Recommendation:** Add one line under Phase 5 noting the exact tie and the
+baseline parameterisation defect, so the next person does not re-derive it.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** §"Permanently out of scope" (line 263) is the project's
+governing safety rule and is unambiguous: "**Sending real orders, in any form,
+on any venue.** No order gateway, no API keys, no credentials, no paper-trading
+account that could be switched to live by changing a flag." The audit found
+nothing in the repository that contradicts it — no order-entry code, no
+credentials, no authenticated endpoint, no flag that could be flipped.
+
+**Market-Logic Notes:** The ordering principle at line 255 — "**The same code in
+backtest and shadow mode**, or the comparison in Phase 6 is meaningless" — is
+what forces the design decisions elsewhere: one driver shared by
+`apps/backtest` and `apps/evaluate`, one queue-position estimator used by both
+the tabulated policy and any production system, one journal format.
+
+---
+
+### `docs/06-queue-reactive-plan.md`, `docs/BASELINE.md`, `docs/KNOWN-ISSUES.md`
+
+**Status:** [x] Reviewed (717 + 85 + 457 lines, read in full)
+
+**Issues Found:** One number in `BASELINE.md` inherits a mislabelling from the
+benchmark that produced it. `KNOWN-ISSUES.md` has two open entries this audit
+touches.
+
+- **`docs/BASELINE.md`'s "cycles/op" column** reproduces
+  `bench/bench_measure.cpp`'s output, which reports **TSC ticks**, not cycles.
+  With `constant_tsc` the TSC runs at a fixed nominal rate independent of the
+  core's actual frequency, so the two coincide only when the core runs at that
+  nominal rate. The table's own note that these are "warm-cache numbers on an
+  idle machine" is right; the column heading is not.
+- **`KNOWN-ISSUES.md` 1 (ethusd book holes) and 3 (fabricated fills) are open**
+  and correctly described. Issues 2 and 5 are marked FIXED and I confirmed both
+  in the code.
+
+**Severity:** Minor
+
+**Fix Recommendation:** Rename the column when `bench_measure` is fixed, so the
+document and its source agree. Add the baselines finding to `KNOWN-ISSUES.md` as
+a new entry — it is exactly the shape of the entries already there.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** `BASELINE.md`'s instruction to re-run after any tuning
+change and **append rather than replace** ("the point is the comparison") is the
+right convention for a machine baseline.
+
+**Security Notes:** None. No hostnames, no credentials.
+
+**Market-Logic Notes:** `KNOWN-ISSUES.md` is the most valuable document in the
+repository and the reason is its format: each entry states the symptom, the
+measurement that found it, the cause, and either the fix or an explicit open
+status. Entry 4 in particular records a defect that had been written up
+**backwards** — the touch was reported as moving 60x too often when per event it
+was about 1,000x too stable — and says so rather than quietly correcting it.
+`docs/06` carries the queue-reactive fit with its measured tables, so every
+constant in `FlowConfig::Qr` is traceable to a number in that document.
+
+---
+
+### `docs/figures/` — seven PNGs and `calibration.json`
+
+**Status:** [x] Reviewed (8 files; PNGs inspected for size and provenance,
+`calibration.json` read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a
+
+**Why it matters:** These are build outputs committed to the repository. That is
+a deliberate choice and a defensible one: the figures are referenced from the
+docs, and a reader should not need numpy, pandas and matplotlib plus a capture
+to see them.
+
+**Fix Recommendation:** None. Total size is 684 KB across eight files, the
+largest 143 KB — small enough that committing them costs nothing meaningful
+against an 8.4 MB repository.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** Nothing regenerates and diffs them, so a figure can silently
+fall out of date with the estimator that produced it. Regenerating them in CI
+and failing on a diff would be brittle (matplotlib output is not
+byte-reproducible across versions); the practical alternative is to record in
+each document the `stats` invocation that produced its figure, which
+`tools/calibrate.py`'s docstring already does.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** No EXIF or embedded metadata concerns — these are
+matplotlib Agg renders of aggregate statistics, and `calibration.json` contains
+only fitted parameters and their standard errors. Nothing identifies a person, a
+machine, or an account.
+
+**Market-Logic Notes:** `calibration.json` carries its own caveat field, quoted
+under `tools/calibrate.py`. An artifact that states the limits of what produced
+it is the right way to ship an estimate this uncertain.
+
+---
+
+### `policy/` — `ethusd.bin`, `simcal.bin`, and three JSON parameter files
+
+**Status:** [x] Reviewed (5 files; the binaries by header and provenance, the
+three JSON files read)
+
+**Issues Found:** None. One observation about what the binaries commit the
+repository to.
+
+- **`ethusd.bin` and `simcal.bin` are 126,808 bytes each** and are solved
+  policy tables. `src/policy_table.cpp` validates the magic, the schema version
+  and the **entire discretisation** before accepting one, so a stale table
+  cannot be silently consulted by a build with a different state space — it is
+  rejected with a message naming the mismatch. That is what makes committing
+  them safe.
+- **`mdp.json` (15 KB), `queue_reactive.json` (7 KB) and `sim_mdp.json` (5.6 KB)
+  are fitted parameters with their standard errors, bucket counts and event
+  counts.** Reading `queue_reactive.json`, each level carries `exposure_s`,
+  `beta`, `se`, `buckets_used` and `events` — so a reader can tell which fits
+  rest on 240 events and which do not.
+
+**Severity:** n/a
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** Nothing asserts that the committed `policy/ethusd.bin` still
+loads under the current build. It is exercised indirectly whenever
+`apps/evaluate` is run by hand, but not by `ctest`. One test that calls
+`PolicyTable::load("policy/ethusd.bin")` and checks the return value would catch
+the day a discretisation constant changes and silently invalidates the shipped
+table — which is precisely the failure `policy_table.cpp` is built to detect and
+which nothing currently triggers.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** No credentials. The `.bin` files are read through the
+validating loader described above, which bounds-checks every action byte against
+`kNumActions` before accepting the table, so a corrupted file cannot produce an
+out-of-range action index at lookup time.
+
+**Market-Logic Notes:** `mdp.json`'s first block is worth quoting as an example
+of what these files carry: `p_up`, `p_down`, `p_flat`, `median_abs_move_ticks`,
+`winsorised_sd_ticks` **and** `raw_sd_ticks`, `max_abs_move_ticks`, `samples`
+and `steps_kept_pct`. Keeping the winsorised and raw standard deviations side by
+side (5.27 against 22.20 for btcusd) is what lets a reader see how much of the
+variance is tail, which is the difference between a defensible inventory penalty
+and an arbitrary one.
+
+---
+
+### `data/samples/` — three captures and three snapshots
+
+**Status:** [x] Reviewed (6 files; sizes, tracking rules and provenance checked;
+contents sampled)
+
+**Issues Found:** None.
+
+**Severity:** n/a
+
+**Why it matters:** 5.3 MB of the repository's 8.4 MB is this directory, so it
+deserves an explicit justification, and there is one. `.gitignore` lines 12-15
+give it: "except the committed captures the real-data regression tests replay. A
+test against synthetic data only ever proves the decoder agrees with the
+generator." `CMakeLists.txt:118` registers a `capture_*` test per pair, so all
+three are exercised on every `ctest` run rather than sitting unused.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** None — these files *are* test fixtures.
+
+**Performance Notes:** The three captures are 10-minute sessions, 1.2 to 2.9 MB
+gzipped. A clone costs 8.4 MB total, which is not a burden. If more captures are
+ever committed, Git LFS becomes the right answer before the second one.
+
+**Security Notes:** **Clean, and worth stating explicitly since these are the
+only third-party data in the repository.** They are public market data from
+Bitstamp's `live_orders_*` and `live_trades_*` websocket channels plus the
+public REST order-book snapshot. There is no account identifier, no API key, no
+authentication token, and no personally identifying information — order ids are
+exchange-assigned integers that identify an order, not a person. Nothing here
+required credentials to obtain and nothing here could be used to obtain any.
+
+**Market-Logic Notes:** The `.gitignore` construction is the interesting part
+and the comment explains a real Git subtlety: `data/*` rather than a bare
+`data/`, because "Git will not descend into an excluded DIRECTORY, so a bare
+`data/` makes the re-include below unreachable and `git add data/samples` fails
+with nothing but a hint." Choosing three instruments across three price scales —
+btcusd near $79,875, ethusd, and xrpusd near $1.40 — is what makes the
+decimal-detection and price-window logic testable at all, since a fixed tick
+count that suits one is absurd for the others.
+
+---
+
+### `tests/test_policy.cpp`
+
+**Status:** [x] Reviewed (504 lines, read in full)
+
+**Issues Found:** A second wall-clock assertion in a unit test. One precision
+correction to a finding recorded earlier in this audit.
+
+- **`CHECK(ns < 100.0)` on the policy lookup** (line 391). Like
+  `tests/test_tsc.cpp:92`, this asserts a timing on a shared machine. It is
+  better constructed than that one — the probes are random states across the
+  whole table, so it is "a cache-miss-inclusive number rather than a hot-loop
+  one", and the comment says "The claim is nanoseconds, not that it is free" —
+  but on an oversubscribed CI container a preemption inside a 65,536-iteration
+  loop still breaks it.
+- **Correction to the `tests/test_strategies.cpp` finding.** Line 492
+  constructs a near-default `QuoteParams` (only `size` and `max_inventory` are
+  set), which is the same shape as `apps/evaluate`'s `base_params()`. But it is
+  handed to `JoinTouch`, which never reads `gamma`, `sigma` or `horizon`. So the
+  accurate statement is: **no test anywhere exercises the default risk
+  parameters through a strategy that uses them.** The defaults are constructed;
+  they are simply never read.
+
+**Severity:** Minor (the timing assertion), plus the correction above
+
+**Fix Recommendation:** Print the lookup cost and assert a ceiling a stall
+cannot cross, or gate the assertion on `tsc::calibration().trustworthy`.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** Nothing that the shipped table still loads under the current
+build — recorded under `policy/`.
+
+**Performance Notes:** As above. The design of the measurement is right even
+where the assertion is fragile.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** This is a thorough file and three blocks earn naming.
+- **The discretisation round-trips for every state** (lines 55-79): `encode` and
+  `decode` are checked over the entire state space, not a sample, and every
+  action byte round-trips. Given that `PolicyTable::load` rejects a table solved
+  over a different discretisation, an encode/decode asymmetry would be the one
+  way a wrong answer could still get through.
+- **"the process is a process"** (lines 125-155) verifies that every state's
+  successor probabilities sum to 1 to within 1e-9 and that every state has at
+  least one legal action. An MDP whose transitions do not sum to 1 is not a
+  contraction and value iteration on it does not converge to anything.
+- **The move-fill split** (lines 156-212) is checked as a **split**, not a
+  change: the comment explains that charging every move-fill the full move made
+  a touch quote arithmetically a loser on real data, that the measurement says
+  the move has reverted two thirds of the time by the holding horizon, and that
+  the fix must preserve probability mass — "A branch that creates mass is not a
+  contraction and value iteration diverges on it." Testing the conservation
+  property rather than the numbers is the right choice.
+- **A malformed process is refused, not solved** (line 258), and the position
+  limit is tested as a constraint on the **action** rather than on the state
+  (line 270), which is the distinction that keeps the solver from quietly
+  producing a policy that violates it.
+
+---
+
+### `tests/test_bitstamp.cpp`
+
+**Status:** [x] Reviewed (585 lines, read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a
+
+**Why it matters:** This is the test for the only untrusted-input path in the
+project, and it is built the right way round.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** The two entry points recorded under `fuzz/fuzz_bitstamp.cpp`
+— `detect_decimals` and `snapshot_touch` — are covered here with valid input but
+not with hostile input. Fuzzing is the right home for that, not this file.
+
+**Performance Notes:** `main` takes an optional capture path and snapshot from
+`argv` (line 581), and `CMakeLists.txt:118` registers one `capture_*` test per
+sample pair. So the same binary is both a unit test and a real-data regression
+test, and the three committed captures are replayed on every `ctest` run.
+
+**Security Notes:** None. All fixtures are string literals; the real-capture
+path reads files the repository ships.
+
+**Market-Logic Notes:** Two things make this file unusually good.
+- **The fixtures are verbatim lines from a real capture, and the header says why
+  that distinction earned its keep** (lines 3-9): "the documented plan was to
+  recover the cancel/fill split by joining order ids against the trade channel,
+  and the real bytes turned out to carry `amount_traded` on every message, which
+  is both exact and clock-free. Testing against documentation would have
+  enshrined the worse design." That is the strongest argument for real fixtures
+  I have seen stated in a test file, and it is backed by a specific outcome.
+- **The seed-guard block** (lines 498-531) tests the measured behaviour rather
+  than the intended one. It pins exactly which snapshot orders seed and which do
+  not, checks that seeded orders are also *registered* with the decoder — "or it
+  will emit deletes the book rejects as unknown" — and records the measurement
+  that justifies the guard: excluding near-touch snapshot orders is "worth 39
+  points of accuracy on xrpusd, measured as the share of trades printing inside
+  the touch." It also tests the two degenerate ends: a guard wider than the book
+  seeds nothing, and a two-column snapshot ("L2 wearing L3's clothes") fails
+  loudly rather than being decoded as though it had order ids.
+
+---
+
+### `tests/test_split_replay.py`
+
+**Status:** [x] Reviewed (71 lines, read in full)
+
+**Issues Found:** None. One small robustness note.
+
+- **`gzip.open(src, "rt").readlines()`** (line 42) reads the whole capture into
+  memory and never closes the handle. At 2.9 MB gzipped that is fine, and
+  CPython's refcounting closes it at the end of the statement; on another
+  interpreter it would leak until collection.
+
+**Severity:** Minor
+
+**Fix Recommendation:** `with gzip.open(...) as f: lines = f.readlines()`.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** n/a — this is a test.
+
+**Performance Notes:** Runs `stats` twice over the same capture, once whole and
+once split. Slower than a unit test and it is the only way to check the
+property.
+
+**Security Notes:** `subprocess.run` with a list argument, no `shell=True`, and
+every path from `tempfile.TemporaryDirectory()` or `sys.argv`. No injection
+surface.
+
+**Market-Logic Notes:** The property under test is exactly right and the
+docstring says why it needs a test at all: "Getting this wrong does not fail
+loudly. The book would simply be reseeded or truncated at each file boundary,
+and every distribution measured afterwards would be measured from a book that
+briefly described a different market." Comparing the **CSV outputs byte for
+byte** (line 61) rather than comparing summary statistics is what makes it a
+real check — a reseed at a boundary would shift many numbers slightly, and a
+tolerance-based comparison would absorb it. The split is constructed to mirror
+what the recorder actually produces: three files whose names sort in stream
+order the way UTC stamps do, and one snapshot beside the first only.
+
+---
+
 ## 3. Consolidated summary
 
+**Scope:** all 116 tracked files, 22,088 lines, every one read in full. Binary
+assets (PNGs, `.bin` policy tables, `.gz` captures) were audited by header,
+size, tracking rule and provenance rather than byte by byte; every text file was
+read line by line.
+
 ### Critical
-None found in the 23 files audited.
+| # | Item | File | Owner |
+|---|---|---|---|
+| C1 | **Five of the seven rows in the Phase 5 acceptance table do not measure what they report.** `InventorySkew` and `AvellanedaStoikov` centre on a reservation price of `mid − inventory·5000` ticks under the shipped `QuoteParams` defaults, and `assemble` clamps the half-spread but never the centre — so at an inventory of one share the ask is quoted 4,999 ticks below the best bid. Measured: 2 passive fills against 37,224 aggressive ones. `GLFT` and `ImbalanceSkew` have the opposite failure: `min_half = 1` swallows their entire inventory term across the whole ±50 position range, so both are `ConstantSpread` with extra arithmetic. And `TabulatedMDP` is byte-identical to `JoinTouch` in all seven columns, with the paired comparison reporting mean +0.0, CI [+0.0, +0.0]. | `include/lob/strat/quoting.hpp`, `apps/evaluate/main.cpp` | research |
+
+`apps/backtest` and `tests/test_strategies.cpp` both override `horizon` to 1.0
+and are unaffected. `apps/evaluate`'s `base_params()` sets only `size` and
+`max_inventory`, and `apps/evaluate` is the acceptance test.
 
 ### High
 | # | Item | File | Owner |
 |---|---|---|---|
-| H1 | `fills_` grows without bound; scales with run length | `include/lob/sim/matching.hpp` | simulator |
+| H1 | `Attribution::total` omits `inventory_mtm`, so the backtest's headline P&L ignores the closing position. `docs/03-metrics-and-estimators.md` §10 — which this file's header cites by name — lists inventory mark-to-market as one of the five lines. `apps/sim_demo` and `RunResult::pnl()` both compute it correctly; the attribution path lost it. Every `attribute` call in `tests/test_pnl.cpp` passes `final_inventory = 0`. | `include/lob/strat/pnl.hpp`, `apps/backtest/main.cpp` | research |
+| H2 | The simulator never publishes fills caused by the agent's own orders unless a market `Aggress` event happens to follow, and then stamps them with that event's timestamp. Until then `view_book_` still shows resting orders the agent's own order consumed. The two-book design exists to make the view *lag*; this makes it *wrong*. | `include/lob/sim/simulator.hpp` | simulator |
+| H3 | `JournalWriter` discards every `fwrite` and `fclose` return value, in the one class whose stated contract is byte-for-byte reproducibility. `written()` has never returned anything but zero. `batch_records = 0` is a heap buffer overflow on the first `append`. | `include/lob/measure/journal.hpp` | measure |
+| H4 | `MatchingEngine::fills_` grows without bound for the life of a run. `fuzz/fuzz_matching.cpp` calls `clear_fills()` every 32 ops to work around it. | `include/lob/sim/matching.hpp` | simulator |
 
 ### Medium
 | # | Item | File | Owner |
 |---|---|---|---|
-| M1 | REST snapshot used without status or schema check | `tools/record_bitstamp.py` | data |
-| M2 | Acceptance test noise-dominated: CI ±2,700 on a mean of −1,136 | `apps/evaluate/main.cpp` | research |
-| M3 | Two baselines send 150k aggressive fills in 250k events | `include/lob/strat/quoting.hpp` | research |
-| M4 | ethusd book develops holes over multi-hour captures | `src/bitstamp.cpp` | data |
+| M1 | `LatencyRecorder::report()` prints `max()` and never reads `overflow_count()`, so a clamped worst case is reported as the worst case. (`Histogram`'s clamp is deliberate and tested; the gap is only in the report.) | `include/lob/measure/recorder.hpp` | measure |
+| M2 | `FeatureEngine` leaves `mid`, `spread`, `imbalance` and `weighted_mid` stale on a one-sided book, with no validity flag. `detail::mid_of` compounds it: `best_bid()` returns 0 on an empty side, so five strategies compute a mid of half the other side's price. | `include/lob/feat/features.hpp`, `include/lob/strat/quoting.hpp` | features |
+| M3 | `Price::none()` compares as **better than every real ask**, because `kNoPrice` is `INT64_MIN`. `operator-` against it is signed overflow. Latent: no caller outside `tests/test_types.cpp`. | `include/lob/core/types.hpp` | core |
+| M4 | `PolicyTable::load` clears `policy_` on failure but leaves `value_` populated and `header_` stale. | `src/policy_table.cpp` | policy |
+| M5 | `src/tsc.cpp`'s lazy calibration uses non-atomic globals — a latent data race the moment anything is threaded. 95 ms of busy-wait at first use. | `src/tsc.cpp` | measure |
+| M6 | `OrderMap`'s three probe loops spin forever on a full table. Safe only because `OrderBook` sizes the pool to half the map, which `OrderMap` does not state. | `include/lob/book/order_map.hpp` | book |
+| M7 | `Arena::create<T>` has no `is_trivially_destructible` assert although `Pool` does; `Pool::release` cannot detect a double release and its counter underflows. Neither class has a production caller. | `include/lob/core/arena.hpp` | core |
+| M8 | `ReferenceBook::find_entry` can return `nullptr` and all three callers dereference it. A crash in the oracle looks like a bug in the code under test. | `include/lob/book/reference_book.hpp` | book |
+| M9 | `replay --verify` keys its cadence off `applied`, which does not advance on a reject — so once it reaches a multiple of 10,000, every rejected event triggers a full O(window × orders) check. Slowest exactly when the capture is worst. | `apps/replay/main.cpp` | tooling |
+| M10 | `tape` holds every trade from the end of warm-up to `--start` and writes them all into frame zero. With the defaults that is 60 seconds of prints in the first frame, and unbounded memory for a large `--start`. | `apps/tape/main.cpp` | tooling |
+| M11 | `fuzz_bitstamp` — the only target that parses bytes from a public network — is omitted from CI's 200,000-run extended pass and gets 20,000 under ctest. `detect_decimals` and `snapshot_touch` are not fuzzed at all. | `.github/workflows/ci.yml`, `fuzz/fuzz_bitstamp.cpp` | build |
+| M12 | `record_bitfinex.py` and `record_coinbase.py` have no reconnect handling. That defect was found and fixed in `record_bitstamp.py` and never carried across; a dropped connection ends an eight-hour capture. | `tools/` | data |
+| M13 | REST snapshot used without `raise_for_status()` or a shape check, in two recorders. | `tools/record_bitstamp.py`, `tools/record_coinbase.py` | data |
+| M14 | `portable_main.cpp` computes a per-case seed, says in a comment that it reports it on failure, and never prints it. A crash found on CI cannot be reproduced. | `fuzz/portable_main.cpp` | build |
+| M15 | `check_capture.py` computes `max(abs(hi−lo), abs(lo−hi))` — the same number twice. The comment above correctly describes measuring from the opening price, which `scan()` never records. Its output is a recommended `--band-pct`. | `tools/check_capture.py` | tooling |
+| M16 | The differential book test skips its queue-position comparison whenever either book returns the −1 sentinel, which is the exact case where the fast book losing an order would show up. Own orders are only ever placed on the bid. | `tests/test_book_differential.cpp` | book |
+| M17 | ethusd's reconstructed book develops holes over multi-hour captures. Open, and correctly described in `docs/KNOWN-ISSUES.md` 1. Solution is periodic re-snapshotting; needs a fresh 8-hour capture to validate. | `src/bitstamp.cpp` | data |
+| M18 | The acceptance test is noise-dominated: mean −1,136 with CI [−3,872, +1,516], 6 of 16 seeds positive. | `apps/evaluate/main.cpp` | research |
 
 ### Low
-| # | Item | File | Owner |
-|---|---|---|---|
-| L1 | Dead no-op loop in `reduce()` | `src/order_book.cpp` | book |
-| L2 | `scan_down` missing the bounds guard `scan_up` has | `src/order_book.cpp` | book |
-| L3 | `replace()` counts no event on the add-failure path | `src/order_book.cpp` | book |
-| L4 | `queue_ahead()` returns −1 sentinel in a `Qty` | `src/order_book.cpp` | book |
-| L5 | Failed `execute()` inside `cross()` is silent | `include/lob/sim/matching.hpp` | simulator |
-| L6 | Licence file named `All Rights Reserved` | repo root | owner |
-| L7 | No static analyser in CI | `CMakeLists.txt` / `ci.yml` | build |
+Twenty-eight further findings are recorded in section 2 against the file they
+belong to. The recurring ones, each appearing in more than one file:
+
+| Pattern | Where |
+|---|---|
+| Timing assertions in unit tests, which measure the host rather than the code | `tests/test_tsc.cpp:92`, `tests/test_policy.cpp:391` |
+| The rdtsc overhead hardcoded as a magic constant, three copies, two values | `apps/replay:116` (35), `apps/latency_demo:161` (30), `bench/bench_book:139` (35) |
+| Standard-library headers relied on transitively | `src/journal.cpp`, `include/lob/book/events.hpp`, `include/lob/book/reference_book.hpp`, `tests/test_journal.cpp` |
+| Unvalidated `atoi`/`atof` arguments reaching a loop bound | `apps/jitter_probe`, `apps/latency_demo`, `apps/replay`, `apps/tape` |
+| A comment describing behaviour the code does not have | `include/lob/measure/stopwatch.hpp:3-4`, `fuzz/portable_main.cpp:109`, `bench/bench_book` ("mid-queue"), `tools/check_capture.py:99-104` |
+| Documentation drift | `README.md:18` ("5 suites, ~90 assertions" against 26 tests), `README.md:7` (a phase behind), `docs/00` §5 layout, `docs/BASELINE.md` "cycles/op" |
+| Licence file named `All Rights Reserved`, no static analyser in CI, no `permissions:` block, actions pinned by tag | repo root, `ci.yml` |
 
 ---
 
 ## 4. Prioritized fix roadmap
 
-### Immediate (this week, ~6 h)
-- **PR: "Bound the matching engine's fill log"** — 3 h. `consume_through()` plus
-  an offset so `first_fill` stays monotone; update the four call sites that index
-  into `fills()`; add a soak test. Closes H1.
-- **PR: "Order book: drop dead code, match the bounds guards, count replace once"**
-  — 1 h. Closes L1–L4. Add the failing-`replace` test.
-- **PR: "Rename the licence file"** — 5 min. `git mv "All Rights Reserved" LICENSE`.
-  Closes L6.
-- **PR: "Validate the REST snapshot before use"** — 1 h. Closes M1.
+Ordered by what unblocks the most work, not by severity alone. Hour estimates
+are for a person who knows this codebase.
 
-### Next two weeks (~20 h)
-- **PR: "Periodic re-snapshot during recording"** — 8 h. Fire the existing
-  session-snapshot machinery on a timer, reseed at the marker with the guard
-  relative to the current touch. Needs a fresh 8-hour capture to validate.
-  Closes M4.
-- **PR: "Give the acceptance test power back"** — 6 h. Either raise the seed
-  count until the CI excludes zero, or compare on an inventory-neutral statistic
-  so the closing mark stops dominating. Closes M2.
-- **PR: "Fix the two crossing baselines"** — 4 h. Their quotes cross a one-tick
-  book; clamp to the touch. Closes M3.
-- **PR: "clang-tidy in CI"** — 2 h. Closes L7.
+### Immediate — the acceptance test does not currently measure anything
+- **PR: "Fix the quoting defaults and stop quotes crossing the market"** — 3 h.
+  Two changes in `include/lob/strat/quoting.hpp`: pass the touch into
+  `assemble()` and clamp the quote to it, and set `QuoteParams`'s defaults so
+  the implied skew at the inventory limit is a few ticks rather than 250,000.
+  Then add the two missing assertions to the existing sweep in
+  `tests/test_strategies.cpp:159-177` — `q.bid < best_ask` and
+  `q.ask > best_bid` — and run that sweep a second time with a
+  default-constructed `QuoteParams`. Closes **C1** for four of the five rows.
+- **PR: "Find out why TabulatedMDP ties JoinTouch exactly"** — 3 h,
+  investigation. Add a per-action histogram beside the existing `off_grid`
+  counter in `include/lob/strat/tabulated.hpp` and dump it over a run. Either
+  the solved policy is constant, or the lookup is not differentiating states.
+  Until this is answered the Phase 5 criterion has no signal. Closes the rest
+  of **C1**.
+- **PR: "Total P&L includes the closing position"** — 1 h. Split
+  `Attribution::total` into `realised` and `total`, print both in
+  `apps/backtest`, and change one case in `tests/test_pnl.cpp` to pass a
+  non-zero `final_inventory`. `RunResult::pnl()` already does it correctly;
+  this makes the two agree. Closes **H1**.
+
+### This week
+- **PR: "Publish agent fills to the view book"** — 4 h. One
+  `publish_new_fills()` called unconditionally after every step in
+  `include/lob/sim/simulator.hpp`, with fills carrying their own timestamp, and
+  `a.arrive_ts` rather than `now_` passed into the matcher. Add the test: after
+  an agent market order fills a resting order, the view book reflects it without
+  waiting for an unrelated `Aggress`. Closes **H2**.
+- **PR: "Journal writer: stop discarding write errors"** — 2 h. Sticky `failed_`
+  flag set from `fwrite` and `fclose`, `++total_` in `append`, clamp
+  `batch_records` to at least 1, and `CHECK_EQ(w.written(), kN)` in the test.
+  Closes **H3**.
+- **PR: "Bound the matching engine's fill log"** — 3 h. `consume_through()` plus
+  an offset so `first_fill` stays monotone; update the call sites in
+  `simulator.hpp` that index into `fills()`; add a soak test. Closes **H4**.
+- **PR: "Rename the licence file"** — 5 min. `git mv "All Rights Reserved" LICENSE`.
+- **PR: "Validate the REST snapshot before use"** — 1 h, both recorders. Closes
+  **M13**.
+
+### Next two weeks
+- **PR: "Report a clamped maximum as clamped"** — 1 h. Track the true extreme in
+  `Histogram` and surface `overflow_count()` in `LatencyRecorder::report()`.
+  Closes **M1**.
+- **PR: "Features carry a validity flag"** — 2 h. `two_sided` on `Features`,
+  a `has_bid && has_ask` guard in `detail::mid_of`'s callers, and the
+  `log(2)` fix or rename for `rate_halflife_ns`. Closes **M2**.
+- **PR: "Sentinels that cannot win a comparison"** — 2 h. `better_than` and
+  `operator-` guarded against `Price::none()`; `PolicyTable::load` clears
+  `value_` and `header_`; `OrderMap::insert` refuses a full table; `Arena` and
+  `Pool` get the missing assert and the double-release guard. Closes **M3, M4,
+  M6, M7**.
+- **PR: "Fuzz the untrusted path properly"** — 2 h. Add `fuzz_bitstamp` to CI's
+  extended pass at `-max_len=4096`, add `detect_decimals` and `snapshot_touch`
+  to the target, print the per-case seed in `portable_main.cpp`, and add
+  `permissions: contents: read` and `timeout-minutes` to the workflow. Closes
+  **M11, M14**.
+- **PR: "Reconnect handling in all three recorders"** — 4 h. Lift the retry loop
+  out of `record_bitstamp.py` into a shared base. Closes **M12**.
+- **PR: "Tooling fixes"** — 3 h. `replay --verify` cadence off a total counter;
+  `tape` clears pending trades before `--start`; `check_capture` measures reach
+  from the opening trade price. Closes **M9, M10, M15**.
+- **PR: "clang-tidy in CI"** — 2 h.
 
 ### Next month
-- Complete this audit: 93 files remain, roughly 15,000 lines. Estimated 25–30 h
-  at the depth of the sections above.
-- The price impact of a trade, which blocks η, adverse selection and the lift
-  together (`docs/06`).
+- **Periodic re-snapshot during recording** — 8 h. Fire the existing
+  session-snapshot machinery on a timer, reseed at the marker with the guard
+  relative to the current touch. Needs a fresh 8-hour capture to validate.
+  Closes **M17**.
+- **Give the acceptance test power back** — 6 h. Raise the seed count until the
+  interval excludes zero, or compare on an inventory-neutral statistic. This is
+  only worth doing *after* C1 is closed, because the current baselines make the
+  comparison meaningless regardless of its width. Closes **M18**.
+- **The price impact of a trade**, which blocks the mean-reversion ratio,
+  adverse selection and the lift together (`docs/06-queue-reactive-plan.md`).
+- **Documentation sync** — 2 h. `README.md`'s test count and status line,
+  `docs/00` §5's layout, `docs/BASELINE.md`'s cycles column, and a
+  `KNOWN-ISSUES.md` entry for C1.
 
 ---
 
@@ -4036,10 +4691,60 @@ target_compile_definitions(lob_flags INTERFACE $<$<CONFIG:Debug>:_GLIBCXX_ASSERT
 
 ## 6. Final confirmation
 
-**Not all files have been audited.** 23 of 116 are complete; 93 remain, marked
-`[ ]` in the tree above. Claiming otherwise would make the checkbox tree — the
-one artefact of this document meant to be trusted at a glance — worthless.
+**All 116 tracked files have been audited.** Every one is marked `[x]` in the
+tree in section 1, and every one has a section in section 2 giving its status,
+issues, severity, why it matters, fix, refactor note, missing tests, and
+performance, security and market-logic notes.
 
-The acceptance criterion "every file marked `[x]`" is not met and should not be
-recorded as met until the remaining 93 have had the same treatment. Estimated
-25–30 hours at this depth.
+Text files — every `.cpp`, `.hpp`, `.py`, `.sh`, `.md`, `.json`, `.yml` and the
+build files — were read line by line. Binary assets — seven PNGs, two `.bin`
+policy tables and three `.jsonl.gz` captures, 19 files in total — were audited
+by header, size, tracking rule, provenance and the code that reads them, rather
+than byte by byte; each says so in its own section.
+
+**Evidence commands, re-run at the close of the audit:**
+
+```
+grep -RIn --exclude-dir=.git --exclude-dir=build -E "API_KEY|SECRET|TOKEN|PASSWORD|passwd|aws_access_key|PRIVATE_KEY|BEGIN RSA|xoxb-|ghp_" .
+grep -RIn --exclude-dir=.git --exclude-dir=build -E "verify=False|_create_unverified|CURLOPT_SSL_VERIFYPEER" .
+grep -RIn --exclude-dir=.git --exclude-dir=build -iE "place_order|send_order|new_order_single|order_gateway|fix\.4|POST /order|api_secret" .
+git ls-files --others --exclude-standard
+ls -a | grep -i "^\.env"
+ctest --test-dir build -N
+ctest --test-dir build -E "_long"
+./build/evaluate --table policy/ethusd.bin --seeds 2 --events 60000
+```
+
+| Check | Result |
+|---|---|
+| Secrets, keys, tokens | **none found** |
+| Disabled TLS verification | **none found** |
+| Order-entry or gateway code | **none found** |
+| `.env` files, tracked or untracked | **none exist** |
+| Untracked files the ignore rules are hiding | **none** |
+| Registered tests | **26**, across 20 files |
+| Test result | **25/25 pass** excluding the `--long` differential pass |
+
+**What the audit changed about its own findings.** Three claims were corrected
+after checking them rather than left as first written, and each correction is
+recorded in the file section it belongs to:
+
+1. The baselines defect was first attributed to `apps/backtest`. That is wrong:
+   `apps/backtest` and `tests/test_strategies.cpp` both override `horizon` to
+   1.0. It is `apps/evaluate`'s `base_params()` that leaves the risk parameters
+   at their defaults, and `apps/evaluate` is the acceptance test. Confirmed by
+   running it.
+2. The clamped histogram maximum was first written as a `Histogram` defect. It
+   is deliberate and tested at `tests/test_histogram.cpp:113-122`. The defect is
+   only that `LatencyRecorder::report()` discards `overflow_count()`.
+3. "No test constructs a default `QuoteParams`" was too strong.
+   `tests/test_policy.cpp:492` constructs one — and hands it to `JoinTouch`,
+   which never reads the risk parameters. The accurate statement is that no test
+   exercises the defaults through a strategy that uses them.
+
+**What this audit did not do.** It read the code and ran the test suite, the
+acceptance test and targeted numerical checks. It did not run the sanitizer or
+`tsan` presets, an extended fuzz campaign, or a static analyser — each of those
+is a separate pass and three of the findings above (M5's data race, M11's fuzz
+gap, L7's missing analyser) are precisely the kind those passes exist to
+surface.
