@@ -98,7 +98,18 @@ match is close, and a Poisson model with a linear cancellation rate visibly
 overestimates execution probabilities against the same data.
 
 **Model II-a.** `Q_2`'s limit and cancel intensities also depend on
-`1{q_1 > 0}` — whether the queue in front is empty.
+`1{q_1 > 0}` — whether the queue in front is empty. Market orders are sent only
+to `Q_1` and `Q_2`: when `q_1 > 0` the intensity is a function of `q_1`, and
+when `q_1 = 0` a function of `q_2`, because `Q_2` is then the best offer. The
+paper is explicit that "the market order arrival rate when Q2 is the best limit
+is not very different from that at Q1", and that a market order sweeping several
+limits is treated as several orders arriving in quick succession at each.
+
+Its findings at `Q_2`: the **cancellation rate is higher when `q_1 = 0`**, which
+it relates to trading activity concentrating at best limits; and when `q_1 > 0`
+the cancel rate is large at `q_2 = 1`, as at `Q_3`. Limit insertion at `Q_2` is
+a decreasing function of queue size, read as posting at a non-best limit while
+it is small to seize priority, then waiting for it to become best.
 
 **Model II-b.** `Q_1`'s intensities depend on the **opposite** queue, bucketed
 as `S_{m,l}(q_-1)` with `m = 4 AES_1` and `l = 9 AES_1`. Findings: limit
@@ -244,18 +255,76 @@ should end up carrying roughly the share this implies, not more.
 
 Estimator first (1), Model I next (2, 3) against the closed form. **Both done.**
 
-What the Model I process still cannot do, and why it is not yet the default for
-`backtest`, `evaluate` and `sim_demo`: **nothing trades behind the touch**.
-`lambda^M` is zero at every level but the best, so the volume reaching level 1
-is 0.0% against ethusd's 7.2%, and `level_ratio` — the fill rate one tick behind
-the touch relative to at it, which the MDP needs — comes out zero. The paper
-handles this in Model II-a: a market order reaches `Q_2` when `Q_1` is empty,
-because `Q_2` is then the best offer. That is the next piece, and it is a
-prerequisite for the switch rather than a refinement after it.
+Model II-a's market order routing and the measured market order size followed,
+and between them they unblocked `level_ratio`. **All done.**
 
-Then Model II-b (4) to sharpen the imbalance signal, then the rest of Model III
-(5) — calibrating `theta` and `theta_reinit` against the ten-minute volatility
-and the mean-reversion ratio. Sizes (6) last.
+Next: the `Q_2` regime switch, which needs the estimator to carry the regime
+first; then Model II-b (4) to sharpen the imbalance signal; then the rest of
+Model III (5), calibrating `theta` and `theta_reinit` against the ten-minute
+volatility and the mean-reversion ratio. Limit order sizes (6) last — market
+order sizes are done.
+
+## Model II-a: what was implemented, and what level_ratio actually needed
+
+**Market order routing — done.** A market order takes the best offer, which is
+the first non-empty queue and is not always `Q_1`. The rate is the same function
+of that queue's own size wherever the best offer is, which is the paper's
+statement verbatim. Figure 2's much smaller value at `Q_2` is the
+*unconditional* rate, averaged over all the time `Q_1` is occupied and no market
+order can reach `Q_2` at all; reading it as a conditional rate would
+double-count the emptiness.
+
+**`level_ratio` was never a Model II-a problem.** The stated reason for doing
+Model II-a was that no trade ever reached past the touch, so `level_ratio` came
+out zero. Model II-a does not fix that and could not: a market order arriving at
+`Q_2` when `Q_1` is empty is at the *best price*, so it is at the touch, not past
+it. Only **size** gets past a queue, and every market order was exactly one AES
+against a touch holding 4.29 of them.
+
+Pooled over the three captures, 427 prints, market order size in AES:
+
+| quantile | 0.25 | 0.50 | 0.75 | 0.90 | 0.99 | max |
+|---|---|---|---|---|---|---|
+| AES | 0.009 | 0.067 | 0.196 | 0.790 | 3.118 | 5.23 |
+
+A typical market order is a fifteenth of an average event, and 8.4% are larger
+than one. A constant AES is both too big most of the time and incapable of ever
+being big. With the measured distribution sampled by inverse CDF — not a
+lognormal, which matched the middle and then put the 99th percentile at 25 AES
+against an observed 3.1 — volume reaching one tick past the touch went from
+**0.0% to 13.1%**, against 7.2% on ethusd, 20.9% on xrpusd and 32.4% on btcusd.
+
+The MDP now solves on this process: both sides quoted at the touch in 71.6% of
+states, positive value at flat inventory, skewing at the limit, pulling both in
+no state.
+
+**The `Q_2` regime switch — measured, not yet implemented.** `q_1 = 0` is
+observable without a reference price: it is the spread being wider than one
+tick. Cancel and add rates at `Q_2` in the two regimes:
+
+| | Q1 occupied | Q1 empty | ratio | time Q1 empty |
+|---|---|---|---|---|
+| ethusd cancels/s | 0.085 | 5.497 | 65× | 7.3% |
+| btcusd cancels/s | 0.225 | 20.773 | 92× | 2.9% |
+| xrpusd cancels/s | 0.069 | 0.211 | 3.1× | 61% |
+| ethusd adds/s | 0.099 | 1.525 | 15× | |
+| btcusd adds/s | 0.238 | 3.637 | 15× | |
+| xrpusd adds/s | 0.039 | 0.065 | 1.7× | |
+
+The paper's direction is confirmed on all three, and the split is the tick-size
+regime this repository already works in: the effect is enormous on the two
+large-tick instruments, where an empty `Q_1` is a rare transient the book is
+repairing, and weak on xrpusd, where a wide spread is the normal state 61% of
+the time.
+
+It is **not implemented**, and the reason is a bookkeeping trap rather than
+reluctance. The level-1 rates were fitted with no conditioning, so applying a
+multiplier now would move the marginal away from what was fitted; it needs a
+refit with the regime split. Worse, this probe and `QueueReactive` disagree by
+2.7× on the same quantity — the probe's `Q_2` follows the reference price while
+the estimator's level 1 is always touch-relative — so fitting from the probe
+alone would be fitting two different definitions together. The estimator has to
+carry the regime before this can be calibrated.
 
 ## Three defects found by auditing the Model I work, and what they cost
 

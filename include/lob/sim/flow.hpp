@@ -415,6 +415,40 @@ struct FlowConfig {
     double trade_rate  = 0.1851;
     double trade_decay = 0.240;
 
+    // MARKET ORDER SIZE, as a multiple of AES, by sixteenth of the distribution.
+    //
+    // Every market order used to be exactly one AES, and that is wrong at both
+    // ends. Pooled over the three committed captures, 427 prints:
+    //
+    //     quantile   0.25   0.50   0.75   0.90   0.99    max
+    //     AES       0.009  0.067  0.196  0.790  3.118   5.23
+    //
+    // A typical market order is a fifteenth of an average event, not one, and
+    // 8.4% of them are larger than one. Emitting a constant AES is therefore
+    // both too big most of the time and incapable of ever being big -- which is
+    // why NO trade ever reached past the touch, against 7.2% of volume on
+    // ethusd and 32.4% on btcusd, and why level_ratio came out zero. Model II-a
+    // does not fix that and was never going to: a market order arriving at Q_2
+    // when Q_1 is empty is at the BEST price, so it is at the touch, not past
+    // it. Only size gets past a queue.
+    //
+    // This is the measured distribution rather than a family fitted to it. A
+    // lognormal matched the middle and then put the 99th percentile at 25 AES
+    // against an observed 3.1, because the log standard deviation needed for
+    // the lower tail makes the upper one absurd. Sixteen quantile edges,
+    // sampled by inverse CDF with linear interpolation, reproduce the quartiles
+    // exactly, the 90th at 0.82 against 0.79, and the share above one AES at
+    // 7.4% against 8.4%.
+    //
+    // The top edge is the largest print in 427, so the last sixteenth has one
+    // observation's worth of resolution and the sampled 99th comes out at 4.6
+    // against 3.1. That is the tail being thin, not the model being wrong, and
+    // it is the first thing the eight-hour captures would tighten.
+    static constexpr int kSizeBins = 16;
+    double trade_size_aes[kSizeBins + 1] = {
+        0.0000, 0.0005, 0.0011, 0.0045, 0.0091, 0.0129, 0.0217, 0.0293, 0.0672,
+        0.0916, 0.0916, 0.1006, 0.1960, 0.4506, 0.6253, 1.0825, 5.2305};
+
     // Orders the price has walked away from.
     //
     // The model describes kLevels queues either side of p_ref. A price move
@@ -714,9 +748,20 @@ class FlowGenerator {
     const double x = static_cast<double>(q);
     return k.cancel_rate[lvl] * x / (x + k.cancel_half[lvl]);
   }
-  [[nodiscard]] double lambda_trade(int lvl, int q) const noexcept {
+  // Model II-a's market order routing. A market order takes the BEST OFFER,
+  // which is the first non-empty queue on that side and is not always Q_1: the
+  // paper is explicit that "market orders can arrive at Q2 only if Q1 = 0 (that
+  // is when Q2 is the best offer queue)", with "the shape of the intensity very
+  // similar to the one obtained in the case of Q1".
+  //
+  // So the rate is the same function of the queue's own size wherever the best
+  // offer happens to be. Figure 2's much smaller value at Q_2 is the
+  // UNCONDITIONAL rate -- averaged over all the time Q_1 is occupied and no
+  // market order can reach Q_2 at all -- and reading it as a conditional one
+  // would double-count the emptiness.
+  [[nodiscard]] double lambda_trade(int lvl, int q, int best) const noexcept {
     const FlowConfig::Qr& k = cfg_.qr;
-    if (lvl != 0 || q <= 0) return 0.0;      // a market order takes the best queue
+    if (lvl != best || q <= 0) return 0.0;
     return k.trade_rate * std::exp(-k.trade_decay * static_cast<double>(q - 1));
   }
 
@@ -733,11 +778,16 @@ class FlowGenerator {
     double rate[2][kL][3], far_rate[2];
     double total = 0.0;
     for (int s = 0; s < 2; ++s) {
+      // The best offer on this side: the first queue with anything in it. -1
+      // when the whole modelled window is empty, and then nothing trades.
+      int best = -1;
+      for (int l = 0; l < kL && best < 0; ++l)
+        if (st.n[s][l] > 0) best = l;
       for (int l = 0; l < kL; ++l) {
         const int q = q_of(st.qty[s][l]);
         rate[s][l][0] = lambda_add(l, q);
         rate[s][l][1] = st.n[s][l] > 0 ? lambda_cancel(l, q) : 0.0;
-        rate[s][l][2] = st.n[s][l] > 0 ? lambda_trade(l, q)  : 0.0;
+        rate[s][l][2] = st.n[s][l] > 0 ? lambda_trade(l, q, best) : 0.0;
         total += rate[s][l][0] + rate[s][l][1] + rate[s][l][2];
       }
       // Independent per-order cancellation outside the window, so a stray
@@ -848,6 +898,21 @@ class FlowGenerator {
     return qr_add(e, side == 0 ? Side::Bid : Side::Ask, 0);
   }
 
+  // A market order's size, in lots, from the measured distribution: pick a
+  // sixteenth uniformly and interpolate inside it. At least one lot, because a
+  // market order for nothing is not an event and the book would reject it.
+  [[nodiscard]] Qty draw_trade_size() noexcept {
+    const FlowConfig::Qr& k = cfg_.qr;
+    const double u = uniform() * FlowConfig::Qr::kSizeBins;
+    int i = static_cast<int>(u);
+    double f = u - static_cast<double>(i);
+    if (i >= FlowConfig::Qr::kSizeBins) { i = FlowConfig::Qr::kSizeBins - 1; f = 1.0; }
+    const double aes_mult = k.trade_size_aes[i]
+                          + f * (k.trade_size_aes[i + 1] - k.trade_size_aes[i]);
+    const double lots = aes_mult * (k.aes > 0.0 ? k.aes : 1.0);
+    return lots < 1.0 ? Qty{1} : static_cast<Qty>(lots);
+  }
+
   // A market order into the named side's best queue. It goes through the
   // matching engine like any other aggressive order, so it consumes the front
   // of the queue and a fill means queue position actually mattered.
@@ -859,7 +924,7 @@ class FlowGenerator {
     e.side     = (resting == Side::Bid) ? Side::Ask : Side::Bid;
     e.order_id = next_id_++;
     e.price    = 0;
-    e.qty      = static_cast<Qty>(cfg_.qr.aes > 1.0 ? cfg_.qr.aes : 1.0);
+    e.qty      = draw_trade_size();
     // The Glosten-Milgrom split is orthogonal to where the order came from, so
     // it is applied here exactly as make_aggress applies it: a share of takers
     // are informed and the mid follows them. Duplicating the three lines rather
