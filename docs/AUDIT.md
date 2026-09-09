@@ -137,26 +137,26 @@ Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
   - [x] `recorder.cpp`
   - [x] `tsc.cpp`
 - `tests/`
-  - [ ] `test_arena.cpp`
+  - [x] `test_arena.cpp`
   - [ ] `test_bitstamp.cpp`
-  - [ ] `test_book.cpp`
-  - [ ] `test_book_differential.cpp`
+  - [x] `test_book.cpp`
+  - [x] `test_book_differential.cpp`
   - [x] `test_calibration.cpp`
-  - [ ] `test_features.cpp`
-  - [ ] `test_histogram.cpp`
-  - [ ] `test_journal.cpp`
-  - [ ] `test_matching.cpp`
-  - [ ] `test_order_map.cpp`
-  - [ ] `test_pnl.cpp`
+  - [x] `test_features.cpp`
+  - [x] `test_histogram.cpp`
+  - [x] `test_journal.cpp`
+  - [x] `test_matching.cpp`
+  - [x] `test_order_map.cpp`
+  - [x] `test_pnl.cpp`
   - [ ] `test_policy.cpp`
-  - [ ] `test_properties.cpp`
+  - [x] `test_properties.cpp`
   - [x] `test_queue_reactive.py`
-  - [ ] `test_simulator.cpp`
+  - [x] `test_simulator.cpp`
   - [ ] `test_split_replay.py`
-  - [ ] `test_strategies.cpp`
-  - [ ] `test_tsc.cpp`
-  - [ ] `test_types.cpp`
-  - [ ] `test_util.hpp`
+  - [x] `test_strategies.cpp`
+  - [x] `test_tsc.cpp`
+  - [x] `test_types.cpp`
+  - [x] `test_util.hpp`
 - `tools/`
   - [ ] `calibrate.py`
   - [ ] `check_capture.py`
@@ -2600,6 +2600,657 @@ max are the machine interrupting you. Anything you build here has that as its
 floor." Establishing that floor before attributing any improvement to your own
 code is the Phase 0 acceptance criterion, and this is the free, portable
 stand-in for `cyclictest` that makes it reproducible.
+
+---
+
+### `tests/test_util.hpp`
+
+**Status:** [x] Reviewed (51 lines, read in full)
+
+**Issues Found:** None. Two constraints worth naming.
+
+- **`CHECK_EQ` requires `std::to_string`**, so it only works on arithmetic
+  types. Comparing two `std::string`s or two enums needs `CHECK(a == b)` and
+  loses the diagnostic.
+- **`CHECK_THROWS` catches `...`**, so it cannot distinguish "threw the right
+  exception" from "threw something else entirely".
+
+**Severity:** Minor (both)
+
+**Fix Recommendation:** None needed. If the exception type ever matters, a
+`CHECK_THROWS_AS(expr, Type)` is four more lines.
+
+**Refactor Suggestion:** None. The design decision — one binary per test file,
+its own `main`, no framework — is stated in the header and is correct for the
+stated goal: "Phase 0 should build and test with nothing but a compiler and
+CMake."
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** One design point that matters for how the rest of the
+suite reads: `report()` records a failure and **returns**, so a test binary runs
+to completion and prints every failure rather than aborting on the first. With
+statistical tests, seeing all the failures at once is the difference between one
+debugging round and five.
+
+---
+
+### `tests/test_types.cpp`
+
+**Status:** [x] Reviewed (47 lines, read in full)
+
+**Issues Found:** The two `types.hpp` defects are exactly the cases this file
+does not cover.
+
+- **`better_than` is tested only on valid prices** (lines 24-28). Nothing tests
+  `Price::none().better_than(x, Side::Ask)`, which returns `true` because
+  `kNoPrice` is `INT64_MIN`.
+- **`operator-` is tested only on valid prices** (lines 16-17). Nothing tests
+  the `Price::none()` case, which is signed overflow.
+
+**Severity:** Medium (as a coverage gap; the defects are recorded under
+`include/lob/core/types.hpp`)
+
+**Fix Recommendation:**
+```cpp
+CHECK(!Price::none().better_than(a, Side::Ask));   // fails today
+CHECK(!Price::none().better_than(a, Side::Bid));   // passes by accident
+```
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** The tests that are here are the right ones. Line 11's
+`CHECK(Price{0}.valid())` with the comment "zero is a real price on some
+instruments" is the reason `kNoPrice` is a sentinel rather than 0, and it is
+worth an assertion. The rational tick-size checks at lines 36-39 include the
+1/32 case, so the exactness claim is tested rather than asserted in a comment.
+
+---
+
+### `tests/test_arena.cpp`
+
+**Status:** [x] Reviewed (88 lines, read in full)
+
+**Issues Found:** Covers the happy paths and exhaustion; misses both memory-
+safety cases.
+
+- **No double release** (`pool.release(b); pool.release(b);`), which corrupts
+  the free list into a cycle and hands the same slot out twice.
+- **No release of a foreign pointer.**
+- **`arena.create<Node>` uses a trivially destructible type** (line 42), so the
+  missing `static_assert` on `Arena::create` is never exercised.
+- **No `Pool{0}` or `Arena{0}`.**
+
+**Severity:** Medium (coverage), and see `include/lob/core/arena.hpp`
+
+**Fix Recommendation:** Add the double-release case behind whichever guard the
+fix introduces — an assertion in a debug build, or a returned bool.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Not applicable. Two assertions are worth naming as
+statements of intent rather than mere checks: line 34, exhaustion "returns
+nullptr rather than falling back to the heap", and line 72,
+`CHECK(d == b)` — the most-recently-freed slot is reused, so it is cache-warm.
+Both are properties of the design, not accidents of it.
+
+---
+
+### `tests/test_order_map.cpp`
+
+**Status:** [x] Reviewed (164 lines, read in full)
+
+**Issues Found:** One structural gap, which is the same gap as the class's.
+
+- **The differential loop caps live entries at `kCap - 1` = 4,095** (line 104)
+  in a table whose real capacity is 8,192, so the load factor never exceeds
+  0.5. The full-table case — where `find` and `insert` spin forever — is
+  therefore never approached. That is deliberate and correct given how
+  `OrderBook` uses the class, but it means the hazard recorded under
+  `include/lob/book/order_map.hpp` is untested rather than ruled out.
+
+**Severity:** Minor (coverage of a hazard the caller prevents)
+
+**Fix Recommendation:** Once `insert` returns false on a full table rather than
+spinning, add the case.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** 400,000 operations plus a full-table sweep every 64
+steps. Not fast, and worth it.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Not applicable, but the reasoning in the header is the
+best statement of testing philosophy in the repository and it is correct about
+the specific risk: backward-shift deletion's failure mode is "silent: no crash,
+no corruption the compiler can see, just an order that has vanished from the
+book's index while still sitting in a level's FIFO." The test is built to match
+that — colliding keys constructed on purpose (lines 44-76, erasing from the
+middle and then the head of a probe chain), then 400,000 random operations
+against `std::unordered_map`, with the key space held at three times capacity
+"so collisions and reinsertions of just-erased keys are constant rather than
+rare." That last choice is what makes the random half of the test effective
+rather than decorative.
+
+---
+
+### `tests/test_journal.cpp`
+
+**Status:** [x] Reviewed (102 lines, read in full)
+
+**Issues Found:** None in the tests. Three uncovered defects, all recorded under
+`include/lob/measure/journal.hpp`.
+
+- **`written()` is never asserted**, which is why it has always returned 0.
+- **`batch_records = 0` is never constructed**, which is why the heap overflow
+  is undetected.
+- **No short-write path**, which is why discarded `fwrite`/`fclose` results go
+  unnoticed.
+- Minor: `std::memcmp` at line 96 with no `<cstring>` include; `std::fopen`'s
+  result is not checked before `fwrite` at lines 66-68; temp files use fixed
+  names in the working directory, so two concurrent runs of this binary would
+  collide.
+
+**Severity:** Medium (the three coverage gaps)
+
+**Fix Recommendation:** `CHECK_EQ(w.written(), kN);` inside the writer scope is
+one line and turns a dead counter into a live one.
+
+**Refactor Suggestion:** Use unique temp names, or a per-run subdirectory, so
+`ctest -j` stays safe if this file ever grows a second journal test.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** The `Other` struct at lines 25-28 is deliberately the
+same size as `Decision`, with a `static_assert` enforcing it, so line 62's
+`CHECK_THROWS(journal_read_all<Other>(...))` tests the type hash rather than the
+size check. That is precisely the bug the hash exists to catch, and constructing
+the case properly is the difference between testing the feature and testing
+around it. The determinism test at lines 86-98 — same records written twice,
+compared with `memcmp` — is what the byte-for-byte replay claim in `docs/00`
+actually rests on.
+
+---
+
+### `tests/test_tsc.cpp`
+
+**Status:** [x] Reviewed (96 lines, read in full)
+
+**Issues Found:** Two assertions measure the machine rather than the code, so
+they can fail on a loaded runner.
+
+- **`CHECK(per < 100.0)`** (line 92) asserts the cost of an `rdtsc` read.
+  `docs/BASELINE.md` records 16.72 ns on this machine, so there is 6x headroom
+  — but on an oversubscribed CI container the loop can be descheduled and the
+  average blows past it. A test that fails because the host is busy trains
+  people to ignore test failures.
+- **The monotonicity loop** (lines 34-39) reads `tsc::now()` 100,000 times and
+  requires the counter never to go backwards. On hardware whose TSCs are not
+  synchronised across sockets, a thread migration mid-loop breaks it. The test
+  prints `invariant`/`nonstop` but does not gate on them.
+- **No concurrent first-call to `calibration()`**, which is the latent data race
+  recorded under `src/tsc.cpp`.
+
+**Severity:** Medium (CI flakiness), Minor (the coverage gap)
+
+**Fix Recommendation:** Print the per-read cost unconditionally, and assert only
+a loose ceiling that a stall cannot cross (say 10,000 ns) — or make the
+assertion conditional on `cal.trustworthy`. For monotonicity, either pin the
+thread or gate the assertion on `cal.invariant && cal.nonstop`.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** The 20 ms busy-wait comparison at lines 51-67 is the
+right test and is robust: if the process is descheduled, wall time and the TSC
+both advance, so the ratio holds.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Line 66's cross-check — the integer fixed-point
+conversion against the floating-point one, to within 0.1% — is the assertion
+that keeps `to_nanos` honest. A silent divergence between those two paths would
+make every latency number depend on which one a call site happened to use.
+
+---
+
+### `tests/test_histogram.cpp`
+
+**Status:** [x] Reviewed (201 lines, read in full)
+
+**Issues Found:** None. One point that **corrects** a finding recorded earlier
+in this audit.
+
+- **The clamped maximum is deliberate and tested.** Lines 113-122 record two
+  values above the ceiling and assert `overflow_count() == 2` and
+  `max() == 1000`, with the comment "clamped, and visibly so". So
+  `Histogram`'s behaviour is intended and specified. The finding recorded under
+  `include/lob/measure/histogram.hpp` should be read narrowly: the defect is not
+  in `Histogram`, it is that **`LatencyRecorder::report()` prints `max()` and
+  never reads `overflow_count()`**, so the visibility the histogram provides is
+  discarded at the one place a human reads the number.
+- **`percentile_at_or_below` is not tested with a negative value**, which is the
+  path saved from an out-of-bounds read only by a `std::min` clamp.
+
+**Severity:** Minor
+
+**Fix Recommendation:** Add the negative-value case. The rest needs nothing.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above, plus a test at the `LatencyRecorder` level that a
+clamped sample is visible in `report()`.
+
+**Performance Notes:** 200,000 lognormal samples compared against an exact
+sorted-sample percentile, 40 trials of monotonicity, and a 40,000-sample merge
+equivalence check. Slow for a unit test and justified by what it establishes.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** The header's claim — "the most rigorous test in Phase 0"
+— holds up, and two cases earn it.
+- **The precision guarantee is tested against ground truth**, not against
+  itself: 200,000 lognormal draws are kept in a vector, sorted, and the exact
+  percentile compared to the histogram's, at five percentiles across five orders
+  of magnitude (lines 59-86).
+- **The coordinated-omission demonstration** (lines 124-144) is constructed so
+  the uncorrected p99 provably hides a stall the corrected one cannot, plus the
+  negative case that a value at or below the expected interval backfills
+  nothing.
+
+---
+
+### `tests/test_book.cpp`
+
+**Status:** [x] Reviewed (208 lines, read in full)
+
+**Issues Found:** One coverage gap matching a known defect.
+
+- **No test of a *failing* `replace()`.** `src/order_book.cpp` loses an event
+  from the stats on that path (`--stats_.deletes` runs, `++stats_.replaces`
+  does not). Every `replace` here succeeds.
+
+**Severity:** Minor
+
+**Fix Recommendation:** Replace into an out-of-window price and assert the
+counters still balance.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** This file is the specification of the behaviours a
+market maker depends on, stated as assertions, and the sequence at lines 73-104
+is the one that matters. It walks queue position through every way it can
+change: a partial fill in front moves us up, a cancel in front moves us up,
+activity **behind** us changes nothing, and consuming the last order in front
+puts us at the head. Lines 106-127 then pin the tri-state that the whole
+requote decision rests on — a partial cancel of our own order keeps priority
+(so shrinking beats requoting), and a replace sends us to the back behind
+everything that arrived meanwhile. Getting that wrong is invisible in a P&L and
+worth exactly this much test.
+
+---
+
+### `tests/test_matching.cpp`
+
+**Status:** [x] Reviewed (172 lines, read in full)
+
+**Issues Found:** Two of the three self-match modes are untested.
+
+- **`SelfMatch::Allow` and `SelfMatch::CancelIncoming` are never constructed.**
+  Only `CancelResting` is exercised (line 133). `CancelIncoming` in particular
+  has a different effect on the aggressor's remainder and nothing checks it.
+
+**Severity:** Minor
+
+**Fix Recommendation:** Repeat the self-match block under the other two modes;
+the expected outcomes differ in one field each.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** The pair at lines 96-129 is the heart of the fill model
+and both halves are present, which is unusual. The first asserts that when a
+seller takes 120 against 100 ahead of us, we get exactly 20 and end up at the
+front. The second — the one a naive backtester gets wrong — asserts that a
+seller who takes only 60 does **not** fill us at all, though it does move us
+closer. A simulator that fills you as if you were always at the front is, as the
+header says, "the single largest source of backtest overstatement", and these
+two cases are what rule it out. Line 56-65's price-improvement case (the passive
+side sets the price) and line 84-94's market order that does not rest its
+remainder are both correct venue behaviour and both easy to get wrong.
+
+---
+
+### `tests/test_book_differential.cpp`
+
+**Status:** [x] Reviewed (173 lines, read in full)
+
+**Issues Found:** The queue-position comparison silently skips itself whenever
+either book returns the "not ours" sentinel. Two coverage gaps.
+
+- **`if (a >= 0 && b >= 0 && a != b)`** (line 116). `queue_ahead` returns `-1`
+  for an order it does not consider ours. If the fast book **loses** one of our
+  orders and returns `-1` while the reference still tracks it and returns a real
+  value, the condition is false and the test passes. The sentinel is being
+  treated as "skip this comparison" rather than as a value that must also match.
+  That is exactly the failure this check exists to catch.
+- **Own orders are only ever placed on the bid** (line 100). The ask side's
+  queue-position bookkeeping is never differentially tested.
+- **Only the top 20 levels are compared** (line 44). Deeper divergence would not
+  be seen. The comment says why — "where any real strategy looks" — which is a
+  reasonable scope, stated.
+
+**Severity:** Medium (the sentinel skip), Minor (the rest)
+
+**Fix Recommendation:**
+```cpp
+const Qty a = fast.queue_ahead(id);
+const Qty b = ref.queue_ahead(id);
+if ((a < 0) != (b < 0) || (a >= 0 && a != b)) { ... fail ... }
+```
+and mirror the placement block onto the ask side.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** Five seeds at 12,000 events plus one at 50,000 by
+default, rising to 40,000 and 250,000 under `--long`. The split is explained
+(sanitizer builds stay quick; the optimised CI job runs the thorough pass) and
+both use the same seeds, so a failure at either size reproduces at the other.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Two things are worth recording.
+- **The reference book's asymmetries do not hide bugs, they surface as
+  failures.** `ReferenceBook` has no price window and no order limit while
+  `OrderBook` has both, so if the generator ever went out of window or exhausted
+  the pool, `fe != re` at line 85 would trip with a clear message. The
+  asymmetry recorded under `include/lob/book/reference_book.hpp` is therefore a
+  documentation gap, not a correctness hole in this test.
+- **Line 66 explicitly re-enables the Execute path** (`cfg.w_execute = 0.09`)
+  with the comment that "the book must be driven through its Execute path to be
+  proved correct, and the generator no longer fabricates one by default". A
+  differential test that silently stopped exercising executes would keep passing
+  while proving less, and this is the line that prevents it.
+
+---
+
+### `tests/test_features.cpp`
+
+**Status:** [x] Reviewed (243 lines, read in full)
+
+**Issues Found:** The one-sided-book case asserts only the absence of NaN, which
+is why the stale-mid defect survives.
+
+- **Lines 147-161 test an empty and then a bid-only book and assert only
+  `!isnan(...)`.** On the bid-only book, `f.imbalance` is stale at 0.0 from the
+  previous empty update, and `!isnan(0.0)` passes. Nothing asserts that a
+  consumer could tell the values are not current. This is the coverage gap
+  behind the `Features` finding.
+- **The differential loop's imbalance check is guarded by `has_bid() &&
+  has_ask()`** (line 206), so the one-sided case is excluded there too.
+
+**Severity:** Medium (coverage of a Medium defect)
+
+**Fix Recommendation:** Once `Features` carries a validity flag, assert it is
+false here. Until then, assert the weaker but still useful property: that `mid`
+after a one-sided update equals the mid from before it, so the staleness is at
+least documented by a test.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** 200,000 events with a from-scratch OFI recomputation at
+every step. The slowest test in the suite and the most valuable.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** The structure is the right one and the header states it:
+hand-constructed cases pin the definitions, then a differential run checks the
+incremental engine against recomputation, "because the incremental update is
+where the bugs live — it is the only part that carries state." The seven OFI
+cases at lines 75-107 cover every branch of Cont-Kukanov-Stoikov including the
+mirror-image ask side, worked out on paper. And the differential loop asserts
+not just OFI but that no feature ever becomes non-finite, which is the class of
+bug an EWMA introduces silently.
+
+---
+
+### `tests/test_pnl.cpp`
+
+**Status:** [x] Reviewed (137 lines, read in full)
+
+**Issues Found:** Every `attribute` call passes `final_inventory = 0`, which is
+why the omitted inventory mark is invisible.
+
+- **Lines 55, 89 and 90 all pass `0`** as the closing position. `Attribution`
+  computes `inventory_mtm` from it and then leaves it out of `total`, so with a
+  zero position the two agree and nothing fails.
+- **`MarkoutTracker::advance` is never called with `mid_now <= 0`**, so the
+  early-return that silently stretches a horizon is untested.
+
+**Severity:** High (as the coverage gap behind a High defect)
+
+**Fix Recommendation:**
+```cpp
+const Attribution held = attribute({f}, 3, FeeSchedule{}, 90.0, +100);
+CHECK_NEAR(held.inventory_mtm, 9000.0, 1e-9);
+CHECK_NEAR(held.total, held.spread_capture - held.adverse_sel - held.fees + held.inventory_mtm, 1e-9);
+```
+The second line fails today, and is the assertion that pins what `total` means.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** The decomposition identity is tested in all four
+sign combinations — buy with the mid falling and rising, sell with the mid
+rising — and each asserts
+`markout == spread_capture - adverse_selection` exactly (lines 26, 33, 42).
+That is the identity every attribution table depends on. Lines 45-59 test the
+unreached-horizon rule with the reason stated: counting a missing horizon as
+zero "would drag every long-horizon mean toward zero". And the bootstrap block
+(lines 98-134) is careful in a way this kind of test usually is not — it checks
+that constant data collapses the interval, that noise centred on zero is **not**
+called significant, that the degenerate `[0, 0]` interval does not exclude zero,
+and it explains at lines 110-112 why alternating +1/-1 would have been the wrong
+noise to use (every 50-element block sums to exactly zero, leaving the bootstrap
+no sampling variation to find).
+
+---
+
+### `tests/test_simulator.cpp`
+
+**Status:** [x] Reviewed (125 lines, read in full)
+
+**Issues Found:** The determinism test compares aggregates, not the fill
+sequence. The agent's own fills reaching the view book is untested.
+
+- **Determinism is asserted over nine `SimStats` scalars** (lines 62-70), while
+  the header claims runs are reproducible "byte for byte". Two runs could
+  produce different fill orderings with identical totals and pass. The
+  `InFlight` tie-break gap recorded under `include/lob/sim/latency.hpp` is
+  exactly that shape and would not be caught here.
+- **Nothing asserts the view book learns about the agent's own executions**,
+  which is the High defect recorded under `include/lob/sim/simulator.hpp`.
+- The suite runs 2.24 million simulated events in this one file, which dominates
+  `ctest` wall time.
+
+**Severity:** Medium (both gaps)
+
+**Fix Recommendation:** Compare the fill vectors, not the totals:
+```cpp
+CHECK_EQ(fa.size(), fb.size());
+for (std::size_t i = 0; i < fa.size(); ++i)
+  CHECK(std::memcmp(&fa[i], &fb[i], sizeof(Fill)) == 0);
+```
+`Fill` is a POD, so this is the byte-for-byte claim actually asserted.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** As above — three million-event runs.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** The comment at lines 85-93 is the most valuable thing in
+the file and is worth quoting: this assertion previously ran at 200,000 events
+and started failing when the generator's aggressive weight was fitted to the
+real trade rate — 2.6% of events, down from an effective 14%. "It is not that
+latency stopped causing aggression: 500k events give 87 and a million give 151.
+The test had been relying on a process that traded five times too often." A test
+that quietly depended on a mis-calibrated model, caught and documented rather
+than re-tuned away, is the record you want when the next assertion starts
+failing. The paired assertion — zero aggressive fills with no latency, positive
+with latency, from an agent that never asks to cross — is the cleanest possible
+demonstration that the latency model does something.
+
+---
+
+### `tests/test_strategies.cpp`
+
+**Status:** [x] Reviewed (180 lines, read in full)
+
+**Issues Found:** The invariant sweep exists but asserts the wrong invariant,
+and the whole file runs on parameters the shipped defaults do not match.
+
+- **Line 24: `p.gamma = 0.05; p.sigma = 0.5; p.horizon = 1.0;`.** The
+  `QuoteParams` defaults are `sigma = 1.0` and `horizon = 1e5`. So the skew per
+  share under test is 0.0125 ticks; under the defaults it is 5,000. **No test in
+  the repository ever constructs a default `QuoteParams`.**
+- **Lines 159-177 sweep all five strategies across inventories from -150 to
+  +150 and assert `q.bid < q.ask`** — a self-crossed pair. Nothing asserts
+  `q.bid < best_ask` or `q.ask > best_bid`, so a quote through the market
+  passes.
+- **Lines 127-141 test `GLFT::half_bid`/`half_ask` as raw doubles**, before
+  `assemble`'s `min_half` clamp. They pass while the clamped quotes are
+  constant.
+
+**Severity:** **Critical** (as the coverage gap behind the Critical defect in
+`include/lob/strat/quoting.hpp`)
+
+**Fix Recommendation:** Two lines inside the existing loop, and one more
+parameter set:
+```cpp
+CHECK(q.bid < b.best_ask());     // never quote through the market
+CHECK(q.ask > b.best_bid());
+...
+// and run the whole sweep a second time with a default-constructed QuoteParams
+```
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Where this file tests the mathematics it is excellent,
+and lines 108-124 are the best example in the repository of a test refusing to
+encode a plausible falsehood. A-S's optimal spread is **not** monotone in risk
+aversion: `gamma*sigma^2*(T-t)` grows with gamma while `(2/gamma)ln(1+gamma/k)`
+shrinks, "because a more risk-averse trader demands less edge per fill — it
+wants the fill in order to offload risk." At these parameters the second term
+dominates, so raising gamma tightens the spread, and the comment says outright
+that asserting the opposite "would encode a plausible-sounding falsehood."
+Instead it asserts what is reliable: the inventory-risk half always grows with
+gamma. Lines 56-59 make the complementary point about the tick grid — at these
+parameters the Ho-Stoll shift is 0.625 ticks and "a sub-tick shift can round
+away entirely, which is exactly why a large-tick instrument is a
+queue-position game rather than a price-placement one." That reasoning is right.
+The gap is that the file reasons carefully about the parameters it chose and
+never checks the ones that ship.
+
+---
+
+### `tests/test_properties.cpp`
+
+**Status:** [x] Reviewed (275 lines, read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a
+
+**Why it matters:** This is the strongest test file in the repository and I
+found nothing to fix in it.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** The six properties here are well chosen. A seventh worth
+having, given the findings elsewhere in this audit: **no strategy's quote ever
+crosses the book it was computed from**, swept over parameters including the
+defaults. It belongs in this file rather than `test_strategies.cpp`, because it
+is a property rather than a case.
+
+**Performance Notes:** 150,000 + 60,000 + 150,000 + 30,000 events plus 40
+histogram trials. Slow, and each property justifies its cost.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Four of the six properties are the ones that matter.
+- **Quantity is conserved** (lines 28-69): everything that enters the book
+  leaves it or is still resting, checked by walking every level at the end. A
+  leak "would show up as depth that is not there, which is the sort of error a
+  strategy would happily trade against for a long time."
+- **Matching never trades through the limit and sweeps best-price-first**
+  (lines 102-126), with the fill quantities summing to the reported fill.
+- **A failed operation leaves the book untouched** (lines 200-233): every
+  rejection path is exercised against a snapshot string. "If a rejected
+  operation half-applies, the book is corrupt in a way nothing downstream can
+  detect."
+- **The histogram boundary contract** (lines 182-194) is the subtlest thing in
+  the suite and it is right. `p0 >= min` and `p100 <= max` "look like the
+  obvious sanity check to write" and are **false** for a bucketed histogram,
+  because a percentile resolves to a bucket while min and max are tracked
+  exactly. The file asserts the true contract instead — p0 equals the floor of
+  the bucket holding the minimum, p100 the ceiling of the one holding the
+  maximum — and explains why. Most implementations of this test assert the
+  false version and then loosen it with a tolerance when it fails.
 
 ---
 
