@@ -297,10 +297,80 @@ extended to measure the same way; then the rest of Model III (5), calibrating
 `theta` and `theta_reinit` against the ten-minute volatility and the
 mean-reversion ratio. Limit order sizes (6) last — market order sizes are done.
 
-Also open: adverse selection on the queue-reactive process reads 19% against a
-measured 33%, having been 34% before the rate correction. The informed-flow
-parameters were fitted against the fixed-weight process and have not been
-re-fitted against this one.
+## Refitting the informed parameters, and what that turned up
+
+The Glosten-Milgrom overlay could not be refitted, because measuring first
+showed the parameterisation is what fails. The quantity that decides it is the
+**lift**: how much likelier the mid is to move in the next second after a print
+than at a random moment.
+
+| | P(move \| print) | P(move \| random) | lift |
+|---|---|---|---|
+| ethusd | 57.4% | 17.7% | 3.24 |
+| btcusd | 68.6% | 19.6% | 3.50 |
+| xrpusd | 81.0% | 41.0% | 1.98 |
+| fixed-weight process | 62.5% | 56.2% | 1.11 |
+| queue-reactive process | 28.9% | 29.3% | 0.99 |
+
+A trade in the queue-reactive process carried no information at all. More
+importantly, the fixed-weight process reads 1.11 — so `informed_impact_prob =
+0.85`, fitted earlier against a measured 33% adverse selection and written up
+as a success, **never produced information either**. It hit the target by
+making the price move constantly, 56.2% unconditionally against ethusd's 17.7%.
+Adverse selection can be bought with volatility, and that fit bought it.
+
+The mechanical cause on this process is measured: the impact moves `p_ref`
+whatever the book holds, so the price walks through resting liquidity. With it
+on, 8.2% of states have orders on the wrong side of `p_ref`, against 0.02% with
+it off. The observed touch stays put until those orders cancel away.
+
+**What replaced it.** Real market orders are as small against the queue as ours
+— a median of 0.067 AES against a touch of 4.29 — so the trade cannot be moving
+the price by consuming it. What links the two is that a maker who has just been
+hit *pulls*. So a print now excites cancellation on the side that was hit,
+decaying over a time constant: the Hawkes component of arXiv:1901.08938 in its
+simplest single-kernel form, and Glosten-Milgrom written in the queue-reactive
+language rather than bolted beside it.
+
+It only works with the base cancel rate compensated so the **mean** stays where
+Model I put it. Without that the book equilibrates thinner and the process
+simply becomes more volatile — the same bargain again, differently spelled.
+
+**Fitted to the unconditional move rate, not to the lift:**
+
+| gain | P(move \| print) | P(move \| random) | lift | adverse |
+|---|---|---|---|---|
+| 0 | 28.5% | 28.6% | 1.00 | 18.5% |
+| 3 | 30.0% | 21.1% | 1.43 | 22.4% |
+| **5** | **30.2%** | **15.7%** | **1.92** | **23.7%** |
+| 8 | 27.2% | 7.0% | 3.90 | 22.2% |
+| 12 | 39.7% | 0.0% | 1984 | 36.5% |
+| ethusd | 57.4% | 17.7% | 3.24 | 48.1% |
+
+Gain 8 lands the lift almost exactly and is still wrong: the numerator never
+moves, and the lift rises only because the denominator collapses. By gain 12
+the price does not move at all except after a trade. Matching one statistic by
+breaking another is the mistake the old fit made facing the other way.
+
+Five, because its unconditional move rate matches the instrument. The lift it
+buys is 1.92 of a measured 3.24 — most of the way from "a fill says nothing" to
+"a fill says something", and not all the way.
+
+What the process looks like after it:
+
+| | before | after | ethusd |
+|---|---|---|---|
+| spread at one tick | 72% | **84%** | 91% |
+| mid moves per 100 ms | 5.5% | **3.4%** | 2.0% |
+| volume one tick past the touch | 12.8% | **9.8%** | 7.2% |
+| adverse selection | 19% | **24%** | 33% (8-hour) |
+| imbalance, five buckets | 0.7–5.1 | **0.4–3.1** | 0.3–3.0 |
+
+The imbalance profile now runs 0.4 / 0.9 / 1.8 / 2.4 / 3.1 against ethusd's
+0.3 / 0.4 / 0.8 / 0.6 / 3.0 — the same level and nearly the same range.
+
+Still open: the residual lift gap, which is what a proper Hawkes kernel with a
+fitted decay would close, and adverse selection at 24% against 33%.
 
 ## Model II-a: what was implemented, and what level_ratio actually needed
 

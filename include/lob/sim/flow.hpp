@@ -515,6 +515,88 @@ struct FlowConfig {
     double opp_cancel[3] = {1.446, 0.787, 0.648};
     double opp_trade [3] = {0.761, 1.325, 1.080};
 
+    // ---- what makes a fill informative ------------------------------------
+    //
+    // The Glosten-Milgrom overlay above does not work on this process, and
+    // measuring why says it never really worked on the other one either.
+    //
+    // The quantity that matters is the LIFT: how much likelier the mid is to
+    // move in the next second after a print than at a random moment.
+    //
+    //                 P(move | print)   P(move | random)   lift
+    //     ethusd           57.4%             17.7%         3.24
+    //     btcusd           68.6%             19.6%         3.50
+    //     xrpusd           81.0%             41.0%         1.98
+    //     fixed weights    62.5%             56.2%         1.11
+    //     Model I + II     28.9%             29.3%         0.99
+    //
+    // A trade in the queue-reactive process carries NO information about
+    // whether the price is about to move. And the fixed-weight process, whose
+    // informed_impact_prob was fitted to 0.85 against a measured 33% adverse
+    // selection, has a lift of 1.11: it hit the target by making the price move
+    // all the time -- 56.2% unconditionally, against ethusd's 17.7% -- not by
+    // making fills predictive. That fit bought the right number the wrong way.
+    //
+    // What links trades to moves in a real book is not the trade consuming the
+    // queue: real market orders are as small against the queue as ours are,
+    // a median of 0.067 AES against a touch of 4.29. It is that a maker who
+    // has just been hit PULLS. The trade and the queue evaporating are both
+    // consequences of the same information, which is Glosten and Milgrom
+    // written in the queue-reactive language rather than bolted beside it.
+    //
+    // So a print excites cancellation on the side that was hit, decaying with
+    // a time constant. This is self-excitation -- the Hawkes component of
+    // arXiv:1901.08938, which couples exactly this to the queue-reactive rates
+    // -- in its simplest single-kernel form.
+    //
+    // Both constants are fitted to the lift, below, and the base cancel rate is
+    // re-divided so the MARGINAL cancel rate stays where Model I put it: an
+    // excitation that also raises the average is two changes wearing one name.
+    // FITTED TO THE UNCONDITIONAL MOVE RATE, NOT TO THE LIFT, and the sweep
+    // says why that is the honest choice:
+    //
+    //     gain   P(mv|print)  P(mv|random)   lift   adverse
+    //        0      28.5%        28.6%       1.00    18.5%
+    //        2      29.5%        23.0%       1.28    21.5%
+    //        3      30.0%        21.1%       1.43    22.4%
+    //        5      30.2%        15.7%       1.92    23.7%
+    //        8      27.2%         7.0%       3.90    22.2%
+    //       12      39.7%         0.0%       1984     36.5%
+    //     ethusd    57.4%        17.7%       3.24    48.1%
+    //
+    // Gain 8 lands the lift almost exactly. It is still the wrong answer: the
+    // numerator never moves, and the lift rises only because the DENOMINATOR
+    // collapses -- by gain 12 the price does not move at all except after a
+    // trade. Matching one statistic by breaking another is the mistake the old
+    // informed_impact_prob fit made in the opposite direction, and taking gain
+    // 8 here would be making it again facing the other way.
+    //
+    // Five, because it is the value whose unconditional move rate matches the
+    // instrument: 15.7% against ethusd's 17.7%. The lift it buys is 1.92 of a
+    // measured 3.24, and the honest reading is that this kernel gets the
+    // process most of the way from "a fill says nothing" to "a fill says
+    // something", and not all the way.
+    double excite_gain = 5.0;      // multiplies lambda^C at the hit touch
+    double excite_tau_s = 1.0;     // decay, in seconds
+
+    // The compensation, and why it is not optional. A kernel that fires on a
+    // Poisson stream of rate m with decay tau carries a mean of gain * m * tau,
+    // so leaving the base rate alone raises the AVERAGE cancel rate by that
+    // much. The book then equilibrates thinner, and a thinner book moves more
+    // at every moment, not only after a trade. Measured without this, gain 20
+    // took P(move | print) from 28.5% to 72.5% and P(move | random) from 28.6%
+    // to 56.4% -- the lift went 1.00 to 1.29 while the process became three
+    // times more volatile than ethusd. That is the same bargain the old
+    // informed_impact_prob fit made, spelled differently: buying adverse
+    // selection with volatility rather than with information.
+    //
+    // Dividing the base rate by (1 + gain * trade_rate * tau) holds the mean
+    // where Model I put it, so the excitation redistributes WHEN cancels
+    // happen without changing how many there are.
+    [[nodiscard]] double excite_compensation() const noexcept {
+      return 1.0 / (1.0 + excite_gain * trade_rate * excite_tau_s);
+    }
+
     // Orders the price has walked away from.
     //
     // The model describes kLevels queues either side of p_ref. A price move
@@ -856,6 +938,18 @@ class FlowGenerator {
     reference_price_step(st);
     if (mid_ != ref_seen_) { st = queue_state(); ref_seen_ = mid_; }
 
+    // Decay the post-trade excitation to now. Done here rather than on the
+    // trade so it tracks elapsed TIME: this process's clock is exponential and
+    // an event count would make the kernel mean something different at every
+    // rate.
+    if (excite_at_ != 0 && e.ts > excite_at_ && cfg_.qr.excite_tau_s > 0.0) {
+      const double decay = std::exp(-(static_cast<double>(e.ts - excite_at_) / 1e9)
+                                    / cfg_.qr.excite_tau_s);
+      excite_[0] *= decay;
+      excite_[1] *= decay;
+    }
+    excite_at_ = e.ts;
+
     double rate[2][kL][3], far_rate[2];
     double total = 0.0;
     for (int s = 0; s < 2; ++s) {
@@ -874,7 +968,11 @@ class FlowGenerator {
         const int q = q_of(st.qty[s][l]);
         const bool touch = (l == 0);
         rate[s][l][0] = lambda_add(l, q) * (touch ? ma : 1.0);
-        rate[s][l][1] = st.n[s][l] > 0 ? lambda_cancel(l, q) * (touch ? mc : 1.0) : 0.0;
+        rate[s][l][1] = st.n[s][l] > 0
+                      ? lambda_cancel(l, q)
+                        * (touch ? mc * (1.0 + excite_[s]) * cfg_.qr.excite_compensation()
+                                 : 1.0)
+                      : 0.0;
         rate[s][l][2] = st.n[s][l] > 0 ? lambda_trade(l, q, best) * (touch ? mt : 1.0) : 0.0;
         total += rate[s][l][0] + rate[s][l][1] + rate[s][l][2];
       }
@@ -989,12 +1087,13 @@ class FlowGenerator {
   // A market order's size, in lots, from the measured distribution: pick a
   // sixteenth uniformly and interpolate inside it. At least one lot, because a
   // market order for nothing is not an event and the book would reject it.
-  [[nodiscard]] Qty draw_trade_size() noexcept {
+  [[nodiscard]] Qty size_at(double u01) const noexcept {
     const FlowConfig::Qr& k = cfg_.qr;
-    const double u = uniform() * FlowConfig::Qr::kSizeBins;
+    const double u = u01 * FlowConfig::Qr::kSizeBins;
     int i = static_cast<int>(u);
     double f = u - static_cast<double>(i);
     if (i >= FlowConfig::Qr::kSizeBins) { i = FlowConfig::Qr::kSizeBins - 1; f = 1.0; }
+    if (i < 0) { i = 0; f = 0.0; }
     const double aes_mult = k.trade_size_aes[i]
                           + f * (k.trade_size_aes[i + 1] - k.trade_size_aes[i]);
     const double lots = aes_mult * (k.aes > 0.0 ? k.aes : 1.0);
@@ -1012,19 +1111,40 @@ class FlowGenerator {
     e.side     = (resting == Side::Bid) ? Side::Ask : Side::Bid;
     e.order_id = next_id_++;
     e.price    = 0;
-    e.qty      = draw_trade_size();
-    // The Glosten-Milgrom split is orthogonal to where the order came from, so
-    // it is applied here exactly as make_aggress applies it: a share of takers
-    // are informed and the mid follows them. Duplicating the three lines rather
-    // than sharing them would let the two paths drift apart, which is the one
-    // thing this whole file keeps being bitten by.
-    if (uniform() < cfg_.informed_frac) {
-      ++informed_;
-      if (uniform() < cfg_.informed_impact_prob)
-        pending_impact_ = (e.side == Side::Bid) ? cfg_.informed_impact : -cfg_.informed_impact;
-    } else {
-      ++uninformed_;
-    }
+    // INFORMED FLOW MOVES THE PRICE BY TAKING LIQUIDITY, NOT BY TELEPORTING
+    // PAST IT.
+    //
+    // The fixed-weight path marks a share of takers informed and then steps the
+    // reference price behind them. On this process that barely works: with
+    // every trade informed and every one moving the price, P(the mid has moved
+    // against the resting side one second later) reaches 17.8% against a
+    // measured 33%, and the reason is mechanical. The impact moves p_ref
+    // whatever the book holds, so the price walks THROUGH resting liquidity --
+    // 8.2% of states end up with orders on the wrong side of p_ref, against
+    // 0.02% with the impact off -- and those orders keep defining the observed
+    // touch until they cancel away. The price moves in the model's coordinates
+    // and not in the book.
+    //
+    // Glosten and Milgrom's informed trader does not teleport a price; they
+    // trade, and the price moves because the queue they took is gone. This
+    // model already has that: a market order large enough to clear the best
+    // queue empties it, and reference_price_step moves p_ref onto the gap. So
+    // informed flow here is simply the LARGE trades -- which is also the
+    // standard empirical finding about which trades carry information.
+    //
+    // The split is by quantile, so the marginal size distribution is untouched:
+    // informed orders are the top informed_frac of the measured distribution
+    // and uninformed the rest, and mixing them back gives exactly the
+    // distribution that was fitted. Nothing here is a new free parameter.
+    const bool informed = uniform() < cfg_.informed_frac;
+    const double pi = cfg_.informed_frac;
+    const double u  = informed ? (1.0 - pi) + uniform() * pi
+                               : uniform() * (1.0 - pi);
+    e.qty = size_at(u);
+    if (informed) ++informed_; else ++uninformed_;
+    // The side that was HIT is the resting side, and it is that side's makers
+    // who just learned something.
+    excite_[resting == Side::Bid ? 0 : 1] += cfg_.qr.excite_gain;
     return e;
   }
 
@@ -1127,6 +1247,8 @@ class FlowGenerator {
   Ticks             pending_impact_ = 0;
   std::uint64_t     informed_ = 0, uninformed_ = 0;
   Ticks             ref_seen_ = 0;
+  double            excite_[2] = {0.0, 0.0};   // post-trade cancel excitation
+  Nanos             excite_at_ = 0;
   bool              has_bid_ = false;
   bool              has_ask_ = false;
   Ticks             best_bid_ = 0;
