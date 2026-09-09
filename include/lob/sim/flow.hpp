@@ -664,6 +664,58 @@ struct FlowConfig {
     // an empirical 14, so this cannot be the whole story and is not claimed to
     // be.
     double theta = 1.0;
+
+    // theta_reinit: the share of reference price moves that are EXOGENOUS.
+    //
+    // The paper's other half of this calibration, and the half that was
+    // missing. On a price move, with this probability the whole book is redrawn
+    // from its invariant distribution rather than shifted: "market participants
+    // readjust very quickly their order flows around the new reference price,
+    // as if a new state of the LOB was drawn from its invariant distribution",
+    // which is how information from outside the book enters it. Cont and
+    // De Larrard set it to 1.
+    //
+    // Redrawing severs the state before the move from the state after, so the
+    // queue that pulled the price back is no longer there to pull. That should
+    // move eta -- continuations over twice the alternations -- up from this
+    // process's 0.40 toward 0.5. It should NOT reach the instruments' 0.84:
+    // independent redraws make successive moves independent, and independence
+    // is exactly eta = 0.5. Getting above that needs order flow that persists
+    // in one direction, which is a different mechanism.
+    //
+    // That was written before the sweep and it held. Measured:
+    //
+    //     reinit   eta   sd/100ms  P(mv|prn) P(mv|rnd)  lift  adverse  1-tick
+    //       0.0   0.40     0.186     29.4%     18.5%    1.59   22.3%    81.5%
+    //       0.1   0.45     0.168     23.4%     12.6%    1.87   18.4%    91.9%
+    //       0.3   0.49     0.156     21.2%      9.9%    2.15   17.2%    95.7%
+    //       0.6   0.52     0.139     18.2%      6.8%    2.67   15.1%    97.8%
+    //       1.0   0.57     0.117     16.9%      4.6%    3.65   14.3%    98.9%
+    //     ethusd  0.84     0.110     57.4%     17.7%    3.24   48.1%    91.0%
+    //
+    // eta climbs from 0.40 to 0.57 and stops there, a shade past the 0.5 the
+    // prediction named and nowhere near 0.84. Reaching that needs order flow
+    // that persists in one direction, and measuring the trade-sign
+    // autocorrelation says the same: 0.35 to 0.59 at lag one on the three
+    // instruments and still 0.12 to 0.18 ten trades later, against 0.22 here
+    // and gone by lag five. That is Lillo and Farmer's long memory and it is
+    // not in this model.
+    //
+    // THE STATISTICS DISAGREE ABOUT WHERE TO SET THIS, so the rule matters.
+    // Volatility wants 1.0, the spread wants 0.1, adverse selection wants 0,
+    // and the lift wants 1.0 -- but the lift there is 3.65 against a measured
+    // 3.24 with P(move | random) at 4.6% against 17.7%, which is the
+    // denominator collapsing again and not a market to be believed.
+    //
+    // Three tenths, on the rule that this parameter exists to remove mean
+    // reversion and 0.3 is where it has: eta reaches the random walk. Below it
+    // the price flip-flops, which no instrument does. Above it, eta is bought
+    // by erasing the book's memory of what just traded -- adverse selection
+    // falls from 17.2% to 14.3% and P(move | random) to a quarter of the
+    // instrument's -- and memory is the thing a market maker is paid for
+    // understanding. Half the price formation stays endogenous, which is what
+    // a queue-reactive model is for.
+    double theta_reinit = 0.3;
   };
   Qr qr;
 
@@ -703,6 +755,19 @@ class FlowGenerator {
       : cfg_(cfg), rng_(cfg.seed), mid_(cfg.mid) {}
 
   [[nodiscard]] BookEvent next() noexcept {
+    // A reinitialisation is many events and next() hands back one at a time, so
+    // they queue. Timestamps are assigned as they leave, one nanosecond apart:
+    // the redraw is meant to be instantaneous next to anything else in the
+    // process, and giving them the same timestamp would make the exposure
+    // accounting divide by zero.
+    if (!pending_.empty()) {
+      BookEvent q = pending_.front();
+      pending_.erase(pending_.begin());
+      q.ts  = ts_;
+      q.seq = seq_++;
+      ts_  += 1;
+      return q;
+    }
     BookEvent e{};
     e.ts  = ts_;
     e.seq = seq_++;
@@ -907,6 +972,60 @@ class FlowGenerator {
     if (bid_empty == ask_empty) return;             // both, or neither
     if (uniform() >= cfg_.qr.theta) return;
     mid_ += bid_empty ? -1 : 1;                     // the price follows the gap
+    if (cfg_.qr.theta_reinit > 0.0 && uniform() < cfg_.qr.theta_reinit) reinitialise();
+  }
+
+  // Redraw the book around the new reference price. Everything resting is
+  // cancelled and each modelled queue is refilled to a size drawn from its own
+  // invariant distribution -- the one Model I gives in closed form, which is
+  // why that distribution is worth having exactly rather than approximately.
+  void reinitialise() noexcept {
+    for (const Live& l : live_) {
+      BookEvent d{};
+      d.type = EventType::Delete;
+      d.order_id = l.id;
+      d.side = l.side;
+      d.price = l.price;
+      pending_.push_back(d);
+    }
+    for (int s = 0; s < 2; ++s)
+      for (int l = 0; l < FlowConfig::Qr::kLevels; ++l) {
+        const int q = draw_invariant(l);
+        for (int k = 0; k < q; ++k) {
+          BookEvent a{};
+          a.type = EventType::Add;
+          a.side = (s == 0) ? Side::Bid : Side::Ask;
+          a.price = queue_price(s, l);
+          a.qty = static_cast<Qty>(cfg_.qr.aes > 1.0 ? cfg_.qr.aes : 1.0);
+          a.order_id = next_id_++;
+          pending_.push_back(a);
+        }
+      }
+  }
+
+  // A queue size from Model I's stationary law for that level:
+  //   pi(n) proportional to prod_{j=1..n} lambda^L(j-1) / lambda^C(j)
+  // built on the fly and sampled by inverse CDF. Capped, because the product
+  // is only summable when departures outrun arrivals and a misconfiguration
+  // should not become an unbounded loop.
+  [[nodiscard]] int draw_invariant(int lvl) noexcept {
+    constexpr int kMax = 32;
+    double w[kMax + 1];
+    w[0] = 1.0;
+    double total = 1.0, prod = 1.0;
+    for (int n = 1; n <= kMax; ++n) {
+      const double dep = lambda_cancel(lvl, n) + lambda_trade(lvl, n, lvl);
+      if (!(dep > 0.0)) { w[n] = 0.0; continue; }
+      prod *= lambda_add(lvl, n - 1) / dep;
+      w[n] = prod;
+      total += prod;
+    }
+    double r = uniform() * total;
+    for (int n = 0; n <= kMax; ++n) {
+      r -= w[n];
+      if (r <= 0.0) return n;
+    }
+    return 0;
   }
 
 
@@ -1281,6 +1400,7 @@ class FlowGenerator {
   Ticks             pending_impact_ = 0;
   std::uint64_t     informed_ = 0, uninformed_ = 0;
   Ticks             ref_seen_ = 0;
+  std::vector<BookEvent> pending_;    // a reinitialisation, drained one at a time
   double            excite_[2] = {0.0, 0.0};   // post-trade cancel excitation
   Nanos             excite_at_ = 0;
   bool              has_bid_ = false;

@@ -425,9 +425,82 @@ than to a downstream statistic. It also lands the process volatility closer than
 the ad-hoc pair did, 18.2% against 17.7% where gain 5 gave 15.7%, and its lower
 lift is bounded by mean reversion rather than by anything in the kernel.
 
-**Still open:** η at 0.40 against 0.84, which is the binding constraint and is
-`theta`'s to fix; adverse selection at 22% against 33%; and the power-law shape,
-which needs a second exponential term.
+## θ and θ_reinit, calibrated — and η is not θ's to fix
+
+**θ does not control η.** Sweeping it moves η the *wrong* way:
+
+| θ | η | sd/100 ms | lift | adverse | 1-tick spread |
+|---|---|---|---|---|---|
+| 1.0 | 0.41 | 0.185 | 1.61 | 22.1% | 81.5% |
+| 0.5 | 0.38 | 0.179 | 1.51 | 20.2% | 83.1% |
+| 0.25 | 0.37 | 0.167 | 1.61 | 19.3% | 85.4% |
+| 0.10 | 0.30 | 0.148 | 1.53 | 16.2% | 88.0% |
+| 0.03 | 0.21 | 0.134 | 1.58 | 12.9% | 90.2% |
+
+Lower θ improves volatility and the spread and makes η monotonically worse. θ
+governs how *often* the price moves, not whether successive moves are correlated,
+so it was the wrong parameter for this and stays at 1.0.
+
+**The η gap is real, not a sampling artefact.** Recomputing on the mid sampled
+every k grid rows:
+
+| | k=1 | k=2 | k=5 | k=10 | k=20 |
+|---|---|---|---|---|---|
+| ethusd | 0.84 | 0.88 | 0.97 | 0.83 | 0.62 |
+| btcusd | 0.48 | 0.70 | 0.98 | 1.02 | 1.13 |
+| this process | 0.41 | 0.42 | 0.44 | 0.46 | 0.49 |
+
+Ours converges on 0.5 — a pure random walk — at every coarsening. The
+instruments trend at every scale.
+
+**θ_reinit is the half that was missing.** On a price move it redraws the book
+from its invariant distribution rather than shifting it: "market participants
+readjust very quickly their order flows around the new reference price". That
+severs the queue that would have pulled the price back.
+
+Written down before running it: this should move η from 0.40 toward 0.5 and
+**not** to 0.84, because independent redraws make successive moves independent
+and independence *is* η = 0.5. It held.
+
+| θ_reinit | η | sd/100 ms | P(mv \| print) | P(mv \| random) | lift | adverse | 1-tick |
+|---|---|---|---|---|---|---|---|
+| 0.0 | 0.40 | 0.186 | 29.4% | 18.5% | 1.59 | 22.3% | 81.5% |
+| 0.1 | 0.45 | 0.168 | 23.4% | 12.6% | 1.87 | 18.4% | 91.9% |
+| **0.3** | **0.49** | **0.156** | **21.2%** | **9.9%** | **2.15** | **17.2%** | **95.7%** |
+| 0.6 | 0.52 | 0.139 | 18.2% | 6.8% | 2.67 | 15.1% | 97.8% |
+| 1.0 | 0.57 | 0.117 | 16.9% | 4.6% | 3.65 | 14.3% | 98.9% |
+| ethusd | 0.84 | 0.110 | 57.4% | 17.7% | 3.24 | 48.1% | 91.0% |
+
+η climbs to 0.57 and stops, a shade past the predicted 0.5 and nowhere near 0.84.
+
+**The statistics disagree about where to set it**, so the rule matters. Volatility
+wants 1.0, the spread wants 0.1, adverse selection wants 0, and the lift wants
+1.0 — but the lift there is 3.65 against a measured 3.24 with P(move | random) at
+4.6% against 17.7%, which is the denominator collapsing again.
+
+Three tenths, on the rule that this parameter exists to remove mean reversion and
+0.3 is where it has: η reaches the random walk. Below it the price flip-flops,
+which no instrument does. Above it, η is bought by erasing the book's memory of
+what just traded, and memory is what a market maker is paid for understanding.
+
+**What reaching η = 0.84 actually needs.** Trade-sign autocorrelation:
+
+| | n | k=1 | k=2 | k=5 | k=10 | k=20 |
+|---|---|---|---|---|---|---|
+| ethusd | 54 | 0.35 | 0.39 | 0.10 | 0.03 | −0.28 |
+| btcusd | 220 | 0.56 | 0.48 | 0.26 | 0.18 | −0.03 |
+| xrpusd | 153 | 0.59 | 0.36 | 0.16 | 0.12 | 0.06 |
+| this process | 24,162 | 0.22 | 0.14 | 0.01 | 0.01 | −0.01 |
+
+Real flow stays correlated for tens of trades; ours dies within five. That is
+Lillo and Farmer's long memory, it is what makes a price trend, and it is a
+mechanism this model does not have. Model II-b supplies the 0.22 at lag one —
+trades favour a thick opposite queue and thickness persists — and nothing
+supplies the tail.
+
+**Still open:** η 0.49 against 0.84 and adverse selection 17% against 33%, both
+wanting persistent order flow; and the kernel's power-law shape, which needs a
+second exponential term.
 
 ## Model II-a: what was implemented, and what level_ratio actually needed
 
