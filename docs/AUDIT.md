@@ -47,8 +47,8 @@ Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
   - `tape/`
     - [x] `main.cpp`
 - `bench/`
-  - [ ] `bench_book.cpp`
-  - [ ] `bench_measure.cpp`
+  - [x] `bench_book.cpp`
+  - [x] `bench_measure.cpp`
 - `data/`
   - `samples/`
     - [ ] `btcusd_20260904T200134Z_bitstamp.jsonl.gz`
@@ -77,11 +77,11 @@ Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
     - [ ] `07_ak_calibration.png`
     - [ ] `calibration.json`
 - `fuzz/`
-  - [ ] `decode.hpp`
-  - [ ] `fuzz_bitstamp.cpp`
-  - [ ] `fuzz_book.cpp`
-  - [ ] `fuzz_matching.cpp`
-  - [ ] `portable_main.cpp`
+  - [x] `decode.hpp`
+  - [x] `fuzz_bitstamp.cpp`
+  - [x] `fuzz_book.cpp`
+  - [x] `fuzz_matching.cpp`
+  - [x] `portable_main.cpp`
 - `include/`
   - `lob/`
     - `book/`
@@ -3251,6 +3251,313 @@ histogram trials. Slow, and each property justifies its cost.
   the bucket holding the minimum, p100 the ceiling of the one holding the
   maximum — and explains why. Most implementations of this test assert the
   false version and then loosen it with a tolerance when it fails.
+
+---
+
+### `fuzz/decode.hpp`
+
+**Status:** [x] Reviewed (80 lines, read in full)
+
+**Issues Found:** One overstated comment. No defects.
+
+- **"Weighted so cancels and executes dominate" (lines 56-57) is a stretch.**
+  `op % 7` gives Add 2/7 (29%), and Reduce + Delete + Execute together 3/7
+  (43%). They are the plurality, not dominant.
+- **`e.side` is derived from `op & 0x80` while `kind` is `op % 7`**, so side and
+  operation are correlated across the byte. Harmless for a blind fuzzer.
+
+**Severity:** Minor
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** `u16()` and `u32()` (lines 32-40) each evaluate the first
+half into a **named local** before calling `u8()`/`u16()` again. That is the
+correct way to write them: `return (u8() << 8) | u8();` has unsequenced side
+effects and is the classic bug in byte readers. This file avoids it.
+
+**Market-Logic Notes:** The design decisions are right for what a fuzzer is for.
+`kIdSpace = 256` (lines 48-50) forces id collisions "so duplicate adds and
+references to just-deleted orders happen constantly rather than by luck".
+`e.qty = u16() - 8` (line 75) spans -8 to 65,527, so zero and negative sizes are
+generated rather than hoped for. Prices span well beyond the book's window, so
+out-of-window rejection is exercised. And the header states the principle: "a
+fuzzer that only produces valid input finds nothing."
+
+---
+
+### `fuzz/portable_main.cpp`
+
+**Status:** [x] Reviewed (120 lines, read in full)
+
+**Issues Found:** The file's central reproducibility claim is not implemented.
+
+- **`case_seed` is computed and never printed** (lines 111-115). The comment
+  directly above it says "The per-case seed is derived and reported on failure,
+  so any crash this driver finds is reproducible without a corpus file." Nothing
+  reports it. A target that hits `__builtin_trap()` kills the process, and the
+  seed that produced the input dies with it — leaving exactly the situation the
+  comment promises to avoid.
+
+**Severity:** Medium
+
+**Why it matters:** This driver exists so the fuzz targets run everywhere,
+including where libFuzzer's corpus machinery is unavailable. Without the seed,
+a crash found on CI cannot be reproduced locally, which removes most of the
+value of finding it.
+
+**Fix Recommendation:** Print it before running the case, to stderr, unbuffered:
+```cpp
+std::fprintf(stderr, "case %lld seed %llu\r", i, (unsigned long long)case_seed);
+std::fflush(stderr);
+```
+or install a `SIGSEGV`/`SIGILL` handler that prints the current seed. The
+cheapest correct fix is to write the seed to a one-line file before each case
+and delete it after; whatever survives a crash is the reproducer. Add a
+`-replay_seed=` flag so the printed value can be fed straight back in.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** 200,000 cases by default. Printing a seed per case would
+dominate; use the `\r` form above or the file approach.
+
+**Security Notes:** `flag_value` uses `std::strtoll` without error checking, but
+both results are range-guarded at lines 100-101, so a garbage flag falls back to
+the default rather than to zero.
+
+**Market-Logic Notes:** Not applicable. The design argument (lines 3-17) is
+correct and worth keeping: libFuzzer needs a compiler runtime that is not
+present everywhere, and "a fuzz target that only runs where the toolchain
+cooperates is a fuzz target that never runs." The file is also honest that this
+is "NOT as good as libFuzzer: it is blind, with no coverage feedback... It is a
+lower bound, not a substitute."
+
+---
+
+### `fuzz/fuzz_book.cpp`
+
+**Status:** [x] Reviewed (61 lines, read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** Nothing missing at this layer.
+
+**Performance Notes:** `check_invariants` every 64 events rather than every
+event, with the reason stated: an O(window) check per event "would slow the
+fuzzer to uselessness."
+
+**Security Notes:** The target is complete in a way most are not: after driving
+the write path it also exercises **every read path** on the fuzzed book (lines
+50-59) — `depth`, `best_bid`, `best_ask`, `spread`, and then `qty_of`,
+`queue_ahead` and `is_mine` for every id in the space. A read that faults on a
+corrupted book is as much a bug as a write that corrupts it, and most fuzz
+targets stop at the writes.
+
+**Market-Logic Notes:** The threat model in the header is correct and is the
+reason this matters: "A feed with a gap in it looks exactly like malicious
+input, so this is not a hypothetical threat model." Errors must be **returned**,
+and what is checked is not the return value but the state afterwards.
+
+---
+
+### `fuzz/fuzz_matching.cpp`
+
+**Status:** [x] Reviewed (71 lines, read in full)
+
+**Issues Found:** Two of three self-match modes unfuzzed; the crossed-book check
+is periodic.
+
+- **Only `SelfMatch::CancelResting`** (line 24). `Allow` and `CancelIncoming`
+  are never entered, the same gap as `tests/test_matching.cpp`.
+- **The crossed-book assertion runs every 32 ops** (line 50), so a book left
+  crossed transiently between checks would not be seen.
+
+**Severity:** Minor (both)
+
+**Fix Recommendation:** Derive the mode from a byte of the input:
+`static_cast<SelfMatch>(data[0] % 3)`. That costs nothing and covers all three.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** `match.clear_fills()` every 32 ops with the comment
+"bound memory across a long input" (line 61). That is an explicit
+acknowledgement, in the code, of the unbounded `fills_` growth recorded as a
+High finding under `include/lob/sim/matching.hpp` — the fuzzer has to work
+around it.
+
+**Security Notes:** `mine = (applied & 3) == 0` (line 32) alternates ownership
+deliberately "so the self-match branch is reached, rather than being dead code
+the fuzzer never enters." Getting a fuzzer into a branch that requires two
+correlated conditions usually needs exactly this kind of help.
+
+**Market-Logic Notes:** The header identifies the right risk: "The matcher walks
+the book while mutating it, which is the shape of code that spins forever or
+reads freed memory on a malformed sequence."
+
+---
+
+### `fuzz/fuzz_bitstamp.cpp`
+
+**Status:** [x] Reviewed (110 lines, read in full)
+
+**Issues Found:** Two functions that consume untrusted snapshot JSON are not
+fuzzed.
+
+- **`BitstampDecoder::detect_decimals` and `snapshot_touch` are never called
+  here.** Both take the raw snapshot text and both are called on file input by
+  `apps/replay/main.cpp` (lines 244-254) and `apps/tape/main.cpp` (lines
+  126-134), before anything else runs. `load_snapshot` **is** fuzzed (line 83),
+  so the gap is specific.
+- **`parse_decimal` is only called with `scale = 8`** (line 60), so the
+  `scale > 18` rejection path is never entered.
+
+**Severity:** Medium (the two unfuzzed entry points)
+
+**Fix Recommendation:**
+```cpp
+unsigned pd = 0, qd = 0;
+(void)lob::BitstampDecoder::detect_decimals(all, &pd, &qd);
+lob::Ticks bb = 0, ba = 0;
+(void)lob::BitstampDecoder::snapshot_touch(all, cfg(), &bb, &ba);
+```
+Three lines, and they close the last untrusted-input path that is not covered.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** Capped at 2,048 lines per input, so a pathological input
+cannot make one case run unboundedly.
+
+**Security Notes:** This is the best-constructed target of the three and two
+things earn that.
+- **Lines 51-56 assert that a returned view points inside its input.** That is
+  the precise signature of an out-of-bounds `substr` that happened not to fault,
+  which ASan alone would not always catch and which a "did it crash" target
+  never would.
+- **Lines 65-76 bound `array_next` with an explicit 100,000-iteration guard**
+  and trap if it is exceeded, so non-termination is a reported failure rather
+  than a CI timeout.
+
+**Market-Logic Notes:** The header states the reason this file exists and it is
+right: this is the only code in the project that parses bytes from a public
+network. Everything else consumes `BookEvent`, "a POD the project built itself".
+And the second half matters as much: "a decoder that survives garbage but emits
+events that break the book has moved the bug rather than fixed it" — hence the
+book is driven with whatever comes out and `check_invariants` runs at the end.
+
+---
+
+### `bench/bench_measure.cpp`
+
+**Status:** [x] Reviewed (97 lines, read in full)
+
+**Issues Found:** The "cycles/op" column is TSC ticks, not cycles.
+
+- **`cycles = per_op[median]` is a raw TSC-tick delta** (lines 40-41), reported
+  under the heading `cycles/op` (line 88). With `constant_tsc` the TSC runs at a
+  **fixed nominal** frequency regardless of the core's actual frequency, so
+  ticks equal cycles only when the core happens to run at that nominal rate.
+  Under turbo or thermal throttling they differ, and `docs/BASELINE.md`
+  reproduces these numbers as cycles.
+- **`a.reset()` is inside the timed lambda** (line 75), so it is counted in the
+  batch. O(1) against 8,192 allocations, so negligible.
+
+**Severity:** Minor (both)
+
+**Fix Recommendation:** Rename the column to `tsc-ticks/op`, or derive real
+cycles from an `aperf`/`mperf` ratio, which is more work than the number is
+worth. Renaming is the honest fix.
+
+**Refactor Suggestion:** The `bench()` helper here and the one in
+`bench/bench_book.cpp` differ only in whether the setup returns state. One
+shared header would keep the warm-up and median conventions from drifting apart.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** The harness itself is right: median of nine batches with
+two discarded, "so a single preemption does not decide the answer", and
+`do_not_optimize` around every result. The `Pool acquire+release` case (line 84)
+acquires and immediately releases the same slot, so it measures the warmest
+possible path — which the closing note covers: "warm-cache numbers on an idle
+machine and are a floor, not a promise."
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Not applicable.
+
+---
+
+### `bench/bench_book.cpp`
+
+**Status:** [x] Reviewed (210 lines, read in full)
+
+**Issues Found:** One benchmark does not measure what it is named. One reject
+count silently omits an error class.
+
+- **"cancel (mid-queue)" removes from the FRONT of each queue.** The setup adds
+  ids 1..201,000 in order across 20 levels (lines 75-80), and the timed loop
+  removes ids 1, 2, 3, ... in the same order (lines 83-85) — always the current
+  head of its level's FIFO. Head removal and mid-queue removal are both O(1) for
+  an intrusive doubly-linked list, so the claim the benchmark is testing still
+  holds; but the head is the hottest pointer in the level, so the number is the
+  best case, and the label says otherwise.
+- **The rejected total omits `CrossedBook`.** Lines 144-146 sum
+  `errors[1]` through `errors[5]`. `BookError::CrossedBook` is index 6 and
+  `Count` is 7, so every crossing rejection is invisible in the summary line —
+  and the synthetic generator can produce them.
+- **`2.0 * to_nanos(35)`** (line 139) is the third hardcoded copy of the timer
+  overhead in the repository, agreeing with `apps/replay` and disagreeing with
+  `apps/latency_demo`'s 30.
+- **The mixed-replay loop times `apply` with unserialised `tsc::now()`** (lines
+  127-129), the same point recorded under `apps/replay/main.cpp`.
+
+**Severity:** Minor (all)
+
+**Fix Recommendation:**
+```cpp
+// Sum every error class, so a new one cannot be added and silently ignored.
+std::uint64_t rejected = 0;
+for (std::size_t i = 1; i < static_cast<std::size_t>(BookError::Count); ++i)
+  rejected += b.stats().errors[i];
+```
+and either rename the benchmark to "cancel (queue head)" or remove ids from the
+middle of a level (`i` stepping by 20 from an offset, say).
+
+**Refactor Suggestion:** As for `bench_measure.cpp` — share the `bench()`
+harness.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** The setup work is outside the timed region in every case,
+which is the thing this kind of file usually gets wrong. Building the event
+stream against a scratch book and then replaying the recorded stream into a
+clean one (lines 170-183) is the right way to keep the generator's references
+valid without timing the generator.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** The feature-engine benchmark (lines 134-153) is the best
+idea in the file: it runs the same update against books of 5,000, 50,000 and
+500,000 orders, an order of magnitude apart, with the reason stated — "if the
+cost tracks depth, an update rule is walking the book and the whole design
+premise is broken." That turns an architectural claim into a number, which is
+what a benchmark is for.
 
 ---
 
