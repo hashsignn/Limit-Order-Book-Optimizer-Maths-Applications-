@@ -123,3 +123,57 @@ demonstration artefact.
 **Do not fix by picking one.** Measure `move_ticks` on a book without issue 1's
 holes, and separately measure P(mid move is adverse | our quote was taken), and
 let the two numbers say which it is.
+
+---
+
+## 3. The generator fabricates fills that no aggressor caused
+
+**Found** 2026-09-09, comparing queue-reactive intensities measured on the
+8-hour ethusd capture against the same measurement on `stats --synthetic`.
+
+**Where trades happen.** In the capture essentially every trade is at the touch.
+In the generator most are behind it:
+
+| trades at level | ethusd | synthetic |
+|---|---|---|
+| 0, the touch | 3,699 | 21,283 |
+| 1 | none measurable | 41,238 |
+| 2 | none measurable | 44,012 |
+| 3 | none measurable | 44,547 |
+
+**And the intensity slope has the wrong sign.** Against shares queued at the
+touch, trade intensity runs **−0.28 ± 0.11** on ethusd — a thicker queue trades
+slightly less — against **+0.90 ± 0.02** in the generator, where a thicker queue
+trades much more. Ten standard errors apart, in opposite directions.
+
+**Cause, read off the code rather than inferred.** `FlowGenerator::
+make_on_existing` picks a uniformly random resting order from anywhere in the
+book and emits `EventType::Execute` on it. `w_execute = 0.09`, so 9% of the
+event mix is a fill that no aggressor caused, that consumed nothing from the
+front of any queue, and whose victim was chosen without reference to queue
+position. Uniform selection over resting orders is also why the generator's
+cancel intensity is proportional to the order count — not queue-reactivity,
+just sampling.
+
+**Why it matters here specifically.** Queue position is the state variable the
+entire Phase 5 MDP is built around. A fill drawn uniformly over resting orders
+is independent of it. Every such fill dilutes the very signal the policy is
+being asked to exploit, and it does so inside the process the acceptance test is
+measured on.
+
+**What this does not say.** It does not say the measured queue-position gradient
+in the simulator is fake — the `w_aggress` path does go through the matching
+engine and does consume front-first. It says the two paths are mixed, and the
+mix is not something anyone chose on purpose.
+
+**Not yet measured:** what share of the simulator's fills arrive by each path.
+That number decides whether this is a distortion or a dominant one, and it
+should be measured before the fix is scoped.
+
+**A caution about the test that found this.** The comparison was originally set
+up to check whether cancel intensity is proportional to the number of resting
+orders, on the theory that a real book cancels independently and a
+zero-intelligence one does not. That test does not discriminate: uniform
+sampling over resting orders produces the same proportionality for a reason that
+has nothing to do with the book being reactive. The finding above came from a
+different column than the one the test was built to read.
