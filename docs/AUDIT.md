@@ -174,9 +174,29 @@ The full evidence set, re-run at the close of the audit, is in section 6.
 
 ## 2. File-by-file audit
 
+**How to read this section.** Every one of the 116 tracked files has an entry
+here, and each entry carries the ten fields the brief asks for: status, issues,
+severity, why it matters, fix, refactor note, missing tests, and performance,
+security and market-logic notes.
+
+Four entries cover two or three files under one heading, and only where the
+files are a single component whose analysis cannot honestly be split — a header
+and its implementation (`histogram`, `bitstamp`), two recorder scripts that
+differ only in the venue they connect to, and three documents whose one finding
+spans them. Every field in those entries names which file it applies to. Three
+short **group notes** cover what is true of a directory rather than of any file
+in it; the files themselves each have a full entry as well.
+
+**Severity uses the brief's three levels** — Critical / Major / Minor. Where the
+consolidated summary in section 3 needs a finer split, the four-level grade is
+given in parentheses: `Major (High)` is a defect that changes a reported result,
+`Major (Medium)` one that is latent, contained by a caller's invariant, or
+degrades a measurement rather than a decision.
+
+
 ### `src/order_book.cpp`
 
-**Status:** [x] Reviewed (408 lines, read in full)
+**Status:** Checked — [x] Reviewed (408 lines, read in full)
 
 **Issues Found:** One dead statement, one asymmetric bounds guard, one stats
 accounting hole on an error path. No memory-safety or invariant defects.
@@ -257,7 +277,7 @@ order-book implementations lack.
 
 ### `include/lob/sim/matching.hpp`
 
-**Status:** [x] Reviewed (154 lines, read in full)
+**Status:** Checked — [x] Reviewed (154 lines, read in full)
 
 **Issues Found:** `fills_` grows without bound for the life of the engine.
 
@@ -323,7 +343,7 @@ invents P&L from nothing.
 
 ### `All Rights Reserved`
 
-**Status:** [x] Reviewed (322 bytes)
+**Status:** Checked — [x] Reviewed (322 bytes)
 
 **Issues Found:** The licence file is named `All Rights Reserved` — spaces, no
 extension.
@@ -343,13 +363,25 @@ git mv "All Rights Reserved" LICENSE
 The content is fine as it stands — a clear all-rights-reserved grant with a
 named copyright holder and an educational-use carve-out.
 
-**Security Notes:** None.
+**Refactor Suggestion:** None.
+
+**Tests Missing:** None. A CI step asserting a `LICENSE` file exists would be
+over-engineering for a one-line `git mv`.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** None. The file names a copyright holder and nothing else —
+no email, no address, no identifier beyond a name.
+
+**Market-Logic Notes:** Not applicable, though the educational-use carve-out is
+consistent with the project's stated position that this is a model and not a
+trading system.
 
 ---
 
 ### `CMakeLists.txt`
 
-**Status:** [x] Reviewed (202 lines)
+**Status:** Checked — [x] Reviewed (202 lines)
 
 **Issues Found:** None material. This is stronger than most production build
 files.
@@ -362,7 +394,14 @@ files.
   fuzzers on libFuzzer being available rather than assuming it.
 - C++20 with `CMAKE_CXX_STANDARD_REQUIRED ON`.
 
-**Severity:** —
+**Severity:** Minor
+
+**Why it matters:** The build is where a whole class of defect can be caught for
+free, and this one already catches most of them. What is missing is the two
+cheapest remaining: a container-bounds assertion in Debug, and a static
+analyser. Three findings in this audit — the latent data race in `src/tsc.cpp`,
+the unchecked `find_entry` in `reference_book.hpp`, and the duplicate include in
+`driver.hpp` — are the kind `clang-tidy` reports without being asked.
 
 **Fix Recommendation:** Two additions worth making, neither urgent:
 ```cmake
@@ -373,13 +412,32 @@ target_compile_definitions(lob_flags INTERFACE $<$<CONFIG:Debug>:_GLIBCXX_ASSERT
 No static analyser is wired in. `clang-tidy` with `bugprone-*`,
 `cppcoreguidelines-*` and `performance-*` would be a cheap addition to CI.
 
+**Refactor Suggestion:** None. The `lob_flags` interface target is the right
+shape — one place that carries the warning set, and everything links it.
+
+**Tests Missing:** Nothing verifies that the sanitizer presets still build. CI
+runs the `asan` preset, so that one is covered; `tsan` is defined and never
+built (recorded under `CMakePresets.json`).
+
+**Performance Notes:** `-march=native` is gated behind `LOB_NATIVE` and applied
+only to Release and RelWithDebInfo via a generator expression, with
+`check_cxx_compiler_flag` guarding it. That is the correct construction: a
+benchmark build gets the instruction set, a portable build can turn it off, and
+a compiler that does not understand the flag does not fail the configure.
+
 **Security Notes:** No unsafe flags. Nothing disables warnings or fortification.
+`-Werror` on one configuration means a new warning cannot be merged unnoticed
+while the other configurations stay usable during development.
+
+**Market-Logic Notes:** Not applicable, except that `add_test` registers a
+`capture_*` target per sample pair, which is what makes the three committed
+captures regression fixtures rather than decoration.
 
 ---
 
 ### `.gitignore`
 
-**Status:** [x] Reviewed
+**Status:** Checked — [x] Reviewed
 
 **Issues Found:** None. It is correct and it explains itself.
 
@@ -389,19 +447,47 @@ the re-include unreachable. Build outputs, `compile_commands.json`, `__pycache__
 `*.pyc`, journals, histograms and the CSV working directories (`csv/`, `simcsv/`,
 `simpolicy/`) are all ignored. `docs/figures/` is deliberately re-included.
 
-**Verified:** `git ls-files --others --exclude-standard` returns nothing, so
-there is no untracked file the ignore rules are hiding by accident.
+**Verified:** `git ls-files --others --exclude-standard` returns nothing but
+`repo_tree.txt`, which this audit generated. `du -ah --max-depth=2` confirms the
+rules are doing real work: `build/` at 191 MB and `simcsv/` at 58 MB are both
+ignored, against 8.4 MB tracked.
 
-**See section 5** for the two additions recommended.
+**Severity:** n/a — no issues found
+
+**Why it matters:** This is the file that decides what leaves the machine. The
+two directories it keeps out are 249 MB of build output and calibration dumps,
+and the one it lets in — `data/samples/` — is 5.3 MB of deliberate test fixture.
+
+**Fix Recommendation:** None required. Section 5 carries a patch adding two
+defensive entries.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** A CI step running `git ls-files --others --exclude-standard`
+and failing if it is non-empty would turn "nothing is accidentally untracked"
+from a fact checked once into a property.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** No `.env` pattern is needed because no `.env` exists, but
+one is recommended in section 5 as a guard rather than a fix. Nothing in the
+tracked set carries a credential — verified by the secret scan in section 6.
+
+**Market-Logic Notes:** Not applicable, except that tracking three real captures
+is what makes the real-data regression tests possible, and the comment in the
+file says exactly that: "A test against synthetic data only ever proves the
+decoder agrees with the generator." 
 
 ---
 
-### Files audited during this session's development work
+#### Group note — files whose defects were found by measurement
 
-These carry findings already recorded in `docs/KNOWN-ISSUES.md` and
-`docs/06-queue-reactive-plan.md`, found by measurement rather than by reading,
-and each is fixed or explicitly open there. Listing them so the tree is honest
-about *why* they are marked reviewed.
+The files below were audited during development rather than by reading, and
+their findings are recorded in `docs/KNOWN-ISSUES.md` and
+`docs/06-queue-reactive-plan.md`. **Every one of them now also has a full
+subsection in this section**; this table is kept as an index of how each defect
+was found, because "found by measuring the output" and "found by reading the
+code" are different kinds of evidence and the distinction is worth preserving.
 
 | File | Status | Principal finding |
 |---|---|---|
@@ -438,7 +524,7 @@ if not isinstance(snap.get("bids"), list) or not snap.get("asks"):
 
 ### `src/tsc.cpp`
 
-**Status:** [x] Reviewed (102 lines, read in full)
+**Status:** Checked — [x] Reviewed (102 lines, read in full)
 
 **Issues Found:** A latent data race in the lazy calibration; a fixed 95 ms
 startup cost paid by every binary that reads the clock.
@@ -458,7 +544,7 @@ startup cost paid by every binary that reads the clock.
   string is implementation-defined and the open may fail. Same pattern in
   `src/journal.cpp`.
 
-**Severity:** Medium (the race, if the project is ever threaded), Minor (the
+**Severity:** Major (Medium) (the race, if the project is ever threaded), Minor (the
 other two)
 
 **Why it matters:** The race is the kind that survives review for years and then
@@ -503,7 +589,7 @@ silently producing a plausible-looking figure.
 
 ### `src/journal.cpp`
 
-**Status:** [x] Reviewed (33 lines, read in full)
+**Status:** Checked — [x] Reviewed (33 lines, read in full)
 
 **Issues Found:** One portability nit; one missing include relied on
 transitively.
@@ -540,7 +626,7 @@ a single record, so a foreign file is rejected rather than decoded as garbage.
 
 ### `src/recorder.cpp`
 
-**Status:** [x] Reviewed (31 lines, read in full)
+**Status:** Checked — [x] Reviewed (31 lines, read in full)
 
 **Issues Found:** One allocation per row in a report path. No defects.
 
@@ -583,7 +669,7 @@ a number with no operational meaning.
 
 ### `src/policy_table.cpp`
 
-**Status:** [x] Reviewed (85 lines, read in full)
+**Status:** Checked — [x] Reviewed (85 lines, read in full)
 
 **Issues Found:** A failed `load()` leaves `value_` populated with stale or
 partial data.
@@ -596,7 +682,7 @@ partial data.
   The same applies to `header_`, which keeps its previous contents because it is
   only assigned on success.
 
-**Severity:** Medium
+**Severity:** Major (Medium)
 
 **Why it matters:** The failure is silent in exactly the way this file is
 otherwise careful to prevent. Every other check here refuses to let a wrong
@@ -653,7 +739,7 @@ detect that downstream from the P&L.
 
 ### `src/line_reader.cpp`
 
-**Status:** [x] Reviewed (126 lines, read in full)
+**Status:** Checked — [x] Reviewed (126 lines, read in full)
 
 **Issues Found:** No defects. One unbounded-growth consideration, deliberate and
 correctly reasoned.
@@ -711,7 +797,7 @@ it is incomplete JSON, which is the right division of labour.
 
 ### `include/lob/measure/journal.hpp`
 
-**Status:** [x] Reviewed (120 lines, read in full)
+**Status:** Checked — [x] Reviewed (120 lines, read in full)
 
 **Issues Found:** Three. A record counter that never counts; an unvalidated
 batch size that admits a heap overflow; and write errors that are discarded in a
@@ -736,7 +822,7 @@ class whose entire stated purpose is byte-for-byte reproducibility.
   through the same binaries must reproduce the same output, byte for byte" — a
   silently truncated journal breaks exactly that, and reports success.
 
-**Severity:** High (dropped writes), Medium (the unchecked batch size), Minor
+**Severity:** Major (High) (dropped writes), Medium (the unchecked batch size), Minor
 (the dead counter)
 
 **Why it matters:** `src/policy_table.cpp` gets the `fclose` check right in the
@@ -814,9 +900,9 @@ enforced on the write side.
 
 ---
 
-### `include/lob/measure/histogram.hpp` and `src/histogram.cpp`
+### `include/lob/measure/histogram.hpp` (interface) and `src/histogram.cpp` (implementation)
 
-**Status:** [x] Reviewed (89 + 251 lines, read in full)
+**Status:** Checked — [x] Reviewed (89 + 251 lines, read in full)
 
 **Issues Found:** The recorded maximum is silently clamped at the ceiling, and
 the per-stage report does not surface that. One dead branch.
@@ -837,7 +923,7 @@ the per-stage report does not surface that. One dead branch.
   running count out of `value_at_percentile`. Real `.hgrm` output carries the
   actual cumulative count; the difference shows at the coarse end of the table.
 
-**Severity:** Medium (the unreported clamp), Minor (the other two)
+**Severity:** Major (Medium) (the unreported clamp), Minor (the other two)
 
 **Why it matters:** The whole argument for this layer, stated in the header's
 first paragraph, is "report p99.9 honestly instead of a mean". A max that
@@ -896,7 +982,7 @@ lines 191-193 shows the author found and fixed the obvious bug in that approach.
 
 ### `include/lob/measure/recorder.hpp`
 
-**Status:** [x] Reviewed (84 lines, read in full)
+**Status:** Checked — [x] Reviewed (84 lines, read in full)
 
 **Issues Found:** The report omits the clamp indicator (see the histogram
 section above — the fix belongs here). No other defects.
@@ -909,7 +995,7 @@ section above — the fix belongs here). No other defects.
   passes a named enumerator, and the type makes anything else awkward, so this
   is a note rather than a finding.
 
-**Severity:** Medium (the omitted clamp), Minor (the indexing)
+**Severity:** Major (Medium) (the omitted clamp), Minor (the indexing)
 
 **Why it matters:** As above: this is the function whose output humans read.
 
@@ -943,7 +1029,7 @@ observed.
 
 ### `include/lob/measure/stopwatch.hpp`
 
-**Status:** [x] Reviewed (59 lines, read in full)
+**Status:** Checked — [x] Reviewed (59 lines, read in full)
 
 **Issues Found:** The header comment contradicts the code, and `ScopedTimer` is
 dead.
@@ -997,7 +1083,7 @@ that. That honesty is the most valuable thing in the file.
 
 ### `include/lob/measure/tsc.hpp`
 
-**Status:** [x] Reviewed (101 lines, read in full)
+**Status:** Checked — [x] Reviewed (101 lines, read in full)
 
 **Issues Found:** One asymmetry between the two conversion directions. No
 defects.
@@ -1054,7 +1140,7 @@ worthless instead of printing worthless numbers.
 
 ### `include/lob/core/types.hpp`
 
-**Status:** [x] Reviewed (78 lines, read in full)
+**Status:** Checked — [x] Reviewed (78 lines, read in full)
 
 **Issues Found:** The invalid-price sentinel compares as *better than every real
 price* on the ask side.
@@ -1072,7 +1158,7 @@ price* on the ask side.
   computes `ticks - INT64_MIN`, which is undefined behaviour, not a large
   number. `Ticks operator-(Price, Price)` (line 53) has no validity guard.
 
-**Severity:** Medium (both — latent; `better_than` currently has no caller
+**Severity:** Major (Medium) (both — latent; `better_than` currently has no caller
 outside `tests/test_types.cpp`, confirmed by
 `grep -rn better_than --include=*.cpp --include=*.hpp`)
 
@@ -1121,7 +1207,7 @@ sentinel hole above is worth fixing rather than documenting.
 
 ### `include/lob/core/arena.hpp`
 
-**Status:** [x] Reviewed (129 lines, read in full)
+**Status:** Checked — [x] Reviewed (129 lines, read in full)
 
 **Issues Found:** Four. `Arena::create` will happily construct a type it can
 never destroy; `Pool::release` cannot detect a double release and its counter
@@ -1144,7 +1230,7 @@ underflows; two size computations can overflow.
 - **`allocate` assumes `align` is a power of two** (line 41, `~(align - 1)`)
   without asserting it.
 
-**Severity:** Medium (the missing assert and the double-release), Minor (the
+**Severity:** Major (Medium) (the missing assert and the double-release), Minor (the
 overflows — every current call site passes a compile-time `sizeof(T)` or a small
 literal)
 
@@ -1216,7 +1302,7 @@ a tail latency becomes a missed quote.
 
 ### `include/lob/core/compiler.hpp`
 
-**Status:** [x] Reviewed (37 lines, read in full)
+**Status:** Checked — [x] Reviewed (37 lines, read in full)
 
 **Issues Found:** None. Two portability notes.
 
@@ -1259,7 +1345,7 @@ keeps latency arithmetic reproducible.
 
 ### `include/lob/book/events.hpp`
 
-**Status:** [x] Reviewed (91 lines, read in full)
+**Status:** Checked — [x] Reviewed (91 lines, read in full)
 
 **Issues Found:** One missing include relied on transitively. No defects.
 
@@ -1311,7 +1397,7 @@ vocabulary is defined, and the distinctions are the right ones.
 
 ### `include/lob/book/order_map.hpp`
 
-**Status:** [x] Reviewed (113 lines, read in full)
+**Status:** Checked — [x] Reviewed (113 lines, read in full)
 
 **Issues Found:** The table never grows, and every one of its three loops spins
 forever if it is full. Safe today only because of an invariant held by its
@@ -1330,7 +1416,7 @@ caller, which this file does not state.
   stored `value` of `0xFFFFFFFF` would be indistinguishable from a miss. Slot
   indices never reach 4 billion here, so it is a note.
 
-**Severity:** Medium (the hang, as a latent property of the class), Minor (the
+**Severity:** Major (Medium) (the hang, as a latent property of the class), Minor (the
 rest)
 
 **Why it matters:** The hang cannot fire in this repository, and the reason is
@@ -1393,7 +1479,7 @@ lookup cost is the book's cost.
 
 ### `include/lob/book/order_book.hpp`
 
-**Status:** [x] Reviewed (191 lines, read in full; implementation audited
+**Status:** Checked — [x] Reviewed (191 lines, read in full; implementation audited
 separately under `src/order_book.cpp`)
 
 **Issues Found:** Constructor arguments are unvalidated; one documented
@@ -1456,7 +1542,7 @@ engine's — the right place for it.
 
 ### `include/lob/book/reference_book.hpp`
 
-**Status:** [x] Reviewed (175 lines, read in full)
+**Status:** Checked — [x] Reviewed (175 lines, read in full)
 
 **Issues Found:** Three null or throwing paths that the fast book validates and
 this one does not; two behavioural asymmetries that bound what the differential
@@ -1478,7 +1564,7 @@ test can actually prove; two missing includes.
 - **`<vector>` and `<utility>` are used at line 144 (`std::vector`,
   `std::pair`) and included nowhere.**
 
-**Severity:** Medium (the unchecked `find_entry`, because of what this file is
+**Severity:** Major (Medium) (the unchecked `find_entry`, because of what this file is
 for), Minor (the rest)
 
 **Why it matters:** The header's closing line is "If this file ever gets clever,
@@ -1532,12 +1618,12 @@ an emergent one.
 
 ### `include/lob/feed/line_reader.hpp`
 
-**Status:** [x] Reviewed (54 lines, read in full; implementation audited under
+**Status:** Checked — [x] Reviewed (54 lines, read in full; implementation audited under
 `src/line_reader.cpp`)
 
 **Issues Found:** None.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
 
 **Why it matters:** The interface is small enough to be obviously right, and the
 one subtle contract — "The view is valid until the next call" (line 29) — is
@@ -1568,7 +1654,7 @@ away hours of good data.
 
 ### `include/lob/sim/latency.hpp`
 
-**Status:** [x] Reviewed (125 lines, read in full)
+**Status:** Checked — [x] Reviewed (125 lines, read in full)
 
 **Issues Found:** A sort with no effect; a scale factor applied to empirical
 samples that may already carry it; one tie-break case the determinism argument
@@ -1642,7 +1728,7 @@ in the repository and the modelling choices behind it are right.
 
 ### `include/lob/sim/simulator.hpp`
 
-**Status:** [x] Reviewed (247 lines, read in full)
+**Status:** Checked — [x] Reviewed (247 lines, read in full)
 
 **Issues Found:** Fills produced by the agent's own orders are published to the
 agent's view late and with the wrong timestamp, or never. The realised inbound
@@ -1679,7 +1765,7 @@ event's, not the action's arrival.
   The field name and the comment "in ticks * shares" both invite it to be read
   as a result.
 
-**Severity:** High (the unpublished agent fills), Medium (the FIFO latency and
+**Severity:** Major (High) (the unpublished agent fills), Medium (the FIFO latency and
 the fill timestamps), Minor (the P&L naming)
 
 **Why it matters:** The first one defeats the file's own thesis. The header
@@ -1748,7 +1834,7 @@ ever-growing vector, so a long run's memory is proportional to total fills.
 
 ### `include/lob/feat/features.hpp`
 
-**Status:** [x] Reviewed (228 lines, read in full)
+**Status:** Checked — [x] Reviewed (228 lines, read in full)
 
 **Issues Found:** Three. A stale mid on a one-sided book with no way to detect
 it; two fields named `_ewma` computed on different normalisations; one
@@ -1772,7 +1858,7 @@ it; two fields named `_ewma` computed on different normalisations; one
   `log(2)` for the other two. The actual half-life of `event_rate` is
   `τ · ln 2 ≈ 0.693 s`, not the 1 s the name promises.
 
-**Severity:** Medium (the stale mid), Minor (the two naming defects)
+**Severity:** Major (Medium) (the stale mid), Minor (the two naming defects)
 
 **Why it matters:** All three are currently contained. `ofi_ewma` is printed by
 `apps/replay` and `apps/tape` and feeds no decision:
@@ -1834,7 +1920,7 @@ reasoning, and the honesty is the substance.
 
 ### `include/lob/feed/json.hpp`
 
-**Status:** [x] Reviewed (243 lines, read in full)
+**Status:** Checked — [x] Reviewed (243 lines, read in full)
 
 **Issues Found:** No memory-safety or termination defects. Four points of
 leniency where a malformed document is accepted rather than rejected.
@@ -1913,7 +1999,7 @@ project.
 
 ### `include/lob/strat/pnl.hpp`
 
-**Status:** [x] Reviewed (214 lines, read in full)
+**Status:** Checked — [x] Reviewed (214 lines, read in full)
 
 **Issues Found:** The headline P&L excludes the mark-to-market of the leftover
 position, and every test pins that position to zero so nothing catches it. Two
@@ -1948,7 +2034,7 @@ smaller points.
   silently longer than the nominal one, and nothing marks those fills.
 - **`<deque>`, `<string>` and `lob/sim/matching.hpp` are included and unused.**
 
-**Severity:** High (the omitted inventory mark), Minor (the other two)
+**Severity:** Major (High) (the omitted inventory mark), Minor (the other two)
 
 **Why it matters:** A market-making backtest whose P&L ignores the closing
 position is measuring the wrong quantity, and it fails in the direction that
@@ -2011,7 +2097,7 @@ better than the code.
 
 ### `include/lob/strat/quoting.hpp`
 
-**Status:** [x] Reviewed (247 lines, read in full)
+**Status:** Checked — [x] Reviewed (247 lines, read in full)
 
 **Issues Found:** **Four of the six baselines do not do what their names say.**
 Two emit marketable orders on any non-zero inventory; two collapse to
@@ -2226,7 +2312,7 @@ parameterisation defeats them.
 
 ### `include/lob/strat/tabulated.hpp`
 
-**Status:** [x] Reviewed (123 lines, read in full)
+**Status:** Checked — [x] Reviewed (123 lines, read in full)
 
 **Issues Found:** None. Two notes.
 
@@ -2295,7 +2381,7 @@ microstructure reasoning in the repository.
 
 ### `apps/replay/main.cpp`
 
-**Status:** [x] Reviewed (625 lines, read in full)
+**Status:** Checked — [x] Reviewed (625 lines, read in full)
 
 **Issues Found:** `--verify` degenerates into a per-event O(n) invariant check
 whenever events are being rejected. Two smaller points.
@@ -2322,7 +2408,7 @@ whenever events are being rejected. Two smaller points.
   silently defeats every decode, because `json::parse_decimal` refuses
   `scale > 18`. The run reports zero events rather than a bad argument.
 
-**Severity:** Medium (the verify stall), Minor (the rest)
+**Severity:** Major (Medium) (the verify stall), Minor (the rest)
 
 **Why it matters:** `--verify` is the tool you reach for when a capture looks
 wrong, which is exactly when rejects are frequent. It gets slowest precisely
@@ -2402,7 +2488,7 @@ with the calibrated figures in `docs/06-queue-reactive-plan.md`.
 
 ### `apps/tape/main.cpp`
 
-**Status:** [x] Reviewed (324 lines, read in full)
+**Status:** Checked — [x] Reviewed (324 lines, read in full)
 
 **Issues Found:** Trades accumulate through the whole pre-`--start` period and
 are all dumped into the first frame. One dead variable. The shadow order
@@ -2426,7 +2512,9 @@ contaminates the frame's own ladder and imbalance without that being said.
 - **`--fps -1` yields a negative `frame_gap`** (line 176), so every event emits a
   frame. `fps > 0` is guarded for zero but not for negative.
 
-**Severity:** Medium (the first-frame trade dump), Minor (the rest)
+**Severity:** Major (Medium) (the first-frame trade dump), Minor (the rest)
+
+**Why it matters:** The first frame of every tape is wrong, and a tape is the artefact whose entire premise is that the picture is of *this* book.
 
 **Fix Recommendation:**
 ```cpp
@@ -2476,7 +2564,7 @@ the reasoning behind its current form is recorded in place (lines 205-214).
 
 ### `apps/sim_demo/main.cpp`
 
-**Status:** [x] Reviewed (154 lines, read in full)
+**Status:** Checked — [x] Reviewed (154 lines, read in full)
 
 **Issues Found:** The requote cadence is on the event clock, which the same
 project already fixed elsewhere.
@@ -2526,7 +2614,7 @@ mean nothing."
 
 ### `apps/latency_demo/main.cpp`
 
-**Status:** [x] Reviewed (163 lines, read in full)
+**Status:** Checked — [x] Reviewed (163 lines, read in full)
 
 **Issues Found:** The closing overhead figure is hardcoded after having been
 measured 100 lines earlier. Unvalidated argument.
@@ -2545,6 +2633,8 @@ measured 100 lines earlier. Unvalidated argument.
   helper.
 
 **Severity:** Minor (all)
+
+**Why it matters:** This is the Phase 0 acceptance demo, so a number it prints as measured overhead should be the one it measured a hundred lines earlier, not a literal.
 
 **Fix Recommendation:** Hoist the measured overhead into a variable at the top
 of `main` and use it at line 161. Hoist the eviction buffer out of the loop.
@@ -2578,7 +2668,7 @@ existence.
 
 ### `apps/jitter_probe/main.cpp`
 
-**Status:** [x] Reviewed (50 lines, read in full)
+**Status:** Checked — [x] Reviewed (50 lines, read in full)
 
 **Issues Found:** A negative argument makes it run effectively forever.
 
@@ -2589,6 +2679,8 @@ existence.
   filling a histogram.
 
 **Severity:** Minor
+
+**Why it matters:** It establishes the floor under every latency number the project reports, and an argument that makes it spin forever is a bad first experience with the one tool a new contributor is told to run first.
 
 **Fix Recommendation:**
 ```cpp
@@ -2620,7 +2712,7 @@ stand-in for `cyclictest` that makes it reproducible.
 
 ### `tests/test_util.hpp`
 
-**Status:** [x] Reviewed (51 lines, read in full)
+**Status:** Checked — [x] Reviewed (51 lines, read in full)
 
 **Issues Found:** None. Two constraints worth naming.
 
@@ -2631,6 +2723,8 @@ stand-in for `cyclictest` that makes it reproducible.
   exception" from "threw something else entirely".
 
 **Severity:** Minor (both)
+
+**Why it matters:** Every assertion in the suite goes through these four macros, so their limits are the suite's limits.
 
 **Fix Recommendation:** None needed. If the exception type ever matters, a
 `CHECK_THROWS_AS(expr, Type)` is four more lines.
@@ -2656,7 +2750,7 @@ debugging round and five.
 
 ### `tests/test_types.cpp`
 
-**Status:** [x] Reviewed (47 lines, read in full)
+**Status:** Checked — [x] Reviewed (47 lines, read in full)
 
 **Issues Found:** The two `types.hpp` defects are exactly the cases this file
 does not cover.
@@ -2667,8 +2761,10 @@ does not cover.
 - **`operator-` is tested only on valid prices** (lines 16-17). Nothing tests
   the `Price::none()` case, which is signed overflow.
 
-**Severity:** Medium (as a coverage gap; the defects are recorded under
+**Severity:** Major (Medium) (as a coverage gap; the defects are recorded under
 `include/lob/core/types.hpp`)
+
+**Why it matters:** The two gaps here are exactly the two defects in `include/lob/core/types.hpp`, which is why those defects are still live.
 
 **Fix Recommendation:**
 ```cpp
@@ -2694,7 +2790,7 @@ worth an assertion. The rational tick-size checks at lines 36-39 include the
 
 ### `tests/test_arena.cpp`
 
-**Status:** [x] Reviewed (88 lines, read in full)
+**Status:** Checked — [x] Reviewed (88 lines, read in full)
 
 **Issues Found:** Covers the happy paths and exhaustion; misses both memory-
 safety cases.
@@ -2706,7 +2802,9 @@ safety cases.
   missing `static_assert` on `Arena::create` is never exercised.
 - **No `Pool{0}` or `Arena{0}`.**
 
-**Severity:** Medium (coverage), and see `include/lob/core/arena.hpp`
+**Severity:** Major (Medium) (coverage), and see `include/lob/core/arena.hpp`
+
+**Why it matters:** The uncovered cases are the two memory-safety ones. Both classes are unused in production today, so the gap is cheap now and expensive the day either is put on a real path.
 
 **Fix Recommendation:** Add the double-release case behind whichever guard the
 fix introduces — an assertion in a debug build, or a returned bool.
@@ -2729,7 +2827,7 @@ Both are properties of the design, not accidents of it.
 
 ### `tests/test_order_map.cpp`
 
-**Status:** [x] Reviewed (164 lines, read in full)
+**Status:** Checked — [x] Reviewed (164 lines, read in full)
 
 **Issues Found:** One structural gap, which is the same gap as the class's.
 
@@ -2741,6 +2839,8 @@ Both are properties of the design, not accidents of it.
   `include/lob/book/order_map.hpp` is untested rather than ruled out.
 
 **Severity:** Minor (coverage of a hazard the caller prevents)
+
+**Why it matters:** The class hangs rather than fails on a full table, and this test deliberately never gets near one. The safety is real but it lives in the caller, not in the tested code.
 
 **Fix Recommendation:** Once `insert` returns false on a full table rather than
 spinning, add the case.
@@ -2770,7 +2870,7 @@ rather than decorative.
 
 ### `tests/test_journal.cpp`
 
-**Status:** [x] Reviewed (102 lines, read in full)
+**Status:** Checked — [x] Reviewed (102 lines, read in full)
 
 **Issues Found:** None in the tests. Three uncovered defects, all recorded under
 `include/lob/measure/journal.hpp`.
@@ -2785,7 +2885,9 @@ rather than decorative.
   names in the working directory, so two concurrent runs of this binary would
   collide.
 
-**Severity:** Medium (the three coverage gaps)
+**Severity:** Major (Medium) (the three coverage gaps)
+
+**Why it matters:** Three defects in `include/lob/measure/journal.hpp` survive because this file does not assert the three properties that would expose them.
 
 **Fix Recommendation:** `CHECK_EQ(w.written(), kN);` inside the writer scope is
 one line and turns a dead counter into a live one.
@@ -2812,7 +2914,7 @@ actually rests on.
 
 ### `tests/test_tsc.cpp`
 
-**Status:** [x] Reviewed (96 lines, read in full)
+**Status:** Checked — [x] Reviewed (96 lines, read in full)
 
 **Issues Found:** Two assertions measure the machine rather than the code, so
 they can fail on a loaded runner.
@@ -2829,7 +2931,9 @@ they can fail on a loaded runner.
 - **No concurrent first-call to `calibration()`**, which is the latent data race
   recorded under `src/tsc.cpp`.
 
-**Severity:** Medium (CI flakiness), Minor (the coverage gap)
+**Severity:** Major (Medium) (CI flakiness), Minor (the coverage gap)
+
+**Why it matters:** A test that fails because the host is busy trains people to ignore test failures, which costs more than the assertion is worth.
 
 **Fix Recommendation:** Print the per-read cost unconditionally, and assert only
 a loose ceiling that a stall cannot cross (say 10,000 ns) — or make the
@@ -2855,7 +2959,7 @@ make every latency number depend on which one a call site happened to use.
 
 ### `tests/test_histogram.cpp`
 
-**Status:** [x] Reviewed (201 lines, read in full)
+**Status:** Checked — [x] Reviewed (201 lines, read in full)
 
 **Issues Found:** None. One point that **corrects** a finding recorded earlier
 in this audit.
@@ -2872,6 +2976,8 @@ in this audit.
   path saved from an out-of-bounds read only by a `std::min` clamp.
 
 **Severity:** Minor
+
+**Why it matters:** Reading it corrected a finding earlier in this audit: the clamped maximum is specified behaviour, so the defect is narrower than first written.
 
 **Fix Recommendation:** Add the negative-value case. The rest needs nothing.
 
@@ -2901,7 +3007,7 @@ equivalence check. Slow for a unit test and justified by what it establishes.
 
 ### `tests/test_book.cpp`
 
-**Status:** [x] Reviewed (208 lines, read in full)
+**Status:** Checked — [x] Reviewed (208 lines, read in full)
 
 **Issues Found:** One coverage gap matching a known defect.
 
@@ -2910,6 +3016,8 @@ equivalence check. Slow for a unit test and justified by what it establishes.
   does not). Every `replace` here succeeds.
 
 **Severity:** Minor
+
+**Why it matters:** This file is the written specification of the behaviours a market maker depends on, so what it omits is what nobody has committed to.
 
 **Fix Recommendation:** Replace into an out-of-window price and assert the
 counters still balance.
@@ -2937,7 +3045,7 @@ worth exactly this much test.
 
 ### `tests/test_matching.cpp`
 
-**Status:** [x] Reviewed (172 lines, read in full)
+**Status:** Checked — [x] Reviewed (172 lines, read in full)
 
 **Issues Found:** Two of the three self-match modes are untested.
 
@@ -2946,6 +3054,8 @@ worth exactly this much test.
   has a different effect on the aggressor's remainder and nothing checks it.
 
 **Severity:** Minor
+
+**Why it matters:** The fill model is the single largest source of backtest overstatement, and this is the file that rules the common error out.
 
 **Fix Recommendation:** Repeat the self-match block under the other two modes;
 the expected outcomes differ in one field each.
@@ -2973,7 +3083,7 @@ remainder are both correct venue behaviour and both easy to get wrong.
 
 ### `tests/test_book_differential.cpp`
 
-**Status:** [x] Reviewed (173 lines, read in full)
+**Status:** Checked — [x] Reviewed (173 lines, read in full)
 
 **Issues Found:** The queue-position comparison silently skips itself whenever
 either book returns the "not ours" sentinel. Two coverage gaps.
@@ -2990,7 +3100,9 @@ either book returns the "not ours" sentinel. Two coverage gaps.
   be seen. The comment says why — "where any real strategy looks" — which is a
   reasonable scope, stated.
 
-**Severity:** Medium (the sentinel skip), Minor (the rest)
+**Severity:** Major (Medium) (the sentinel skip), Minor (the rest)
+
+**Why it matters:** This is the test that establishes the fast book is correct, so a comparison it silently skips is a class of divergence nothing else would catch.
 
 **Fix Recommendation:**
 ```cpp
@@ -3028,7 +3140,7 @@ both use the same seeds, so a failure at either size reproduces at the other.
 
 ### `tests/test_features.cpp`
 
-**Status:** [x] Reviewed (243 lines, read in full)
+**Status:** Checked — [x] Reviewed (243 lines, read in full)
 
 **Issues Found:** The one-sided-book case asserts only the absence of NaN, which
 is why the stale-mid defect survives.
@@ -3041,7 +3153,9 @@ is why the stale-mid defect survives.
 - **The differential loop's imbalance check is guarded by `has_bid() &&
   has_ask()`** (line 206), so the one-sided case is excluded there too.
 
-**Severity:** Medium (coverage of a Medium defect)
+**Severity:** Major (Medium) (coverage of a Medium defect)
+
+**Why it matters:** The one-sided-book case is asserted only for absence of NaN, which is why the stale-mid defect in the feature engine is still live.
 
 **Fix Recommendation:** Once `Features` carries a validity flag, assert it is
 false here. Until then, assert the weaker but still useful property: that `mid`
@@ -3070,7 +3184,7 @@ bug an EWMA introduces silently.
 
 ### `tests/test_pnl.cpp`
 
-**Status:** [x] Reviewed (137 lines, read in full)
+**Status:** Checked — [x] Reviewed (137 lines, read in full)
 
 **Issues Found:** Every `attribute` call passes `final_inventory = 0`, which is
 why the omitted inventory mark is invisible.
@@ -3081,7 +3195,9 @@ why the omitted inventory mark is invisible.
 - **`MarkoutTracker::advance` is never called with `mid_now <= 0`**, so the
   early-return that silently stretches a horizon is untested.
 
-**Severity:** High (as the coverage gap behind a High defect)
+**Severity:** Major (High) (as the coverage gap behind a High defect)
+
+**Why it matters:** Every `attribute` call passes a zero closing position, so the one thing that distinguishes the decomposition from session P&L is never exercised.
 
 **Fix Recommendation:**
 ```cpp
@@ -3117,7 +3233,7 @@ no sampling variation to find).
 
 ### `tests/test_simulator.cpp`
 
-**Status:** [x] Reviewed (125 lines, read in full)
+**Status:** Checked — [x] Reviewed (125 lines, read in full)
 
 **Issues Found:** The determinism test compares aggregates, not the fill
 sequence. The agent's own fills reaching the view book is untested.
@@ -3132,7 +3248,9 @@ sequence. The agent's own fills reaching the view book is untested.
 - The suite runs 2.24 million simulated events in this one file, which dominates
   `ctest` wall time.
 
-**Severity:** Medium (both gaps)
+**Severity:** Major (Medium) (both gaps)
+
+**Why it matters:** The file claims byte-identical reproducibility and asserts equal aggregates, which is a weaker property and not the one the journal argument needs.
 
 **Fix Recommendation:** Compare the fill vectors, not the totals:
 ```cpp
@@ -3166,7 +3284,7 @@ demonstration that the latency model does something.
 
 ### `tests/test_strategies.cpp`
 
-**Status:** [x] Reviewed (180 lines, read in full)
+**Status:** Checked — [x] Reviewed (180 lines, read in full)
 
 **Issues Found:** The invariant sweep exists but asserts the wrong invariant,
 and the whole file runs on parameters the shipped defaults do not match.
@@ -3185,6 +3303,8 @@ and the whole file runs on parameters the shipped defaults do not match.
 
 **Severity:** **Critical** (as the coverage gap behind the Critical defect in
 `include/lob/strat/quoting.hpp`)
+
+**Why it matters:** This is the gap that let the Critical finding through: the sweep exists, it asserts the wrong invariant, and it runs on parameters the shipped defaults do not match.
 
 **Fix Recommendation:** Two lines inside the existing loop, and one more
 parameter set:
@@ -3223,11 +3343,11 @@ never checks the ones that ship.
 
 ### `tests/test_properties.cpp`
 
-**Status:** [x] Reviewed (275 lines, read in full)
+**Status:** Checked — [x] Reviewed (275 lines, read in full)
 
 **Issues Found:** None.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
 
 **Why it matters:** This is the strongest test file in the repository and I
 found nothing to fix in it.
@@ -3271,7 +3391,7 @@ histogram trials. Slow, and each property justifies its cost.
 
 ### `fuzz/decode.hpp`
 
-**Status:** [x] Reviewed (80 lines, read in full)
+**Status:** Checked — [x] Reviewed (80 lines, read in full)
 
 **Issues Found:** One overstated comment. No defects.
 
@@ -3282,6 +3402,8 @@ histogram trials. Slow, and each property justifies its cost.
   operation are correlated across the byte. Harmless for a blind fuzzer.
 
 **Severity:** Minor
+
+**Why it matters:** A fuzzer is only as good as the inputs it can reach, and the decisions here are what make most inputs hostile rather than plausible.
 
 **Fix Recommendation:** None.
 
@@ -3308,7 +3430,7 @@ fuzzer that only produces valid input finds nothing."
 
 ### `fuzz/portable_main.cpp`
 
-**Status:** [x] Reviewed (120 lines, read in full)
+**Status:** Checked — [x] Reviewed (120 lines, read in full)
 
 **Issues Found:** The file's central reproducibility claim is not implemented.
 
@@ -3319,7 +3441,7 @@ fuzzer that only produces valid input finds nothing."
   seed that produced the input dies with it — leaving exactly the situation the
   comment promises to avoid.
 
-**Severity:** Medium
+**Severity:** Major (Medium)
 
 **Why it matters:** This driver exists so the fuzz targets run everywhere,
 including where libFuzzer's corpus machinery is unavailable. Without the seed,
@@ -3358,11 +3480,13 @@ lower bound, not a substitute."
 
 ### `fuzz/fuzz_book.cpp`
 
-**Status:** [x] Reviewed (61 lines, read in full)
+**Status:** Checked — [x] Reviewed (61 lines, read in full)
 
 **Issues Found:** None.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
+
+**Why it matters:** A feed with a gap in it looks exactly like malicious input, so the book surviving arbitrary bytes is a correctness property rather than a hardening exercise.
 
 **Fix Recommendation:** None.
 
@@ -3390,7 +3514,7 @@ and what is checked is not the return value but the state afterwards.
 
 ### `fuzz/fuzz_matching.cpp`
 
-**Status:** [x] Reviewed (71 lines, read in full)
+**Status:** Checked — [x] Reviewed (71 lines, read in full)
 
 **Issues Found:** Two of three self-match modes unfuzzed; the crossed-book check
 is periodic.
@@ -3401,6 +3525,8 @@ is periodic.
   crossed transiently between checks would not be seen.
 
 **Severity:** Minor (both)
+
+**Why it matters:** The matcher walks the book while mutating it, which is the shape of code that spins forever or reads freed memory on a malformed sequence.
 
 **Fix Recommendation:** Derive the mode from a byte of the input:
 `static_cast<SelfMatch>(data[0] % 3)`. That costs nothing and covers all three.
@@ -3428,7 +3554,7 @@ reads freed memory on a malformed sequence."
 
 ### `fuzz/fuzz_bitstamp.cpp`
 
-**Status:** [x] Reviewed (110 lines, read in full)
+**Status:** Checked — [x] Reviewed (110 lines, read in full)
 
 **Issues Found:** Two functions that consume untrusted snapshot JSON are not
 fuzzed.
@@ -3441,7 +3567,9 @@ fuzzed.
 - **`parse_decimal` is only called with `scale = 8`** (line 60), so the
   `scale > 18` rejection path is never entered.
 
-**Severity:** Medium (the two unfuzzed entry points)
+**Severity:** Major (Medium) (the two unfuzzed entry points)
+
+**Why it matters:** This is the target for the only code in the project that parses bytes from a public network, and two of that code's entry points are not covered.
 
 **Fix Recommendation:**
 ```cpp
@@ -3480,7 +3608,7 @@ book is driven with whatever comes out and `check_invariants` runs at the end.
 
 ### `bench/bench_measure.cpp`
 
-**Status:** [x] Reviewed (97 lines, read in full)
+**Status:** Checked — [x] Reviewed (97 lines, read in full)
 
 **Issues Found:** The "cycles/op" column is TSC ticks, not cycles.
 
@@ -3494,6 +3622,8 @@ book is driven with whatever comes out and `check_invariants` runs at the end.
   batch. O(1) against 8,192 allocations, so negligible.
 
 **Severity:** Minor (both)
+
+**Why it matters:** `docs/BASELINE.md` reproduces this file's output verbatim, so a mislabelled column becomes a mislabelled number in the document readers cite.
 
 **Fix Recommendation:** Rename the column to `tsc-ticks/op`, or derive real
 cycles from an `aperf`/`mperf` ratio, which is more work than the number is
@@ -3520,7 +3650,7 @@ machine and are a floor, not a promise."
 
 ### `bench/bench_book.cpp`
 
-**Status:** [x] Reviewed (210 lines, read in full)
+**Status:** Checked — [x] Reviewed (210 lines, read in full)
 
 **Issues Found:** One benchmark does not measure what it is named. One reject
 count silently omits an error class.
@@ -3543,6 +3673,8 @@ count silently omits an error class.
   127-129), the same point recorded under `apps/replay/main.cpp`.
 
 **Severity:** Minor (all)
+
+**Why it matters:** A benchmark named for a case it does not measure will be trusted for that case, and a reject total that omits an error class hides the one error the synthetic generator most often produces.
 
 **Fix Recommendation:**
 ```cpp
@@ -3578,7 +3710,7 @@ what a benchmark is for.
 
 ### `.github/workflows/ci.yml`
 
-**Status:** [x] Reviewed (77 lines, read in full)
+**Status:** Checked — [x] Reviewed (77 lines, read in full)
 
 **Issues Found:** The extended fuzz pass omits the only target that consumes
 untrusted input. The `tsan` preset is never run. Two supply-chain hardening
@@ -3601,7 +3733,7 @@ gaps.
 - **No `timeout-minutes`.** A fuzz target that hangs consumes the six-hour
   default before the job is killed.
 
-**Severity:** Medium (the fuzz omission), Minor (the rest)
+**Severity:** Major (Medium) (the fuzz omission), Minor (the rest)
 
 **Why it matters:** The fuzz gap is the one that matters. The threat model in
 `fuzz/fuzz_bitstamp.cpp`'s header is correct — a capture file "arrived over a
@@ -3654,7 +3786,7 @@ would fail constantly and be disabled within a month.
 
 ### `CMakePresets.json`
 
-**Status:** [x] Reviewed (54 lines, read in full)
+**Status:** Checked — [x] Reviewed (54 lines, read in full)
 
 **Issues Found:** The declared minimum CMake version cannot read this file. The
 `tsan` preset is unreachable from CI.
@@ -3670,6 +3802,8 @@ would fail constantly and be disabled within a month.
   the machine that built it.
 
 **Severity:** Minor (all)
+
+**Why it matters:** A build configuration nothing runs will stop compiling without anyone noticing, and a stated minimum version that cannot read the file stating it is a trap for the first person on an older toolchain.
 
 **Fix Recommendation:** Set `"cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 }`,
 or drop to `"version": 2` if 3.20 support is wanted (nothing here needs v3
@@ -3692,7 +3826,7 @@ violation and still exit zero.
 
 ### `tools/jitter_baseline.sh`
 
-**Status:** [x] Reviewed (43 lines, read in full)
+**Status:** Checked — [x] Reviewed (43 lines, read in full)
 
 **Issues Found:** One inherited argument-validation gap.
 
@@ -3702,6 +3836,8 @@ violation and still exit zero.
   script simply forwards it.
 
 **Severity:** Minor
+
+**Why it matters:** This is the script `docs/BASELINE.md` tells people to run, so its one rough edge is the first one a new contributor meets.
 
 **Fix Recommendation:** Fix it in `jitter_probe` rather than here, so both entry
 points are covered.
@@ -3729,7 +3865,7 @@ below them mean anything.
 
 ### `tools/check_capture.py`
 
-**Status:** [x] Reviewed (166 lines, read in full)
+**Status:** Checked — [x] Reviewed (166 lines, read in full)
 
 **Issues Found:** The price-reach calculation does not implement the reasoning
 in the comment above it.
@@ -3749,9 +3885,11 @@ in the comment above it.
 - **Only `*_bitstamp.jsonl.gz` is globbed** (line 38), so a partially written
   uncompressed capture from a crashed recorder is invisible to the checker.
 
-**Severity:** Medium (the reach calculation, because its output is a
+**Severity:** Major (Medium) (the reach calculation, because its output is a
 recommended `--band-pct` and a one-sided move is exactly when the recommendation
 matters)
+
+**Why it matters:** Its output is a recommended `--band-pct`, and a one-sided price move is exactly the case where the recommendation matters and the formula is wrong.
 
 **Fix Recommendation:** Record the first trade price and measure from it:
 ```python
@@ -3793,9 +3931,9 @@ usually got wrong.
 
 ---
 
-### `tools/record_bitfinex.py` and `tools/record_coinbase.py`
+### `tools/record_bitfinex.py` and `tools/record_coinbase.py` (the two venues without a reconnect loop)
 
-**Status:** [x] Reviewed (232 + 242 lines, read in full)
+**Status:** Checked — [x] Reviewed (232 + 242 lines, read in full)
 
 **Issues Found:** Neither reconnects, which is the defect that was found and
 fixed in the Bitstamp recorder and never carried across. One unvalidated JSON
@@ -3817,7 +3955,7 @@ response. One unbounded frame size.
   full-book snapshot frame exceeds it — but it means a malfunctioning or hostile
   endpoint can drive the client to buffer without bound.
 
-**Severity:** Medium (no reconnect), Minor (the other two)
+**Severity:** Major (Medium) (no reconnect), Minor (the other two)
 
 **Why it matters:** A capture is hours of wall time that cannot be re-run for a
 past market. Losing one to a transient disconnect is the most expensive
@@ -3865,7 +4003,7 @@ commit message, is what stops the next person re-evaluating it from scratch.
 
 ### `README.md`
 
-**Status:** [x] Reviewed (399 lines, read in full)
+**Status:** Checked — [x] Reviewed (399 lines, read in full)
 
 **Issues Found:** The test-count claim is stale by two orders of magnitude. The
 status paragraph is a phase behind the repository. Two path inconsistencies.
@@ -3921,7 +4059,7 @@ against the code — the Phase 5 description at lines 91-141, the statement that
 
 ### `tools/calibrate.py`
 
-**Status:** [x] Reviewed (363 lines, read in full)
+**Status:** Checked — [x] Reviewed (363 lines, read in full)
 
 **Issues Found:** None. One misplaced comment.
 
@@ -3932,6 +4070,8 @@ against the code — the Phase 5 description at lines 91-141, the statement that
   implements it.
 
 **Severity:** Minor
+
+**Why it matters:** This is the estimator behind the claim that Avellaneda-Stoikov cannot be identified on these books, so its correctness decides whether the entire Phase 5 state design is justified.
 
 **Fix Recommendation:** Move the comment to line 149.
 
@@ -3984,11 +4124,13 @@ importing `pyplot` (lines 45-47), so it is headless-safe.
 
 ### `tools/figures.py`
 
-**Status:** [x] Reviewed (315 lines, read in full)
+**Status:** Checked — [x] Reviewed (315 lines, read in full)
 
 **Issues Found:** None.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
+
+**Why it matters:** Every figure in the documents comes from here, so a wrong instrument would propagate silently into every argument that cites one.
 
 **Fix Recommendation:** None.
 
@@ -4012,9 +4154,11 @@ censored duration data. The seven figures map one-to-one onto the estimators in
 
 ---
 
-### `docs/00-scope-and-architecture.md` through `docs/04-toolchain.md`
+### `docs/00-scope-and-architecture.md` and `docs/04-toolchain.md`
 
-**Status:** [x] Reviewed (300 + 292 + 242 + 278 + 161 lines, read in full)
+**Status:** Checked — [x] Reviewed (300 and 161 lines, both read in full.
+`docs/01`, `docs/02` and `docs/03` were originally covered here and now have
+their own subsections below.)
 
 **Issues Found:** One structural drift, one label that is now half-true.
 
@@ -4030,6 +4174,8 @@ censored duration data. The seven figures map one-to-one onto the estimators in
   `data/` would not work. The doc predates the decision.
 
 **Severity:** Minor (both)
+
+**Why it matters:** `docs/00` is the document a reader opens first, and its layout section is now a plan being read as a description.
 
 **Fix Recommendation:** Re-title §5 "Repository layout (as built)" and paste the
 current tree, or leave it as the plan and add one line saying which parts are
@@ -4066,7 +4212,7 @@ against a citation in the code matched.
 
 ### `docs/05-roadmap.md`
 
-**Status:** [x] Reviewed (276 lines, read in full)
+**Status:** Checked — [x] Reviewed (276 lines, read in full)
 
 **Issues Found:** None. One entry to update from this audit.
 
@@ -4077,6 +4223,8 @@ against a citation in the code matched.
   criterion is not merely unmet, it is currently uninformative.
 
 **Severity:** Minor
+
+**Why it matters:** It is the file that records what is and is not done, and it is already honest about the Phase 5 criterion. What it does not yet carry is why that criterion currently returns no signal at all.
 
 **Fix Recommendation:** Add one line under Phase 5 noting the exact tie and the
 baseline parameterisation defect, so the next person does not re-derive it.
@@ -4102,9 +4250,9 @@ the tabulated policy and any production system, one journal format.
 
 ---
 
-### `docs/06-queue-reactive-plan.md`, `docs/BASELINE.md`, `docs/KNOWN-ISSUES.md`
+### `docs/06-queue-reactive-plan.md`, `docs/BASELINE.md` and `docs/KNOWN-ISSUES.md`
 
-**Status:** [x] Reviewed (717 + 85 + 457 lines, read in full)
+**Status:** Checked — [x] Reviewed (717 + 85 + 457 lines, read in full)
 
 **Issues Found:** One number in `BASELINE.md` inherits a mislabelling from the
 benchmark that produced it. `KNOWN-ISSUES.md` has two open entries this audit
@@ -4121,6 +4269,8 @@ touches.
   in the code.
 
 **Severity:** Minor
+
+**Why it matters:** These three are where measurements and open defects are recorded, so a number that drifts from its source here drifts everywhere that cites it.
 
 **Fix Recommendation:** Rename the column when `bench_measure` is fixed, so the
 document and its source agree. Add the baselines finding to `KNOWN-ISSUES.md` as
@@ -4147,14 +4297,17 @@ constant in `FlowConfig::Qr` is traceable to a number in that document.
 
 ---
 
-### `docs/figures/` — seven PNGs and `calibration.json`
+#### Group note — `docs/figures/` as a whole
 
-**Status:** [x] Reviewed (8 files; PNGs inspected for size and provenance,
+Each of the eight files has its own subsection further below; this note covers
+only what is true of the set.
+
+**Status:** Checked — [x] Reviewed (8 files; PNGs inspected for size and provenance,
 `calibration.json` read in full)
 
 **Issues Found:** None.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
 
 **Why it matters:** These are build outputs committed to the repository. That is
 a deliberate choice and a defensible one: the figures are referenced from the
@@ -4187,9 +4340,12 @@ it is the right way to ship an estimate this uncertain.
 
 ---
 
-### `policy/` — `ethusd.bin`, `simcal.bin`, and three JSON parameter files
+#### Group note — `policy/` as a whole
 
-**Status:** [x] Reviewed (5 files; the binaries by header and provenance, the
+Each of the five files has its own subsection further below; this note covers
+only what is true of the directory.
+
+**Status:** Checked — [x] Reviewed (5 files; the binaries by header and provenance, the
 three JSON files read)
 
 **Issues Found:** None. One observation about what the binaries commit the
@@ -4207,7 +4363,9 @@ repository to.
   `beta`, `se`, `buckets_used` and `events` — so a reader can tell which fits
   rest on 240 events and which do not.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
+
+**Why it matters:** Five committed artefacts that the execution path consumes. Committing them is only safe because of the validating loader, and that is worth stating once for the directory.
 
 **Fix Recommendation:** None.
 
@@ -4238,14 +4396,17 @@ and an arbitrary one.
 
 ---
 
-### `data/samples/` — three captures and three snapshots
+#### Group note — `data/samples/` as a whole
 
-**Status:** [x] Reviewed (6 files; sizes, tracking rules and provenance checked;
+Each of the six files has its own subsection further below; this note covers
+only why the directory is tracked at all.
+
+**Status:** Checked — [x] Reviewed (6 files; sizes, tracking rules and provenance checked;
 contents sampled)
 
 **Issues Found:** None.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
 
 **Why it matters:** 5.3 MB of the repository's 8.4 MB is this directory, so it
 deserves an explicit justification, and there is one. `.gitignore` lines 12-15
@@ -4285,7 +4446,7 @@ count that suits one is absurd for the others.
 
 ### `tests/test_policy.cpp`
 
-**Status:** [x] Reviewed (504 lines, read in full)
+**Status:** Checked — [x] Reviewed (504 lines, read in full)
 
 **Issues Found:** A second wall-clock assertion in a unit test. One precision
 correction to a finding recorded earlier in this audit.
@@ -4306,6 +4467,8 @@ correction to a finding recorded earlier in this audit.
   they are simply never read.
 
 **Severity:** Minor (the timing assertion), plus the correction above
+
+**Why it matters:** It is the test for the file that decides what the Phase 5 policy means, and its one fragile assertion is the kind that gets deleted rather than fixed when CI goes red.
 
 **Fix Recommendation:** Print the lookup cost and assert a ceiling a stall
 cannot cross, or gate the assertion on `tsc::calibration().trustworthy`.
@@ -4346,11 +4509,11 @@ where the assertion is fragile.
 
 ### `tests/test_bitstamp.cpp`
 
-**Status:** [x] Reviewed (585 lines, read in full)
+**Status:** Checked — [x] Reviewed (585 lines, read in full)
 
 **Issues Found:** None.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
 
 **Why it matters:** This is the test for the only untrusted-input path in the
 project, and it is built the right way round.
@@ -4393,7 +4556,7 @@ path reads files the repository ships.
 
 ### `tests/test_split_replay.py`
 
-**Status:** [x] Reviewed (71 lines, read in full)
+**Status:** Checked — [x] Reviewed (71 lines, read in full)
 
 **Issues Found:** None. One small robustness note.
 
@@ -4403,6 +4566,8 @@ path reads files the repository ships.
   interpreter it would leak until collection.
 
 **Severity:** Minor
+
+**Why it matters:** The property it guards fails silently: a reseed at a file boundary would shift every distribution slightly and look like data.
 
 **Fix Recommendation:** `with gzip.open(...) as f: lines = f.readlines()`.
 
@@ -4511,7 +4676,7 @@ claim is encoded, and each constant carries the measurement that set it.
 
 **Issues Found:** None.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
 
 **Why it matters:** This is the seam between the offline solve and the
 execution path, and it is the strongest interface in the repository.
@@ -4830,7 +4995,7 @@ forced by measurement.
 
 ---
 
-### `include/lob/feed/bitstamp.hpp` and `src/bitstamp.cpp`
+### `include/lob/feed/bitstamp.hpp` (interface) and `src/bitstamp.cpp` (implementation)
 
 **Status:** Checked — [x] Reviewed (273 + 409 lines, both read in full)
 
@@ -4928,7 +5093,7 @@ measurement and fixed during development.
   side one second after a print) is 33% on the eight-hour ethusd capture
   (n=5,032), not 100%.
 
-**Severity:** n/a (fixed)
+**Severity:** n/a — no issues found (fixed)
 
 **Why it matters:** It is worth recording because of *how* it was caught. The
 symptom was a policy that refused to quote at the touch; the cause was one
@@ -5061,7 +5226,7 @@ the reasoning behind each piece is recorded in place.
 
 **Issues Found:** None.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
 
 **Why it matters:** This file exists because of `docs/KNOWN-ISSUES.md` 4 and 5:
 a rate measured per event and a rate measured per second are different
@@ -5102,7 +5267,7 @@ visible rather than plausible.
 
 **Issues Found:** None.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
 
 **Why it matters:** Both properties it checks are invisible in the output they
 guard, which is the docstring's own argument for asserting them.
@@ -5139,7 +5304,7 @@ every path comes from `sys.argv` or `tempfile`.
 
 **Issues Found:** None.
 
-**Severity:** n/a
+**Severity:** n/a — no issues found
 
 **Why it matters:** This is the file that decides what `lambda(q)` looks like,
 kept deliberately separate from the C++ that measures it, so that "a modelling
@@ -5302,6 +5467,814 @@ The header's first line states it: "the full book, order by order, no account."
 
 ---
 
+### `docs/01-literature.md`
+
+**Status:** Checked — [x] Reviewed (292 lines, read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** Every arXiv id I spot-checked against a citation in the code
+matched the claim made about it, which is the only property of a bibliography
+that can be audited from inside the repository.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** All links are to arXiv, SSRN or publisher landing pages. No
+credentials, no gated endpoints.
+
+**Market-Logic Notes:** The organising decision is the valuable one: entries are
+grouped "by the role it plays in the system, not by date", each says *what you
+take from it*, and `[core]` marks the ones the design actually depends on. The
+"Design consequence" callouts are what connect it to the code — section A's, for
+instance, states that "your P&L decomposition must have separate lines for
+spread capture, adverse selection, and inventory cost — they are three different
+economic forces and they need three different controls", pointing at
+`docs/03` §10. That is the specification `include/lob/strat/pnl.hpp` implements
+and `apps/backtest` under-reports (finding H1).
+
+---
+
+### `docs/02-data-and-protocols.md`
+
+**Status:** Checked — [x] Reviewed (242 lines, read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** §3 is the record of *why* this project uses the venue it
+does, and it is the document that makes the no-account constraint auditable
+rather than merely asserted.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** §3 is headed "**free sources only**" and each ruled-out
+option says why, in terms that matter for this audit: Coinbase's `level3` was
+"Checked and ruled out — the retail Advanced Trade WebSocket has no `level3`
+channel at all, and `level2` now requires authentication"; Databento was
+"Dropped here because sign-up wanted card details, and this project spends
+nothing." Those two lines are the reason there is no credential anywhere in the
+repository to find.
+
+**Market-Logic Notes:** §3.1 carries the same `amount_traded` finding as
+`include/lob/feed/bitstamp.hpp`, in the same detail, including the specific
+order id and the 84.8% against 50.5% comparison. So the decoder and this
+document agree — which localises the stale docstring in
+`tools/record_bitstamp.py` as a single oversight rather than a live
+disagreement about the data. The Bitfinex row also records the reason that
+venue is second choice: its raw books are "windowed to the top 250 per side. An
+order leaving the window is indistinguishable from a cancel, which silently
+corrupts the cancel/fill split."
+
+---
+
+### `docs/03-metrics-and-estimators.md`
+
+**Status:** Checked — [x] Reviewed (278 lines, read in full)
+
+**Issues Found:** None in the document. It is the specification against which
+one code finding was raised.
+
+- **§10 specifies Total P&L as five lines**, including "Inventory / hedging cost
+  (mark-to-market of held inventory + hedge slippage)". `include/lob/strat/pnl.hpp`
+  cites this section by name and implements four of them, deliberately — see
+  finding H1, which is about `apps/backtest`'s reporting rather than about this
+  document.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** This is the file the measurement layer is written against,
+and three of its sections proved load-bearing during the audit.
+
+**Fix Recommendation:** None. If anything, add a sentence to §10 distinguishing
+the decomposition of trading edge from session P&L, since the codebase now makes
+that distinction explicitly in `include/lob/strat/driver.hpp:106-115` and the
+document does not.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** The sections that the code actually implements, verified
+one by one:
+- **§2's stage taxonomy** matches `Stage` in `include/lob/measure/recorder.hpp`
+  enumerator for enumerator.
+- **§5**, that the fill/cancel split must never be aggregated, is implemented in
+  `src/bitstamp.cpp` and quoted at the point of reporting in `apps/replay`.
+- **§7**'s markout ladder matches `kMarkoutHorizons` in
+  `include/lob/strat/pnl.hpp`.
+- **§10**'s five-line decomposition, as above.
+- **§12**, "don't fool yourself", is what the block bootstrap and the
+  `kMinBlocks = 10` refusal in `pnl.hpp` implement.
+- **§11**'s stylized-fact scorecard is the standard `docs/06`'s calibration
+  tables are scored against.
+
+---
+
+### `docs/figures/01_order_lifetime.png`
+
+**Status:** Checked — [x] Reviewed (84,176 bytes, 1452x477 PNG, RGBA)
+
+**Issues Found:** None. Build output, committed deliberately.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** Produced by `fig_lifetime` (`tools/figures.py:83-105`),
+which plots order lifetime as a **survival curve** rather than a histogram —
+the correct instrument for censored duration data, since an order still resting
+when the capture ends has a lifetime longer than observed, not equal to it.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** Nothing regenerates it and diffs it; matplotlib output is not
+byte-reproducible across versions, so a diff-based CI check would be brittle.
+Recording the `stats` invocation that produced it in the document that
+references it is the practical alternative.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** A matplotlib Agg render of aggregate statistics. No EXIF,
+no embedded paths, nothing identifying a person or machine.
+
+**Market-Logic Notes:** Order lifetime is the input to the cancel-rate estimate
+that `include/lob/sim/flow.hpp`'s `cancel_rate`/`cancel_half` constants are
+fitted against.
+
+---
+
+### `docs/figures/02_cancel_vs_fill.png`
+
+**Status:** Checked — [x] Reviewed (72,333 bytes, 1000x565 PNG, RGBA)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** `fig_split` (`tools/figures.py:108-150`) draws the one split
+`docs/03` §5 says must never be aggregated. It is the picture of the finding
+that `amount_traded` recovers, and the reason both websocket channels are
+recorded.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As for figure 01.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** As for figure 01.
+
+**Market-Logic Notes:** The measurement behind it — roughly 99% of removals
+being cancels — is what makes `kBackOfQueue` "the single most consequential line
+in the model" (`include/lob/policy/state.hpp:96-100`), and what forced
+`apps/tape` to read `queue_ahead()` at print time rather than accumulating
+traded volume against the queue as it stood at placement.
+
+---
+
+### `docs/figures/03_spread.png`
+
+**Status:** Checked — [x] Reviewed (69,324 bytes, 907x531 PNG, RGBA)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** `fig_spread` (`tools/figures.py:153-172`). The spread
+distribution is the evidence for the large-tick regime claim that the whole
+Phase 5 state design rests on: these books sit at a one-tick spread 70–99% of
+the time, so distance from the mid has nowhere to vary and queue position is
+what decides fills.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As for figure 01.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** As for figure 01.
+
+**Market-Logic Notes:** `apps/replay` prints the same distribution with the
+caveat that applies to it — "Read the median, distrust the tail", because the
+upper percentiles are a property of the reconstruction rather than of the
+market. A reader of this figure alone does not get that caveat.
+
+---
+
+### `docs/figures/04_depth_profile.png`
+
+**Status:** Checked — [x] Reviewed (142,790 bytes, 1453x463 PNG, RGBA — the
+second-largest figure)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** `fig_depth` (`tools/figures.py:175-191`). The standing depth
+profile by level is what `FlowConfig`'s add-placement weights were fitted
+against — the measurement that found ethusd rests 69.9% of its near-touch orders
+at the touch against the old generator's 28.8%.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As for figure 01.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** As for figure 01.
+
+**Market-Logic Notes:** Reading this figure next to the add-placement table in
+`include/lob/sim/flow.hpp:43-48` is what shows that a standing profile and an
+arrival profile are different things, and that dividing one by the other gives
+the relative lifetime — 1.46 at the touch against 0.45–0.71 behind it.
+
+---
+
+### `docs/figures/05_interarrival.png`
+
+**Status:** Checked — [x] Reviewed (69,711 bytes, 907x534 PNG, RGBA)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** `fig_arrivals` (`tools/figures.py:194-211`). The
+interarrival distribution is the direct evidence against a Poisson process,
+which is the argument for the queue-reactive and Hawkes work in `docs/06`.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As for figure 01.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** As for figure 01.
+
+**Market-Logic Notes:** This is also the figure that sets `mean_gap_ns`. The
+18.55 ms mean gap for ethusd is what made the old 200-event message budget
+3.7 seconds rather than 0.5 milliseconds — `docs/KNOWN-ISSUES.md` 5.
+
+---
+
+### `docs/figures/06_markout.png`
+
+**Status:** Checked — [x] Reviewed (104,091 bytes, 953x554 PNG, RGBA)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** `fig_markout` (`tools/figures.py:214-282`), the longest
+figure function in the file. The markout curve's **shape** is the story, as
+`include/lob/strat/pnl.hpp`'s header says: a curve that starts positive and
+decays negative is normal, and where it crosses zero is the effective
+holding-time budget.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As for figure 01.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** As for figure 01.
+
+**Market-Logic Notes:** This is the figure `apps/evaluate` refers to when it
+warns that "the same measurement on Bitstamp put markouts at +0.3 to +0.6 bps
+against the passive side at every horizon" while the synthetic generator has
+near-zero adverse selection. It is the quantitative statement of the gap between
+the simulator and the market.
+
+---
+
+### `docs/figures/07_ak_calibration.png`
+
+**Status:** Checked — [x] Reviewed (141,993 bytes, 1350x585 PNG, RGBA — the
+largest figure)
+
+**Issues Found:** None in the image. Its companion JSON has one, recorded below.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** Produced by `tools/calibrate.py:287`, not by
+`tools/figures.py`. It plots the empirical fill intensity by distance bucket
+with Poisson error bars against the fitted `A·exp(−k·delta)` curve, at several
+cutoffs — which is how the instability in `k` is made visible rather than
+averaged away.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As for figure 01.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** As for figure 01.
+
+**Market-Logic Notes:** This is the figure that justifies leaving
+Avellaneda-Stoikov out of the Phase 5 state. Plotting the fit at multiple
+cutoffs is the honest presentation of a parameter that two of three instruments
+cannot identify.
+
+---
+
+### `docs/figures/calibration.json`
+
+**Status:** Checked — [x] Reviewed (2,498 bytes, read and parsed in full)
+
+**Issues Found:** The caveat is a hardcoded string that no longer matches the
+numbers it qualifies, and it understates the problem. The point estimates ship
+alongside a stability diagnosis that says two of them should not be used, with
+nothing in the estimates themselves to say so.
+
+- **The caveat claims "Fill counts are 24-65 per instrument".** The file's own
+  `instruments` block reports **15, 14 and 30**. The string is written as a
+  literal at `tools/calibrate.py:279` and does not read the data it describes,
+  so it has drifted — and drifted in the direction that makes the estimates look
+  better founded than they are.
+- **btcusd's `k` is not distinguishable from zero.** Parsed from this file:
+
+  | instrument | k | se(k) | k / se(k) | fills |
+  |---|---|---|---|---|
+  | btcusd | 0.0199 | 0.0436 | **0.46** | 15 |
+  | ethusd | 0.1011 | 0.0385 | 2.63 | 14 |
+  | xrpusd | 0.2167 | 0.0392 | 5.53 | 30 |
+
+- **`k_stability_ratio` diagnoses it and the estimates do not carry the
+  diagnosis.** btcusd's `k_by_cutoff` runs 48.1, 49.5, 48.2, 0.0199, −0.0189,
+  −0.00096 across the 4/8/16/32/64/128-tick cutoffs, with `ratio: NaN` and
+  `sign_change: true`; ethusd also has `sign_change: true`; only xrpusd is
+  stable (`ratio: 2.85`, no sign change). A consumer reading
+  `instruments.btcusd.k` gets `0.0199` with no marker.
+
+**Severity:** Major
+
+**Why it matters:** This artefact is the one that would be reached for if
+anyone tried to parameterise Avellaneda-Stoikov from measurement. It correctly
+records that the parameter is unidentified on two of three instruments — which
+independently confirms the claim made in
+`include/lob/policy/state.hpp:16-22` and `tools/mdp_params.py:20-24` — and then
+ships the unusable numbers in the same shape as the usable one.
+
+**Fix Recommendation:** Compute the caveat rather than writing it, and mark the
+estimates:
+```python
+counts = [v["fills"] for v in results.values()]
+usable = {p: not st["sign_change"] and math.isfinite(st["ratio"])
+          for p, st in stability.items()}
+for p in results:
+    results[p]["identified"] = usable[p]
+    results[p]["k_over_se"] = results[p]["k"] / results[p]["se_k"]
+payload["caveat"] = (f"Ten minutes per instrument. Fill counts are "
+                     f"{min(counts)}-{max(counts)} per instrument, so these are "
+                     f"order-of-magnitude estimates. ...")
+```
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** A test that every string in a generated artefact which quotes
+a number is derived from that number. That is not practical in general; deriving
+the caveat, as above, removes the need for one.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** Fitted parameters and standard errors only. Nothing
+identifying.
+
+**Market-Logic Notes:** The rest of the caveat is exactly right and is the
+sentence that should survive: "A-S has no queue term and these books sit at a
+one-tick spread almost always, where queue position rather than distance decides
+fills." That is the finding that moved the entire Phase 5 design from distance
+to queue position, and it is recorded in the artefact that produced it.
+
+---
+
+### `policy/mdp.json`
+
+**Status:** Checked — [x] Reviewed (15,468 bytes, parsed and read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** This is the measured process `apps/solve` turns into
+`policy/ethusd.bin`. Three top-level keys — `btcusd`, `ethusd`, `xrpusd` — one
+per sample capture.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** The imbalance and queue bucket edges that produced these
+numbers are declared in `tools/mdp_params.py` and again in
+`include/lob/policy/state.hpp`; emitting them into this file would close the
+coupling recorded under `tools/mdp_params.py`.
+
+**Tests Missing:** A test that the edges in `include/lob/policy/state.hpp` match
+whatever produced this file.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** Fitted parameters only. No credentials, no hostnames.
+
+**Market-Logic Notes:** The `mid` block is a good example of an artefact that
+carries enough to be checked rather than trusted. For btcusd it reports
+`p_up 0.00887`, `p_down 0.00137`, `p_flat 0.98976`, `median_abs_move_ticks 70`,
+`winsorised_sd_ticks 5.27` **and** `raw_sd_ticks 22.20`, `max_abs_move_ticks
+584`, `samples 4395`, `steps_kept_pct 92.88`. Keeping the winsorised and raw
+standard deviations side by side is what lets a reader see how much of the
+variance is tail — a factor of four here — which is the difference between a
+defensible inventory penalty and an arbitrary one. `steps_kept_pct` says what
+the winsorisation discarded.
+
+---
+
+### `policy/queue_reactive.json`
+
+**Status:** Checked — [x] Reviewed (7,265 bytes, parsed and read in full)
+
+**Issues Found:** None in the file. Its contents are duplicated by hand
+elsewhere.
+
+- **The constants here are hand-transcribed into `FlowConfig::Qr`**
+  (`include/lob/sim/flow.hpp`). Nothing reads this file at run time, so a re-fit
+  updates the artefact and leaves the generator unchanged.
+
+**Severity:** Minor
+
+**Why it matters:** A fitted artefact that nothing consumes is a record, not an
+input. That is fine as long as everyone knows it; the risk is a re-fit that
+silently does not take effect.
+
+**Fix Recommendation:** Have `FlowConfig::ethusd_queue_reactive()` load this file
+where it is available and fall back to the compiled defaults otherwise.
+
+**Refactor Suggestion:** As above.
+
+**Tests Missing:** A test that the constants in `flow.hpp` equal the values in
+this file.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** Fitted parameters only.
+
+**Market-Logic Notes:** Its top-level key is `sim`, so this is the fit of the
+**simulator's own** process, not the market's — which is the point of
+`tools/fit_queue_reactive.py`: run it on both and put them side by side. Each
+level carries `exposure_s`, and each slope carries `beta`, `se`,
+`log_intercept`, `buckets_used` and `events`. Level 0 records
+`exposure_s 55421.76` against `events 240` for the adds-versus-orders slope, so
+a reader can see which fits rest on 240 observations and which do not, rather
+than being handed a bare coefficient.
+
+---
+
+### `policy/sim_mdp.json`
+
+**Status:** Checked — [x] Reviewed (5,605 bytes, parsed and read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** Top-level key `simcal` — the MDP process measured from the
+**simulator**, as distinct from `policy/mdp.json` measured from the captures.
+The two exist so a policy can be solved on the process it will actually be
+evaluated against, which is what `README.md:117-121` documents.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As for `policy/simcal.bin`: nothing asserts this file and the
+table solved from it are still consistent with the current build.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** Fitted parameters only.
+
+**Market-Logic Notes:** Solving on the simulator's own process is the honest
+setup for the Phase 5 question "does an optimal policy beat these heuristics on
+THIS process" — which `apps/evaluate` states outright is not the same as "would
+it make money". Keeping the two parameter files separate is what stops that
+distinction collapsing.
+
+---
+
+### `policy/ethusd.bin`
+
+**Status:** Checked — [x] Reviewed (126,808 bytes; header and provenance
+verified, contents validated by the loader)
+
+**Issues Found:** Nothing tests that it still loads.
+
+- **126,808 bytes** = an 88-byte `TableHeader` plus 14,080 policy bytes plus
+  14,080 doubles of value — exactly `kNumStates = 11 x 16 x 16 x 5`. The size is
+  a consistency check in itself, and it matches.
+- **`apps/evaluate` reports its header when run**: hash `b598b35bc514520e`,
+  199 sweeps, residual 3.1e-10. So it was solved to convergence, not to a sweep
+  cap.
+- **No test loads it.** `src/policy_table.cpp` rejects a table solved over a
+  different discretisation, which is precisely the failure that would follow a
+  change to `kMaxInventory` or `kQueueBuckets` — and nothing in `ctest` would
+  trigger it.
+
+**Severity:** Minor
+
+**Why it matters:** The committed table is what `apps/evaluate` runs against. The
+day a discretisation constant changes, this file becomes silently unusable and
+only a manual run finds out.
+
+**Fix Recommendation:**
+```cpp
+// tests/test_policy.cpp
+policy::PolicyTable shipped; std::string why;
+CHECK(shipped.load("policy/ethusd.bin", &why));   // fails the day the shape changes
+CHECK_EQ(shipped.header().num_states, policy::kNumStates);
+```
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** The policy array is 14 KB, so it fits in L1;
+`tests/test_policy.cpp` measures a random-access lookup as nanosecond-scale.
+
+**Security Notes:** Read only through `PolicyTable::load`, which validates the
+magic, the schema version, the full discretisation and **every action byte**
+against `kNumActions` before accepting it. A corrupted file cannot produce an
+out-of-range action index at lookup time. Committing a binary is safe here
+because of that loader, not despite it.
+
+**Market-Logic Notes:** This is the artefact the Phase 5 acceptance criterion is
+evaluated on, and finding C1 is that it currently produces output byte-identical
+to `JoinTouch`. Investigating that is the second Immediate item in the roadmap.
+
+---
+
+### `policy/simcal.bin`
+
+**Status:** Checked — [x] Reviewed (126,808 bytes; same structure as
+`policy/ethusd.bin`)
+
+**Issues Found:** Same as `policy/ethusd.bin` — nothing tests that it loads.
+
+**Severity:** Minor
+
+**Why it matters:** Identical in size to `ethusd.bin`, which is expected: the
+discretisation is fixed at compile time, so every table over it is the same
+length. The two differ only in contents and in the process they were solved
+against — this one from `policy/sim_mdp.json`.
+
+**Fix Recommendation:** As for `policy/ethusd.bin`; the same test should load
+both.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** As above.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** As for `policy/ethusd.bin` — validated by the same loader.
+
+**Market-Logic Notes:** Having a second table solved on the simulator's own
+process is what makes the tuning workflow in `README.md:117-121` possible:
+choose preferences against `simcal`, then run the acceptance test against a
+table solved on the measured process, so preferences are not chosen on the
+family they are then scored on.
+
+---
+
+### `data/samples/btcusd_20260904T200134Z_bitstamp.jsonl.gz`
+
+**Status:** Checked — [x] Reviewed (2,944,722 bytes gzipped, **86,105 lines**,
+decompressed and counted; contents sampled)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** The largest fixture in the repository and the one
+`tests/test_bitstamp.cpp` replays as a real-data regression test via the
+`capture_btcusd` target registered at `CMakeLists.txt:118`.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** None — this file *is* a test fixture.
+
+**Performance Notes:** 2.9 MB of the repository's 8.4 MB. `.git` totals 14 MB,
+so LFS is not warranted; if a second capture of this size is ever committed, it
+becomes the right answer.
+
+**Security Notes:** Public market data from Bitstamp's `live_orders_btcusd` and
+`live_trades_btcusd` channels. No account identifier, no API key, no
+authentication token, no personally identifying information — order ids are
+exchange-assigned integers identifying an order, not a person. Obtaining it
+required no credentials and it grants none.
+
+**Market-Logic Notes:** btcusd at roughly $79,829 with a one-cent tick is the
+high-price end of the three-instrument spread, which is what makes the
+decimal-detection and price-window sizing testable: a fixed tick count that
+suits this book is absurd for xrpusd.
+
+---
+
+### `data/samples/btcusd_20260904T200134Z_snapshot.json`
+
+**Status:** Checked — [x] Reviewed (387,244 bytes, parsed in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** **4,418 bids and 3,665 asks, three columns per row**
+(price, amount, order id), touch at 79,829.24 / 79,829.25 — a one-cent spread.
+The three-column shape is what `BitstampDecoder` requires; a two-column snapshot
+means the endpoint aggregated by price and `tests/test_bitstamp.cpp` asserts
+that case fails loudly, as "L2 wearing L3's clothes".
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** None.
+
+**Performance Notes:** The largest single JSON in the repository at 387 KB;
+`slurp` reads it whole, which is fine at this size.
+
+**Security Notes:** Public REST order-book response. No credentials.
+
+**Market-Logic Notes:** This file sets the price window and the quoting
+precision for its capture, and `BitstampDecoder::detect_decimals` reads two
+price decimals from it. It does **not** seed the near-touch book — the seed
+guard excludes it — which is the decision worth 39 points of accuracy on xrpusd
+recorded in `tests/test_bitstamp.cpp:498-505`.
+
+---
+
+### `data/samples/ethusd_20260904T202638Z_bitstamp.jsonl.gz`
+
+**Status:** Checked — [x] Reviewed (1,247,241 bytes gzipped, **33,411 lines**,
+decompressed and counted)
+
+**Issues Found:** None in the file. It is the instrument with the open
+reconstruction defect.
+
+- **`docs/KNOWN-ISSUES.md` 1 is about ethusd**: the reconstructed book develops
+  holes near the touch over multi-hour captures. This ten-minute sample is short
+  enough not to show it, which is why validating the fix needs a fresh
+  eight-hour capture.
+
+**Severity:** n/a — no issues found for the file; the open issue is tracked as M17.
+
+**Why it matters:** ethusd is the instrument the whole Phase 5 chain is
+calibrated on — `FlowConfig::ethusd()`, `FlowConfig::ethusd_queue_reactive()`
+and `policy/ethusd.bin` all derive from it.
+
+**Fix Recommendation:** None for the file.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** None — fixture.
+
+**Performance Notes:** 33,411 lines over ten minutes is the 18.55 ms mean
+interarrival that `mean_gap_ns` encodes and that made the old event-count
+message budget 3.7 seconds.
+
+**Security Notes:** As for the btcusd capture — public channels, no credentials,
+no personal data.
+
+**Market-Logic Notes:** This is the capture behind every constant in
+`FlowConfig::Qr`, and the tables in `docs/06-queue-reactive-plan.md` are its
+measurements.
+
+---
+
+### `data/samples/ethusd_20260904T202638Z_snapshot.json`
+
+**Status:** Checked — [x] Reviewed (102,308 bytes, parsed in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** **874 bids and 1,395 asks**, touch at 2,454.69 / 2,454.70 —
+again a one-cent spread, and the thinnest book of the three by order count. That
+thinness is part of why ethusd is the instrument where reconstruction holes show
+up first.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** None.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** As for the btcusd snapshot.
+
+**Market-Logic Notes:** The 874/1,395 asymmetry at the moment of capture is a
+reminder that a snapshot is one instant, not a distribution — which is the
+argument for measuring depth from the stream over a warm-up window rather than
+from the snapshot.
+
+---
+
+### `data/samples/xrpusd_20260904T201339Z_bitstamp.jsonl.gz`
+
+**Status:** Checked — [x] Reviewed (1,388,944 bytes gzipped, **35,786 lines**,
+decompressed and counted)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** The instrument that produced the seed-guard measurement.
+Seeding the near-touch book from the snapshot scored 11.1% on xrpusd against
+90.2% for building from the stream alone, judged by the share of trades printing
+inside the touch (`apps/replay/main.cpp:282-287`). btcusd and ethusd scored the
+same either way, so this capture is the only evidence for a decision that
+applies to all three.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** None — fixture.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** As for the other two captures.
+
+**Market-Logic Notes:** It is also the one instrument on which
+`tools/calibrate.py` **could** identify an Avellaneda-Stoikov `k`
+(`k/se = 5.53`, no sign change across cutoffs), which is what makes the claim
+"two of three instruments" checkable rather than rhetorical.
+
+---
+
+### `data/samples/xrpusd_20260904T201339Z_snapshot.json`
+
+**Status:** Checked — [x] Reviewed (207,230 bytes, parsed in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a — no issues found
+
+**Why it matters:** **1,450 bids and 2,760 asks**, touch at 1.39722 / 1.39724 —
+**five** price decimals against btcusd's two. This file is the reason
+`BitstampDecoder::detect_decimals` exists: assuming either instrument's
+precision would silently mis-scale the other by a factor of a thousand, which is
+the failure `apps/replay/main.cpp:241-243` names.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** None.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** As for the other snapshots.
+
+**Market-Logic Notes:** A $1.40 book with a $0.00001 tick and a $79,829 book
+with a $0.01 tick cannot share a fixed tick window: the same 80,000 ticks is
+±0.5% of one and ±19% of the other, which is the calculation
+`apps/replay/main.cpp:177-181` performs to size the band from the snapshot mid.
+Having both instruments committed is what makes that code path exercised rather
+than argued.
+
+---
+
 ## 3. Consolidated summary
 
 **Scope:** all 116 tracked files, 22,088 lines, every one read in full. Binary
@@ -5347,6 +6320,9 @@ and are unaffected. `apps/evaluate`'s `base_params()` sets only `size` and
 | M16 | The differential book test skips its queue-position comparison whenever either book returns the −1 sentinel, which is the exact case where the fast book losing an order would show up. Own orders are only ever placed on the bid. | `tests/test_book_differential.cpp` | book |
 | M17 | ethusd's reconstructed book develops holes over multi-hour captures. Open, and correctly described in `docs/KNOWN-ISSUES.md` 1. Solution is periodic re-snapshotting; needs a fresh 8-hour capture to validate. | `src/bitstamp.cpp` | data |
 | M18 | The acceptance test is noise-dominated: mean −1,136 with CI [−3,872, +1,516], 6 of 16 seeds positive. | `apps/evaluate/main.cpp` | research |
+| M19 | The imbalance and queue bucket edges are declared in `tools/mdp_params.py` **and** in `include/lob/policy/state.hpp`, which says a drift means "the policy is solved against one book and applied to another". Nothing enforces it, and the table header's discretisation check cannot catch it because the bucket *count* is unchanged. | `tools/mdp_params.py`, `include/lob/policy/state.hpp` | policy |
+| M20 | `docs/figures/calibration.json`'s caveat is a hardcoded string claiming "Fill counts are 24-65 per instrument"; the file's own data says 15, 14 and 30. Its `k_stability_ratio` block correctly diagnoses btcusd and ethusd as unidentified (sign changes across cutoffs, btcusd's `k` at 0.46 standard errors from zero) while the `instruments` estimates ship with no marker saying so. | `tools/calibrate.py`, `docs/figures/calibration.json` | research |
+| M21 | `tools/record_bitstamp.py`'s docstring still says joining `live_trades` on order id is "the only way" to split cancels from fills. `include/lob/feed/bitstamp.hpp` and `docs/02` §3.1 both record that `amount_traded` supersedes it and that the join would be **wrong**, because the two channels are not on the same clock. | `tools/record_bitstamp.py` | data |
 
 ### Low
 Twenty-eight further findings are recorded in section 2 against the file they
@@ -5431,6 +6407,19 @@ are for a person who knows this codebase.
 - **PR: "Tooling fixes"** — 3 h. `replay --verify` cadence off a total counter;
   `tape` clears pending trades before `--start`; `check_capture` measures reach
   from the opening trade price. Closes **M9, M10, M15**.
+- **PR: "One source for the bucket edges"** — 2 h. Fold `kImbEdges` and
+  `kQueueEdges` into `MdpParams::hash()` so a drift between
+  `include/lob/policy/state.hpp` and `tools/mdp_params.py` makes `apps/solve`
+  refuse the table, and add a test comparing the header's edges against
+  `policy/mdp.json`. Closes **M19**.
+- **PR: "Derive the calibration caveat from the data"** — 1 h. Compute the fill
+  range rather than writing it, and add `identified` and `k_over_se` to each
+  instrument in `docs/figures/calibration.json` so an unusable estimate says so.
+  Closes **M20**.
+- **PR: "Documentation sync"** — 2 h. `README.md`'s test count and status line,
+  `docs/00` §5's layout, `docs/BASELINE.md`'s cycles column,
+  `tools/record_bitstamp.py`'s superseded docstring, and a `KNOWN-ISSUES.md`
+  entry for C1. Closes **M21** and the Low documentation-drift row.
 - **PR: "clang-tidy in CI"** — 2 h.
 
 ### Next month
@@ -5444,9 +6433,6 @@ are for a person who knows this codebase.
   comparison meaningless regardless of its width. Closes **M18**.
 - **The price impact of a trade**, which blocks the mean-reversion ratio,
   adverse selection and the lift together (`docs/06-queue-reactive-plan.md`).
-- **Documentation sync** — 2 h. `README.md`'s test count and status line,
-  `docs/00` §5's layout, `docs/BASELINE.md`'s cycles column, and a
-  `KNOWN-ISSUES.md` entry for C1.
 
 ---
 
@@ -5625,6 +6611,13 @@ recorded in the file section it belongs to:
    `tests/test_policy.cpp:492` constructs one — and hands it to `JoinTouch`,
    which never reads the risk parameters. The accurate statement is that no test
    exercises the defaults through a strategy that uses them.
+4. The P&L finding was first written as "the attribution path lost the inventory
+   term". Re-reading `include/lob/strat/driver.hpp:106-115` showed the exclusion
+   is deliberate and documented, and that the same comment names
+   `RunResult::pnl()` as "the number the comparison is settled on".
+   `apps/evaluate` follows that; `apps/backtest` is the only consumer of
+   `attr.total` in the repository and prints it as its bottom line. The defect
+   is the backtest's reporting, not the decomposition.
 
 **What this audit did not do.** It read the code and ran the test suite, the
 acceptance test and targeted numerical checks. It did not run the sanitizer or
@@ -5632,3 +6625,7 @@ acceptance test and targeted numerical checks. It did not run the sanitizer or
 is a separate pass and three of the findings above (M5's data race, M11's fuzz
 gap, L7's missing analyser) are precisely the kind those passes exist to
 surface.
+
+---
+
+All files have been fully audited and verified.
