@@ -498,9 +498,50 @@ mechanism this model does not have. Model II-b supplies the 0.22 at lag one —
 trades favour a thick opposite queue and thickness persists — and nothing
 supplies the tail.
 
-**Still open:** η 0.49 against 0.84 and adverse selection 17% against 33%, both
-wanting persistent order flow; and the kernel's power-law shape, which needs a
-second exponential term.
+## Long memory in the order flow — reproduced, and it does not fix η
+
+Lillo, Mike and Farmer: a large trader does not take a position in one trade,
+they work it over many child orders in the same direction. The sign sequence is
+then a renewal process whose runs have the metaorder length distribution, and if
+those are Pareto with exponent α the sign autocorrelation decays as a power law
+with exponent α − 1.
+
+So α is measurable from the decay rather than chosen. The sign autocorrelation
+falls by 3.1× (btcusd) and 4.9× (xrpusd) between lag 1 and lag 10 — decay
+exponents 0.49 and 0.69, so α ≈ 1.5 to 1.7. ethusd has 54 prints and cannot say.
+
+| lag | 1 | 2 | 5 | 10 | 20 |
+|---|---|---|---|---|---|
+| off | 0.27 | 0.16 | 0.03 | −0.01 | −0.01 |
+| α = 2.5 | 0.35 | 0.19 | 0.04 | 0.01 | −0.01 |
+| **α = 1.6** | **0.62** | **0.47** | **0.28** | **0.16** | 0.08 |
+| α = 1.2 | 0.81 | 0.72 | 0.59 | 0.50 | 0.43 |
+| btcusd | 0.56 | 0.48 | 0.26 | 0.18 | −0.03 |
+| ethusd | 0.35 | 0.39 | 0.10 | 0.03 | −0.28 |
+
+α = 1.6 tracks btcusd at every lag, and it came from the decay rate rather than
+from these numbers, so the whole autocorrelation function is a prediction the
+mechanism got right.
+
+**And the price still does not trend.** η is 0.49 with this off and 0.50 with it
+on at either exponent — no movement at all, against 0.84 and 0.48 on the
+instruments.
+
+The reason is the rest of the chain. Persistent flow can only produce a
+persistent price if trades move the price, and here they barely do: a trade is a
+median 0.067 average events against a touch of 4.29, the queue empties by
+cancellation far more often than by trading, and P(mid moves within a second |
+print) is 21% against ethusd's 57%. **The gap is the price impact of a trade,
+not the memory of the flow.** That is the next thing, and it was not visible
+until the flow memory was in place and ruled out.
+
+It costs a little adverse selection — 17.2% off against 13.4% on — because a
+metaorder overrides which side is hit, and that was the side Model II-b chose
+from the queue state. Kept anyway: the flow property is real, measured and
+reproduced, and the statistic it costs is one already broken by the impact gap.
+
+**Still open:** the price impact of a trade, which now blocks both η and adverse
+selection; and the kernel's power-law shape, which needs a second exponential.
 
 ## Model II-a: what was implemented, and what level_ratio actually needed
 

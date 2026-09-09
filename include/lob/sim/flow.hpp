@@ -716,6 +716,66 @@ struct FlowConfig {
     // understanding. Half the price formation stays endogenous, which is what
     // a queue-reactive model is for.
     double theta_reinit = 0.3;
+
+    // ---- long memory in the order flow -------------------------------------
+    //
+    // The one mechanism left between this process and a price that trends. Its
+    // absence is measurable: the autocorrelation of the trade SIGN runs 0.35 to
+    // 0.59 at lag one on the three instruments and is still 0.12 to 0.18 ten
+    // trades later, while this process gives 0.22 at lag one and nothing by
+    // lag five. Model II-b supplies that 0.22 -- trades favour a thick opposite
+    // queue and thickness persists -- and nothing supplies the tail.
+    //
+    // The cause, per Lillo, Mike and Farmer (2005), is ORDER SPLITTING: someone
+    // who wants a large position does not take it in one trade, they work it
+    // over many child orders in the same direction. The sign sequence is then
+    // a renewal process whose runs have the length distribution of metaorders,
+    // and if those are Pareto with exponent alpha, the sign autocorrelation
+    // decays as a power law with exponent alpha - 1.
+    //
+    // So alpha is measurable from the decay rather than chosen. On our
+    // captures the sign autocorrelation falls by a factor of 3.1 (btcusd) and
+    // 4.9 (xrpusd) between lag 1 and lag 10, which is a decay exponent of 0.49
+    // and 0.69 and so alpha near 1.5 to 1.7. Ethusd has 54 prints and cannot
+    // say. 1.6 is the middle of what the two instruments that can say do say.
+    //
+    // Zero or less disables it and the sign is drawn afresh every trade, which
+    // is what this process did before.
+    //
+    // MEASURED. The sign autocorrelation this produces, against the two
+    // instruments with enough prints to say:
+    //
+    //     lag             1      2      5     10     20
+    //     off          0.27   0.16   0.03  -0.01  -0.01
+    //     alpha 2.5    0.35   0.19   0.04   0.01  -0.01
+    //     alpha 1.6    0.62   0.47   0.28   0.16   0.08
+    //     alpha 1.2    0.81   0.72   0.59   0.50   0.43
+    //     btcusd       0.56   0.48   0.26   0.18  -0.03
+    //     ethusd       0.35   0.39   0.10   0.03  -0.28
+    //
+    // 1.6 tracks btcusd at every lag, and it was derived from the decay rate
+    // rather than tuned to these numbers, so the whole autocorrelation function
+    // is a prediction the mechanism got right.
+    //
+    // AND IT DOES NOT MAKE THE PRICE TREND, which is what it was reached for.
+    // eta is 0.49 with this off and 0.50 with it on at either exponent -- no
+    // movement at all against the instruments' 0.84 and 0.48.
+    //
+    // The reason is the rest of the chain. Persistent flow can only produce a
+    // persistent price if trades move the price, and in this process they
+    // barely do: a trade is a median 0.067 average events against a touch of
+    // 4.29, the queue empties by cancellation far more often than by trading,
+    // and P(the mid moves within a second | a print) is 21% against ethusd's
+    // 57%. Making the sign of a trade persistent cannot matter while the trade
+    // itself does not. The gap is in the price impact of a trade, not in the
+    // memory of the flow.
+    //
+    // It also costs a little adverse selection -- 17.2% with it off against
+    // 13.4% on -- because a metaorder overrides which side is hit, and that is
+    // the side Model II-b had chosen out of the queue state. Kept anyway: the
+    // flow property is real, measured, and reproduced, and the statistic it
+    // costs is one already broken by the impact gap above.
+    double meta_alpha = 1.6;
   };
   Qr qr;
 
@@ -1257,6 +1317,26 @@ class FlowGenerator {
   // matching engine like any other aggressive order, so it consumes the front
   // of the queue and a fill means queue position actually mattered.
   BookEvent qr_trade(BookEvent e, Side resting) noexcept {
+    // A metaorder overrides which side is hit, for as long as it has children
+    // left. The RATE at which trades arrive is untouched -- Model II-b still
+    // decides when, out of the queue state -- so the total trade count is
+    // exactly what was fitted and only the sign sequence changes. That split
+    // is the physical one: someone working a large buy takes the ask whatever
+    // the book looks like, and the book decides their timing.
+    if (cfg_.qr.meta_alpha > 0.0) {
+      if (meta_left_ <= 0) {
+        meta_side_ = (rng_() & 1) ? 1 : 0;
+        // Pareto: P(L > n) ~ n^-alpha, by inverse transform. Capped, because
+        // an alpha near one has a mean that barely converges and one draw
+        // should not run for the length of the simulation.
+        const double u = uniform();
+        const double len = std::pow(u > 1e-12 ? u : 1e-12, -1.0 / cfg_.qr.meta_alpha);
+        meta_left_ = static_cast<int>(len < 4096.0 ? len : 4096.0);
+        if (meta_left_ < 1) meta_left_ = 1;
+      }
+      resting = (meta_side_ == 0) ? Side::Bid : Side::Ask;
+      --meta_left_;
+    }
     e.type     = EventType::Aggress;
     // A Bid aggressor buys and lifts the ask, so taking the BID queue needs an
     // Ask aggressor. Getting this backwards is what mislabelled every synthetic
@@ -1401,6 +1481,8 @@ class FlowGenerator {
   std::uint64_t     informed_ = 0, uninformed_ = 0;
   Ticks             ref_seen_ = 0;
   std::vector<BookEvent> pending_;    // a reinitialisation, drained one at a time
+  int               meta_side_ = -1;  // resting side the current metaorder hits
+  int               meta_left_ = 0;   // child orders it still has to place
   double            excite_[2] = {0.0, 0.0};   // post-trade cancel excitation
   Nanos             excite_at_ = 0;
   bool              has_bid_ = false;

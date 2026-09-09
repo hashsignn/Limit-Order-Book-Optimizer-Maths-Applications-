@@ -286,7 +286,7 @@ int main(int argc, char** argv) {
   double band_pct = 0.02;
   int synthetic = 0;
   bool calibrated = false, queue_reactive = false;
-  double excite = -1.0, excite_tau = -1.0, theta = -1.0, reinit = -1.0;
+  double excite = -1.0, excite_tau = -1.0, theta = -1.0, reinit = -1.0, alpha = -99.0;
   // Negative leaves the FlowConfig default in place; see apps/evaluate for why
   // a tool holding its own copy of a default is a way to measure a process
   // nobody configured.
@@ -320,6 +320,7 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--excite-tau") == 0 && nx) { excite_tau = std::atof(argv[++i]); }
     else if (std::strcmp(argv[i], "--theta") == 0 && nx) { theta = std::atof(argv[++i]); }
     else if (std::strcmp(argv[i], "--reinit") == 0 && nx) { reinit = std::atof(argv[++i]); }
+    else if (std::strcmp(argv[i], "--meta-alpha") == 0 && nx) { alpha = std::atof(argv[++i]); }
     else if (std::strcmp(argv[i], "--seed")    == 0 && nx) seed = std::strtoull(argv[++i], nullptr, 10);
     else if (std::strcmp(argv[i], "--drift")   == 0 && nx) drift = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--informed") == 0 && nx) informed = std::atof(argv[++i]);
@@ -411,6 +412,7 @@ int main(int argc, char** argv) {
     if (excite_tau > 0.0)  fc.qr.excite_tau_s = excite_tau;
     if (theta >= 0.0)      fc.qr.theta        = theta;
     if (reinit >= 0.0)     fc.qr.theta_reinit = reinit;
+    if (alpha > -99.0)     fc.qr.meta_alpha   = alpha;
     FlowGenerator gen{fc};
     OrderBook book{5'000, 10'240, 1 << 18};
     MatchingEngine match{book};
