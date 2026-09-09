@@ -21,11 +21,11 @@ Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
 
 - `.github/`
   - `workflows/`
-    - [ ] `ci.yml`
+    - [x] `ci.yml`
 - [x] `.gitignore`
 - [x] `All Rights Reserved`
 - [x] `CMakeLists.txt`
-- [ ] `CMakePresets.json`
+- [x] `CMakePresets.json`
 - [ ] `README.md`
 - `apps/`
   - `backtest/`
@@ -159,14 +159,14 @@ Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
   - [x] `test_util.hpp`
 - `tools/`
   - [ ] `calibrate.py`
-  - [ ] `check_capture.py`
+  - [x] `check_capture.py`
   - [ ] `figures.py`
   - [x] `fit_queue_reactive.py`
-  - [ ] `jitter_baseline.sh`
+  - [x] `jitter_baseline.sh`
   - [x] `mdp_params.py`
-  - [ ] `record_bitfinex.py`
+  - [x] `record_bitfinex.py`
   - [x] `record_bitstamp.py`
-  - [ ] `record_coinbase.py`
+  - [x] `record_coinbase.py`
 ---
 
 ## 2. File-by-file audit
@@ -3558,6 +3558,293 @@ idea in the file: it runs the same update against books of 5,000, 50,000 and
 cost tracks depth, an update rule is walking the book and the whole design
 premise is broken." That turns an architectural claim into a number, which is
 what a benchmark is for.
+
+---
+
+### `.github/workflows/ci.yml`
+
+**Status:** [x] Reviewed (77 lines, read in full)
+
+**Issues Found:** The extended fuzz pass omits the only target that consumes
+untrusted input. The `tsan` preset is never run. Two supply-chain hardening
+gaps.
+
+- **`fuzz_bitstamp` is excluded from the extended fuzzing step** (lines 62-66,
+  which run `fuzz_book` and `fuzz_matching` at 200,000 runs each).
+  `CMakeLists.txt:189` registers `fuzz_bitstamp_short` at 20,000 runs under
+  ctest, so it does run — at **one tenth** the depth of the two targets that
+  consume a POD the project built itself. The JSON scanner is the only code in
+  the repository that parses bytes from a public network, and it gets the least
+  fuzzing.
+- **The `tsan` preset in `CMakePresets.json` has no CI job.** A build
+  configuration nothing runs will stop compiling without anyone noticing.
+- **No `permissions:` block.** The workflow inherits the repository's default
+  token scope. `permissions: contents: read` at the top costs one line and
+  removes write access from every job.
+- **Actions are pinned by tag, not by commit SHA** (`actions/checkout@v4`, line
+  29). A moved tag re-points the action at different code.
+- **No `timeout-minutes`.** A fuzz target that hangs consumes the six-hour
+  default before the job is killed.
+
+**Severity:** Medium (the fuzz omission), Minor (the rest)
+
+**Why it matters:** The fuzz gap is the one that matters. The threat model in
+`fuzz/fuzz_bitstamp.cpp`'s header is correct — a capture file "arrived over a
+public websocket and was written to disk unmodified" — and that target is where
+the effort should be concentrated, not where it is thinnest.
+
+**Fix Recommendation:**
+```yaml
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    timeout-minutes: 45
+    ...
+      - name: Extended fuzzing
+        if: matrix.preset == 'release'
+        run: |
+          ./build/${{ matrix.preset }}/fuzz_book      -runs=200000 -max_len=512
+          ./build/${{ matrix.preset }}/fuzz_matching  -runs=200000 -max_len=512
+          ./build/${{ matrix.preset }}/fuzz_bitstamp  -runs=200000 -max_len=4096
+```
+`fuzz_bitstamp` wants a larger `max_len` than the other two, because a realistic
+JSON frame is longer than 512 bytes. Add a fourth matrix entry for `tsan`.
+
+**Refactor Suggestion:** Add a `concurrency` group keyed on the ref, so a second
+push cancels the first job rather than running both.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** The split at lines 50-57 is well judged: sanitizer builds
+run the fast differential pass and the optimised jobs run `--long`, "which is
+the same code over many more events". So ASan gets breadth and the release build
+gets depth, rather than paying for both twice.
+
+**Security Notes:** As above — the two hardening items, plus the observation
+that `pull_request` on a public repository gives fork PRs a read-only token by
+default, so the missing `permissions:` block is defence in depth rather than an
+open hole.
+
+**Market-Logic Notes:** Not applicable. Two judgement calls are worth keeping:
+`|| true` on the libFuzzer runtime install (line 39), with the comment "Without
+it CMake falls back to the portable driver, which still runs the same targets —
+so this is an upgrade, not a requirement"; and the smoke-run step's framing
+(lines 68-69), "CI machines are noisy and shared, so this checks that it works,
+not that it is fast." A CI job that asserted latency numbers on a shared runner
+would fail constantly and be disabled within a month.
+
+---
+
+### `CMakePresets.json`
+
+**Status:** [x] Reviewed (54 lines, read in full)
+
+**Issues Found:** The declared minimum CMake version cannot read this file. The
+`tsan` preset is unreachable from CI.
+
+- **`"version": 3` requires CMake 3.21**, but line 3 declares
+  `cmakeMinimumRequired` as 3.20.0. Presets schema v2 is the 3.20 version; v3
+  arrived in 3.21. A CMake 3.20 that honoured the stated minimum would reject
+  the file it is stated in.
+- **`tsan` is defined and never used** — see the CI section.
+- **`LOB_NATIVE` is `OFF` for debug, asan and tsan but left ON for release**, so
+  release builds carry `-march=native` (`CMakeLists.txt:39`). Correct for a
+  benchmark build; worth knowing that a release binary is then not portable off
+  the machine that built it.
+
+**Severity:** Minor (all)
+
+**Fix Recommendation:** Set `"cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 }`,
+or drop to `"version": 2` if 3.20 support is wanted (nothing here needs v3
+features).
+
+**Refactor Suggestion:** None. Four presets, each with one clear purpose, and
+the `displayName`s say what they are for.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** `-fno-sanitize-recover=all` on both sanitizer presets is the
+right choice: without it, UBSan reports and continues, so a CI job can print a
+violation and still exit zero.
+
+**Market-Logic Notes:** Not applicable.
+
+---
+
+### `tools/jitter_baseline.sh`
+
+**Status:** [x] Reviewed (43 lines, read in full)
+
+**Issues Found:** One inherited argument-validation gap.
+
+- **`SECONDS_TO_RUN` is unvalidated** (line 11) and passed straight to
+  `jitter_probe`, which casts a negative value into a `std::uint64_t` deadline
+  and spins. The root cause is recorded under `apps/jitter_probe/main.cpp`; the
+  script simply forwards it.
+
+**Severity:** Minor
+
+**Fix Recommendation:** Fix it in `jitter_probe` rather than here, so both entry
+points are covered.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** n/a.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** The shell is careful. `set -euo pipefail`, every expansion
+quoted, `2>/dev/null || true` on each optional probe so a missing
+`/sys` entry degrades to `n/a` rather than aborting under `-e`, and the
+`cyclictest ... || echo` at line 38 keeps a permission failure from killing the
+run. Notably it uses `SECONDS_TO_RUN` rather than `SECONDS`, which is a bash
+special variable holding the shell's uptime — overwriting it is a classic and
+silent bug, and this avoids it.
+
+**Market-Logic Notes:** Not applicable. The machine section (lines 14-21) prints
+governor, `isolcpus`, transparent hugepages and the TSC flags before any number,
+which is the right order: those four settings determine whether the numbers
+below them mean anything.
+
+---
+
+### `tools/check_capture.py`
+
+**Status:** [x] Reviewed (166 lines, read in full)
+
+**Issues Found:** The price-reach calculation does not implement the reasoning
+in the comment above it.
+
+- **Line 104:**
+  ```python
+  reach = max(abs(hi - lo), abs(lo - hi)) / mid0
+  ```
+  `abs(hi - lo)` and `abs(lo - hi)` are the same number, so the `max` is a
+  no-op and this is just the full range over the midpoint of the range. The
+  comment directly above says the window "has to reach from that **opening
+  price** to the furthest the market got in either direction — which is not the
+  same as half the range, when the move is one-sided." That is right, and it
+  needs the opening trade price, which `scan()` never records.
+- **`if r["t0"] and r["t1"]`** (line 68) treats a timestamp of 0 as absent.
+  Microtimestamps are never 0, so this is a note.
+- **Only `*_bitstamp.jsonl.gz` is globbed** (line 38), so a partially written
+  uncompressed capture from a crashed recorder is invisible to the checker.
+
+**Severity:** Medium (the reach calculation, because its output is a
+recommended `--band-pct` and a one-sided move is exactly when the recommendation
+matters)
+
+**Fix Recommendation:** Record the first trade price and measure from it:
+```python
+# in scan(): capture the first trade price
+if first is None: first = v
+...
+# in main():
+reach = max(hi - first, first - lo) / first
+```
+That is what the comment describes, and for a one-sided move it gives a
+materially different answer from the current expression.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** No test covers this tool. A fixture capture with a
+deliberately one-sided price move, asserting the recommended band covers it,
+would pin the fix.
+
+**Performance Notes:** One pass over the bytes with substring searches before
+any JSON parsing, and the reason is stated: "Full JSON parsing 10M lines is
+minutes; the fields that matter are found by substring first and parsed only
+when present." Correct trade for a pre-flight checker.
+
+**Security Notes:** Pure standard library, no network, no credentials, and
+`gzip.open(..., errors="replace")` so a corrupt file yields replacement
+characters rather than an exception.
+
+**Market-Logic Notes:** Two decisions here are right and are the kind that are
+usually got wrong.
+- **The price range is taken from TRADE prices, not order prices** (lines
+  26-30): "Someone always has a sell resting at 999,999,999 and a buy at 0.01;
+  the min and max of the order book say nothing about where the market was, and
+  sizing the price window from them would ask for a window a billion wide. A
+  print is by definition a price both sides agreed on."
+- **A mixed-instrument directory is refused outright** (lines 88-96) rather than
+  producing pooled nonsense, with the concrete example: `data/samples` holds
+  xrpusd at $1.40 and btcusd at $79,875, and "the price range computed over both
+  asks for a window 200% wide."
+
+---
+
+### `tools/record_bitfinex.py` and `tools/record_coinbase.py`
+
+**Status:** [x] Reviewed (232 + 242 lines, read in full)
+
+**Issues Found:** Neither reconnects, which is the defect that was found and
+fixed in the Bitstamp recorder and never carried across. One unvalidated JSON
+response. One unbounded frame size.
+
+- **No reconnect handling in either.** `tools/record_bitstamp.py` opens its
+  websocket inside a retry loop with backoff and a fresh REST snapshot per
+  session (lines 91-149), because "any reconnect means messages were missed".
+  Both of these open the socket once (`record_bitfinex.py:110`,
+  `record_coinbase.py:99`) inside a single `async with`. A dropped connection
+  three minutes into an eight-hour run ends the capture, and the operator finds
+  out afterwards.
+- **`record_coinbase.py:131`: `requests.get(REST_URL...).json()`** with no
+  `raise_for_status()` and no shape check — the identical open finding already
+  recorded against `tools/record_bitstamp.py:207`. An HTML error page raises
+  inside the recording loop.
+- **`websockets.connect(..., max_size=None)`** in both (and in the Bitstamp
+  recorder) removes the default 1 MiB frame limit. That is necessary — a
+  full-book snapshot frame exceeds it — but it means a malfunctioning or hostile
+  endpoint can drive the client to buffer without bound.
+
+**Severity:** Medium (no reconnect), Minor (the other two)
+
+**Why it matters:** A capture is hours of wall time that cannot be re-run for a
+past market. Losing one to a transient disconnect is the most expensive
+failure these scripts can have, and the fix already exists in the sibling file.
+
+**Fix Recommendation:** Lift the retry loop out of `record_bitstamp.py` into a
+shared helper and use it from all three. At minimum:
+```python
+r = requests.get(REST_URL.format(product=self.product), timeout=30)
+r.raise_for_status()
+snap = r.json()
+if not isinstance(snap.get("bids"), list) or not snap.get("asks"):
+    raise RuntimeError(f"unexpected snapshot shape: {sorted(snap)[:6]}")
+```
+
+**Refactor Suggestion:** The three recorders share their file rotation, gzip
+handling, SIGINT trap and reporting almost verbatim. One `Recorder` base class
+with a per-venue `_record()` would remove three copies of the same rotation
+logic — and would have meant the reconnect fix landed everywhere at once.
+
+**Tests Missing:** None practical; these need a live endpoint. The decoders they
+feed are covered by `tests/test_bitstamp.cpp` and `fuzz/fuzz_bitstamp.cpp`.
+
+**Performance Notes:** Both write through `gzip.open(path, "wt")`, which is
+buffered. A clean `SIGINT` is trapped and flushes; a `SIGKILL` truncates the
+gzip stream. `LineReader` and the decoder both handle a truncated final line, so
+the loss is bounded to the last block.
+
+**Security Notes:** **Clean.** Both connect over `wss://` and `https://` with
+default certificate verification; there is no `verify=False`, no
+`ssl._create_unverified_context`, no API key, no token, no signing, and no
+credential of any kind. Both headers state it explicitly:
+`record_bitfinex.py` line 5, "a public endpoint that needs no API key", and
+`record_coinbase.py` line 28, "No API key: Coinbase Exchange market data
+channels are public." That is consistent with the project's stated rule that
+nothing here can send an order.
+
+**Market-Logic Notes:** `record_bitfinex.py`'s header (lines 5, 36) records why
+three venues exist: Bitfinex publishes true order-by-order data with order ids
+on a public endpoint, while "Coinbase's full channel has no such window, but now
+requires an API key." Keeping the comparison in the file, rather than in a
+commit message, is what stops the next person re-evaluating it from scratch.
 
 ---
 
