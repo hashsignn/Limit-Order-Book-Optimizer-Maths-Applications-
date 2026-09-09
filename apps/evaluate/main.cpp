@@ -62,7 +62,7 @@ SimConfig make_config(std::uint64_t seed, bool latency, Nanos median_ns) {
   // docs/KNOWN-ISSUES.md 4 and 5. Every acceptance number recorded before this
   // was measured on a process whose touch took 35,000 events to clear, sampled
   // 40,000 events to a decision epoch.
-  c.flow             = FlowConfig::ethusd();
+  c.flow             = FlowConfig::ethusd_queue_reactive();
   c.flow.seed        = seed;
   c.flow.mid         = 10'000;
   if (drift >= 0.0)      c.flow.drift_prob    = drift;
