@@ -292,6 +292,175 @@ struct FlowConfig {
   // Twelve, because it is the only value within 30% on all four at once. Eight
   // matches the touch count best and then overshoots the move rate threefold
   // and leaves a side of the book empty 1.8% of the time.
+  // ---- Model I: rates that depend on the queue ----------------------------
+  // Huang, Lehalle & Rosenbaum (arXiv:1312.0563), the model docs/06 specifies.
+  // Everything above emits events at rates that do not depend on the book at
+  // all, and a removal picks a uniformly random resting order, which is why the
+  // generator's cancel intensity comes out proportional to the order count for
+  // a reason that has nothing to do with the book being reactive.
+  //
+  // Here each (side, level) is a queue with its own birth-and-death rates, and
+  // those rates are functions of that queue's own size measured in average
+  // event sizes -- q = ceil(depth / aes), the paper's axis and now the
+  // estimator's. The book is then 2K independent queues and the event stream
+  // is a Markov jump process: total rate Lambda, one event drawn in proportion
+  // to its own rate, time advanced by an exponential draw. The interevent
+  // distribution comes out of the model rather than being imposed, which is
+  // the second thing the fixed-weight path gets wrong.
+  //
+  // THE SHAPES, and where each comes from.
+  //
+  //   adds     Flat in q at the touch, decaying with q behind it, and LOWER at
+  //            an empty queue. Measured +0.10 +- 0.24 on btcusd and +0.10 +-
+  //            0.01 in the fixed-weight generator, so this is the one shape
+  //            already right and the paper agrees. The drop at zero is the
+  //            paper's: an order alone in an empty queue has created a new best
+  //            limit and has no idea where the efficient price is.
+  //
+  //   cancels  Rising and concave, saturating -- the paper's Q1 curve rises to
+  //            about 25 AES and then flattens, explicitly NOT the linear rate
+  //            of Cont, Stoikov & Talreja, because priority is worth more in a
+  //            long queue and people do not throw it away.
+  //
+  //   trades   Falling, close to exponential. This is the paper's central
+  //            shape and the one the generator has BACKWARDS: takers rush for
+  //            liquidity when it is scarce and wait for a better price when it
+  //            is abundant. Measured -0.83 +- 0.11 on btcusd against +0.07 in
+  //            the generator. Market orders reach only the best queue, so the
+  //            rate is zero behind it.
+  //
+  // A CAVEAT THAT IS NOT SMALL: THESE SHAPES ARE NOT MEASURED HERE.
+  //
+  // Only the SCALES below are fitted. The three shapes are the paper's, taken
+  // on its authority, and ten minutes per instrument cannot check them. The
+  // slope against queue size at the touch, on the committed samples:
+  //
+  //                 ethusd          btcusd          xrpusd
+  //     adds     +0.38 +- 0.35   +0.10 +- 0.24   +0.85 +- 0.25
+  //     cancels  -0.26 +- 0.17   -1.03 +- 0.39   +0.18 +- 0.36
+  //     trades      too few      -0.83 +- 0.11      too few
+  //
+  // The three instruments do not agree with each other on any row. Two of the
+  // three cancel slopes are indistinguishable from flat and the third is
+  // negative at 2.6 standard errors, so our data neither confirms the paper's
+  // rising cancel rate nor refutes it -- it cannot see it. The trade slope
+  // rests on 179 events on one instrument; the other two produced too few
+  // trades to fit at all.
+  //
+  // So: the paper supplies the shapes, the captures supply the scales, and the
+  // decay constants are the paper's qualitative curves with constants nobody
+  // has fitted. The eight-hour captures are what would settle them. Nothing
+  // downstream should be read as though these curves were measured here.
+  struct Qr {
+    static constexpr int kLevels = 4;    // modelled queues each side
+    bool   enabled = false;
+
+    // The queue axis. `aes` is the average event size the queue is counted in,
+    // the same quantity apps/stats measures and writes beside every row.
+    double aes = 240.0;                  // lots
+
+    // THE SCALES ARE FITTED, THE SHAPES ARE THE PAPER'S.
+    //
+    // A birth-and-death queue's stationary distribution depends only on the
+    // RATIO of arrival to departure, so the shape and the speed separate
+    // cleanly: the ratios set the depth distribution, the overall scale sets
+    // the event rate. Fitting exploits that -- search the two ratios per level
+    // against the depth targets, then divide once for the rate -- and it means
+    // no target was traded against another.
+    //
+    // Targets, from the ethusd ten-minute capture, per side, exposure-weighted:
+    //
+    //     level          0      1      2      3
+    //     mean q      4.29   0.49   0.43   0.39
+    //     P(q = 0)    0.00   0.79   0.80   0.85
+    //     events/s    2.34   0.474  0.360  0.373
+    //
+    // and what these constants reproduce through the closed form:
+    //
+    //     mean q      4.29   0.49   0.43   0.39     exact by construction
+    //     P(q = 0)    ----   0.793  0.803  0.829
+    //     events/s    2.34   0.474  0.360  0.373    exact by construction
+    //
+    // P(q=0) is not a target at the touch and cannot be: level 0 here is the
+    // BEST queue, so it is empty only when a whole side is, which the closed
+    // form has no way to express. add_empty[0] is therefore not fitted -- it is
+    // the paper's drop at an empty queue, 0.45 of the flat rate, and what it
+    // governs in this implementation is how fast an emptied side refills.
+    // Fitting it landed on 0.14 against an add rate of 2.9, a twentyfold
+    // slower refill that would have left the book one-sided.
+
+    // lambda^L(q) = q == 0 ? add_empty : add_rate * exp(-add_decay * (q - 1))
+    double add_rate  [kLevels] = {1.3013, 1.0522, 0.7976, 1.2526};  // per second, per side
+    double add_empty [kLevels] = {0.5856, 0.0631, 0.0558, 0.0376};
+    double add_decay [kLevels] = {0.000,  0.120,  0.140,  0.150};   // flat at the touch
+
+    // lambda^C(q) = cancel_rate * q / (q + cancel_half),  zero at q = 0
+    double cancel_rate[kLevels] = {2.3430, 2.2787, 1.8814, 2.3415};
+    double cancel_half[kLevels] = {2.500,  2.000,  2.000,  2.000};  // in AES
+
+    // lambda^M(q) = trade_rate * exp(-trade_decay * (q - 1)),  zero at q = 0
+    // and zero behind the touch: a market order takes the best queue.
+    //
+    // trade_rate is fitted, to the share of removals at the touch that are
+    // trades rather than cancels: 0.1019 / (1.338 + 0.1019) = 7.08% measured,
+    // 7.09% reproduced. It was 0.0657 before, inherited from a ratio between
+    // two numbers this author had picked by hand -- which is not a fit, and was
+    // not one when it was first written down as though it were.
+    //
+    // trade_decay is NOT fitted. It is the paper's exponential decay with a
+    // constant nobody has measured. What it produces here is a log-log slope of
+    // -0.42 +- 0.06 against btcusd's -0.83 +- 0.11: the sign is right, and the
+    // sign was backwards before Model I, while the steepness is not settled by
+    // 179 trade events on one instrument.
+    double trade_rate  = 0.1851;
+    double trade_decay = 0.240;
+
+    // Orders the price has walked away from.
+    //
+    // The model describes kLevels queues either side of p_ref. A price move
+    // relabels every queue, and an order that falls past the outermost one
+    // becomes invisible to it: never counted in a queue, never eligible for
+    // cancellation, resting for ever. Measured, the book grew from 101 to 408
+    // orders over two million events and was still climbing -- a wall of stale
+    // depth behind the touch that nothing in the model can remove.
+    //
+    // The paper never meets this because it simulates K queues and no book
+    // behind them; when p_ref moves it shifts the queues and redraws the
+    // outermost from its invariant measure, so nothing is ever stranded. We
+    // have a real order book, so the strays are real orders.
+    //
+    // They cancel independently, each on its own clock, at the rate the
+    // outermost modelled queue cancels a queue holding one average event:
+    // cancel_rate[K-1] / (1 + cancel_half[K-1]). That is derived from the
+    // fitted constants rather than being a new free parameter, and it is the
+    // paper's own K = 3 finding applied outward -- Q_4 and Q_5 behave like
+    // Q_3, so an order past the window is treated as one at the edge of it.
+    [[nodiscard]] double far_cancel_per_order() const noexcept {
+      return cancel_rate[kLevels - 1] / (1.0 + cancel_half[kLevels - 1]);
+    }
+
+    // Model III: the chance the reference price follows an emptied best queue.
+    // The paper calibrates this against the ten-minute volatility and the
+    // mean-reversion ratio; that is gap 5 of docs/06 and is NOT done here. One
+    // is the paper's own "purely order book driven" setting, where every
+    // emptied queue moves the price and the volatility that results is the
+    // maximal mechanical volatility -- which the paper finds is 5 bps against
+    // an empirical 14, so this cannot be the whole story and is not claimed to
+    // be.
+    double theta = 1.0;
+  };
+  Qr qr;
+
+  // The calibrated process with Model I flow instead of fixed weights. The
+  // clock is not set here: under Model I the interevent time is an exponential
+  // draw at the total rate, so mean_gap_ns does not apply and the event rate is
+  // whatever the intensities add up to.
+  [[nodiscard]] static FlowConfig ethusd_queue_reactive() noexcept {
+    FlowConfig c = ethusd();
+    c.qr.enabled = true;
+    return c;
+  }
+
   [[nodiscard]] static FlowConfig ethusd() noexcept {
     FlowConfig c;
     c.levels      = 8;
@@ -337,6 +506,8 @@ class FlowGenerator {
       pending_impact_ = 0;
     }
     if (uniform() < cfg_.drift_prob) drift();
+
+    if (cfg_.qr.enabled) return next_queue_reactive(e);
 
     // Nothing resting yet: only Add is legal.
     const bool can_touch_existing = !live_.empty();
@@ -452,6 +623,258 @@ class FlowGenerator {
 
   void drift() noexcept { mid_ += (rng_() & 1) ? 1 : -1; }
 
+  // ---- Model I ------------------------------------------------------------
+  // Where a queue sits. ANCHORED TO THE REFERENCE PRICE, not to the touch, and
+  // that is not a detail -- it is the difference between a model and a book
+  // whose spread can only ever widen.
+  //
+  // The first version indexed levels from the current best price. Every add
+  // then landed at or behind whatever the touch happened to be, so nothing ever
+  // arrived INSIDE the spread, and once the spread opened there was no
+  // mechanism to close it again. Measured: median spread 4 ticks against
+  // ethusd's 1, at one tick 1% of the time against 91%, and the mid moving in
+  // 0.4% of epochs against 2%. tools/mdp_params.py refused the process outright
+  // -- "NOT USABLE for the MDP: the mid essentially never moves" -- which is
+  // exactly right and is why that check exists.
+  //
+  // Huang et al. index Q_i at i - 0.5 ticks from p_ref, so Q_1 on each side is
+  // the half-tick either side of it: a limit order arriving at an empty Q_1 IS
+  // an order inside the spread, and the paper names that as one of the three
+  // events that move p_ref. On an integer-tick book the same thing is mid_ for
+  // the bid side and mid_ + 1 for the ask, one tick apart, which is the spread
+  // these instruments sit at.
+  //
+  // mid_ IS p_ref here. It already carries the exogenous drift and the informed
+  // impact, so the reference price has those two sources plus the endogenous
+  // one below, which is what the paper's Model III adds to Model I.
+  [[nodiscard]] Ticks queue_price(int side, int level) const noexcept {
+    return (side == 0) ? mid_ - static_cast<Ticks>(level)
+                       : mid_ + 1 + static_cast<Ticks>(level);
+  }
+
+  // Depth and order count at each modelled queue, read off what the generator
+  // believes is resting. O(live_) per event, which is nothing on a book of the
+  // size this path runs at -- the calibrated process holds about twelve orders
+  // -- and much harder to get wrong than an incrementally maintained index.
+  struct QueueState {
+    Qty qty[2][FlowConfig::Qr::kLevels];
+    int n[2][FlowConfig::Qr::kLevels];
+    int far[2];        // resting outside the modelled window, per side
+  };
+  [[nodiscard]] QueueState queue_state() const noexcept {
+    QueueState st{};
+    for (const Live& l : live_) {
+      const int side = (l.side == Side::Bid) ? 0 : 1;
+      const Ticks anchor = queue_price(side, 0);
+      const Ticks d = (side == 0) ? (anchor - l.price) : (l.price - anchor);
+      // A negative distance is an order on the wrong side of p_ref, which a
+      // price move can produce. It is as stranded as a far one and is counted
+      // with them rather than dropped.
+      if (d < 0 || d >= FlowConfig::Qr::kLevels) { ++st.far[side]; continue; }
+      st.qty[side][d] += l.qty;
+      ++st.n[side][d];
+    }
+    return st;
+  }
+
+  // Model III's endogenous price move: when a best queue is empty the reference
+  // price follows it, with probability theta. The paper triggers this on the
+  // three events that can empty a best queue or put an order inside the spread;
+  // checking the state after each event is the same condition, reached from the
+  // state rather than from the event that caused it, and it cannot miss one.
+  //
+  // Only one side can pull at a time. If both best queues are empty the book
+  // has no touch at all and moving either way is arbitrary, so nothing moves
+  // and the add flow refills them.
+  void reference_price_step(const QueueState& st) noexcept {
+    const bool bid_empty = st.n[0][0] == 0, ask_empty = st.n[1][0] == 0;
+    if (bid_empty == ask_empty) return;             // both, or neither
+    if (uniform() >= cfg_.qr.theta) return;
+    mid_ += bid_empty ? -1 : 1;                     // the price follows the gap
+  }
+
+
+  // q = ceil(depth / aes), the paper's axis and the estimator's. Zero is an
+  // empty queue and is its own state, not a small one.
+  [[nodiscard]] int q_of(Qty depth) const noexcept {
+    if (depth <= 0) return 0;
+    const double a = cfg_.qr.aes > 0.0 ? cfg_.qr.aes : 1.0;
+    const int q = static_cast<int>(std::ceil(static_cast<double>(depth) / a));
+    return q < 1 ? 1 : q;
+  }
+
+  [[nodiscard]] double lambda_add(int lvl, int q) const noexcept {
+    const FlowConfig::Qr& k = cfg_.qr;
+    if (q <= 0) return k.add_empty[lvl];
+    return k.add_rate[lvl] * std::exp(-k.add_decay[lvl] * static_cast<double>(q - 1));
+  }
+  [[nodiscard]] double lambda_cancel(int lvl, int q) const noexcept {
+    const FlowConfig::Qr& k = cfg_.qr;
+    if (q <= 0) return 0.0;
+    const double x = static_cast<double>(q);
+    return k.cancel_rate[lvl] * x / (x + k.cancel_half[lvl]);
+  }
+  [[nodiscard]] double lambda_trade(int lvl, int q) const noexcept {
+    const FlowConfig::Qr& k = cfg_.qr;
+    if (lvl != 0 || q <= 0) return 0.0;      // a market order takes the best queue
+    return k.trade_rate * std::exp(-k.trade_decay * static_cast<double>(q - 1));
+  }
+
+  // One step of the jump process: total rate, one event in proportion to its
+  // own rate, then the clock advanced by an exponential draw at that rate. The
+  // interevent distribution is a consequence here rather than a setting, which
+  // is the point -- mean_gap_ns does not apply on this path.
+  BookEvent next_queue_reactive(BookEvent e) noexcept {
+    constexpr int kL = FlowConfig::Qr::kLevels;
+    QueueState st = queue_state();
+    reference_price_step(st);
+    if (mid_ != ref_seen_) { st = queue_state(); ref_seen_ = mid_; }
+
+    double rate[2][kL][3], far_rate[2];
+    double total = 0.0;
+    for (int s = 0; s < 2; ++s) {
+      for (int l = 0; l < kL; ++l) {
+        const int q = q_of(st.qty[s][l]);
+        rate[s][l][0] = lambda_add(l, q);
+        rate[s][l][1] = st.n[s][l] > 0 ? lambda_cancel(l, q) : 0.0;
+        rate[s][l][2] = st.n[s][l] > 0 ? lambda_trade(l, q)  : 0.0;
+        total += rate[s][l][0] + rate[s][l][1] + rate[s][l][2];
+      }
+      // Independent per-order cancellation outside the window, so a stray
+      // cannot rest for ever. Proportional to the count, which is what bounds
+      // the pile: a fixed rate would not.
+      far_rate[s] = static_cast<double>(st.far[s]) * cfg_.qr.far_cancel_per_order();
+      total += far_rate[s];
+    }
+
+    // Every rate zero is possible only with an empty book and add_empty all
+    // zero, which is a misconfiguration rather than a state. Emit an add at the
+    // touch so the stream does not stall -- qr_add, not make_add, because
+    // make_add is the fixed-weight path and would place at a level this model
+    // never chose and with a size it never uses.
+    if (!(total > 0.0)) { ts_ += 1; return qr_add(e, Side::Bid, 0); }
+
+    // Exponential interarrival at the total rate. uniform() is [0,1); guard the
+    // zero so the logarithm cannot be -inf.
+    const double u = uniform();
+    const double gap_s = -std::log(u > 0.0 ? u : 1e-18) / total;
+    ts_ += static_cast<Nanos>(gap_s * 1e9) + 1;
+
+    double r = uniform() * total;
+    for (int s = 0; s < 2; ++s) {
+      const Side side = (s == 0) ? Side::Bid : Side::Ask;
+      for (int l = 0; l < kL; ++l)
+        for (int t = 0; t < 3; ++t) {
+          r -= rate[s][l][t];
+          if (r > 0.0) continue;
+          if (t == 0) return qr_add(e, side, l);
+          if (t == 1) return qr_cancel(e, s, l);
+          return qr_trade(e, side);
+        }
+      r -= far_rate[s];
+      if (r <= 0.0) return qr_cancel_far(e, s);
+    }
+    return qr_add(e, Side::Bid, 0);   // unreachable barring a rounding edge
+  }
+
+  // A constant order size at each limit, which is the paper's assumption and
+  // the reason its queue axis is in average event sizes at all.
+  BookEvent qr_add(BookEvent e, Side side, int lvl) noexcept {
+    e.type     = EventType::Add;
+    e.side     = side;
+    e.qty      = static_cast<Qty>(cfg_.qr.aes > 1.0 ? cfg_.qr.aes : 1.0);
+    e.order_id = next_id_++;
+    // No crossing guard is needed and none is wanted. Bid levels sit at mid_
+    // and below, ask levels at mid_ + 1 and above, so the two sides cannot
+    // meet by construction. A guard here would silently relocate orders the
+    // model placed deliberately, which is how the level distribution stopped
+    // being the one that was fitted last time.
+    e.price = queue_price(side == Side::Bid ? 0 : 1, lvl);
+    return e;
+  }
+
+  // A cancellation at a named queue, on one of the orders actually standing in
+  // it. Uniform WITHIN the queue, which is Assumption 3 of the paper; uniform
+  // over the whole book, which is what the fixed-weight path does, is what made
+  // cancel intensity proportional to the order count for no reason.
+  BookEvent qr_cancel(BookEvent e, int side, int lvl) noexcept {
+    const Ticks touch = queue_price(side, 0);
+    int n = 0;
+    for (const Live& l : live_) {
+      if (((l.side == Side::Bid) ? 0 : 1) != side) continue;
+      const Ticks d = (side == 0) ? (touch - l.price) : (l.price - touch);
+      if (d == static_cast<Ticks>(lvl)) ++n;
+    }
+    if (n == 0) return qr_add(e, side == 0 ? Side::Bid : Side::Ask, lvl);
+    int k = static_cast<int>(rng_() % static_cast<std::uint64_t>(n));
+    for (const Live& l : live_) {
+      if (((l.side == Side::Bid) ? 0 : 1) != side) continue;
+      const Ticks d = (side == 0) ? (touch - l.price) : (l.price - touch);
+      if (d != static_cast<Ticks>(lvl)) continue;
+      if (k-- > 0) continue;
+      e.type     = EventType::Delete;
+      e.order_id = l.id;
+      e.side     = l.side;
+      e.price    = l.price;
+      e.qty      = 0;
+      return e;
+    }
+    return qr_add(e, side == 0 ? Side::Bid : Side::Ask, lvl);
+  }
+
+  // Cancel one stray: an order this side of the book that the price has walked
+  // past, so no modelled queue contains it. Uniform among them, for the same
+  // reason cancellation is uniform within a queue.
+  BookEvent qr_cancel_far(BookEvent e, int side) noexcept {
+    const Ticks anchor = queue_price(side, 0);
+    auto stranded = [&](const Live& l) {
+      if (((l.side == Side::Bid) ? 0 : 1) != side) return false;
+      const Ticks d = (side == 0) ? (anchor - l.price) : (l.price - anchor);
+      return d < 0 || d >= static_cast<Ticks>(FlowConfig::Qr::kLevels);
+    };
+    int n = 0;
+    for (const Live& l : live_) n += stranded(l) ? 1 : 0;
+    if (n == 0) return qr_add(e, side == 0 ? Side::Bid : Side::Ask, 0);
+    int k = static_cast<int>(rng_() % static_cast<std::uint64_t>(n));
+    for (const Live& l : live_) {
+      if (!stranded(l) || k-- > 0) continue;
+      e.type     = EventType::Delete;
+      e.order_id = l.id;
+      e.side     = l.side;
+      e.price    = l.price;
+      e.qty      = 0;
+      return e;
+    }
+    return qr_add(e, side == 0 ? Side::Bid : Side::Ask, 0);
+  }
+
+  // A market order into the named side's best queue. It goes through the
+  // matching engine like any other aggressive order, so it consumes the front
+  // of the queue and a fill means queue position actually mattered.
+  BookEvent qr_trade(BookEvent e, Side resting) noexcept {
+    e.type     = EventType::Aggress;
+    // A Bid aggressor buys and lifts the ask, so taking the BID queue needs an
+    // Ask aggressor. Getting this backwards is what mislabelled every synthetic
+    // print once already.
+    e.side     = (resting == Side::Bid) ? Side::Ask : Side::Bid;
+    e.order_id = next_id_++;
+    e.price    = 0;
+    e.qty      = static_cast<Qty>(cfg_.qr.aes > 1.0 ? cfg_.qr.aes : 1.0);
+    // The Glosten-Milgrom split is orthogonal to where the order came from, so
+    // it is applied here exactly as make_aggress applies it: a share of takers
+    // are informed and the mid follows them. Duplicating the three lines rather
+    // than sharing them would let the two paths drift apart, which is the one
+    // thing this whole file keeps being bitten by.
+    if (uniform() < cfg_.informed_frac) {
+      ++informed_;
+      if (uniform() < cfg_.informed_impact_prob)
+        pending_impact_ = (e.side == Side::Bid) ? cfg_.informed_impact : -cfg_.informed_impact;
+    } else {
+      ++uninformed_;
+    }
+    return e;
+  }
+
   // Prices are drawn from the touch outward, which keeps the book shaped
   // roughly like a real one and, more importantly for testing, keeps levels
   // shallow enough that they empty and re-fill constantly.
@@ -550,6 +973,7 @@ class FlowGenerator {
   Ticks             mid_     = 0;
   Ticks             pending_impact_ = 0;
   std::uint64_t     informed_ = 0, uninformed_ = 0;
+  Ticks             ref_seen_ = 0;
   bool              has_bid_ = false;
   bool              has_ask_ = false;
   Ticks             best_bid_ = 0;

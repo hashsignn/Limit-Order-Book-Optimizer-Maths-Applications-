@@ -166,22 +166,75 @@ should end up carrying roughly the share this implies, not more.
    also disagree with the paper's rising cancel rate — on a ten-minute sample,
    so this needs the eight-hour captures before anything is fitted to it.
 
-2. **`FlowGenerator` intensities do not depend on the book at all.** Weights are
-   fixed and a removal picks a uniformly random resting order, which is why
-   cancel intensity comes out proportional to the order count for a reason that
-   has nothing to do with reactivity (KNOWN-ISSUES 3).
+2. ~~**`FlowGenerator` intensities do not depend on the book at all.**~~
+   **Done, as an opt-in path.** `FlowConfig::Qr` holds the three intensity
+   functions and `FlowConfig::ethusd_queue_reactive()` turns them on; every
+   `(side, level)` is now a birth-and-death queue whose rates are functions of
+   its own size in AES units, one event is drawn in proportion to its own rate,
+   and the clock advances by an exponential draw at the total rate — so the
+   interevent distribution is a consequence of the model rather than a setting.
+   Cancellation picks uniformly **within** the named queue, the paper's
+   Assumption 3, not uniformly over the whole book.
 
-3. **Market order intensity has the wrong sign in `q`.** Measured `+0.90` in the
-   generator against `-0.28` on ethusd and exponentially decreasing in the
-   paper. A thicker queue should trade *less*, not more.
+   The scales are fitted, the shapes are the paper's. A queue's stationary law
+   depends only on the arrival/departure **ratio**, so the ratios were fitted to
+   the depth targets and one division set the event rate; no target was traded
+   against another. Against the ethusd capture, per side:
 
-4. **No dependence on the opposite queue**, so no imbalance signal. Model II-b
-   is where it comes from.
+   | | L0 | L1 | L2 | L3 |
+   |---|---|---|---|---|
+   | mean q, target | 4.29 | 0.49 | 0.43 | 0.39 |
+   | P(q=0), target | — | 0.79 | 0.80 | 0.85 |
+   | P(q=0), model | — | 0.793 | 0.803 | 0.829 |
+   | events/s | 2.34 | 0.474 | 0.360 | 0.373 |
 
-5. **No reference price separate from the mid.** Our generator walks `mid_`
-   directly on a coin flip and an informed-trade impact. Model III makes the
-   price move a *consequence* of a queue emptying, which is the mechanism that
-   ties adverse selection to order flow.
+   Verified against Model I's **closed-form invariant distribution**, with the
+   reference price pinned because that is the regime the closed form describes:
+   total variation **0.013**. `tests/test_calibration.cpp` asserts it stays
+   under 0.10, which is loose enough to survive a re-fit and tight enough to
+   catch an intensity wired to the wrong rate.
+
+3. ~~**Market order intensity has the wrong sign in `q`.**~~ **Done.** At the
+   touch, against queue size:
+
+   | | ethusd | btcusd | xrpusd | old generator | Model I |
+   |---|---|---|---|---|---|
+   | adds | +0.38 ± 0.35 | +0.10 ± 0.24 | +0.85 ± 0.25 | +0.10 ± 0.01 | +0.02 ± 0.00 |
+   | cancels | −0.26 ± 0.17 | −1.03 ± 0.39 | +0.18 ± 0.36 | +0.71 ± 0.04 | +0.45 ± 0.02 |
+   | trades | too few | −0.83 ± 0.11 | too few | +0.07 ± 0.01 | **−0.42 ± 0.06** |
+
+   Trades fall with queue size now, where the generator had the sign backwards.
+   That is the fix.
+
+   **What this table does not support**, and an earlier version of this file
+   claimed it did: the three instruments do not agree with each other on any
+   row. Two cancel slopes are indistinguishable from flat and the third is
+   negative at 2.6 standard errors, so ten minutes per instrument cannot say
+   whether the paper's rising cancel rate is right — the earlier claim that "our
+   captures say falling" was btcusd alone. The trade row rests on 179 events on
+   one instrument; the other two produced too few trades to fit. The shapes are
+   the paper's on the paper's authority and the eight-hour captures are what
+   would test them.
+
+4. **No dependence on the opposite queue.** Model II-b, still to do. Note the
+   imbalance signal has **already appeared** without it, out of the reference
+   price following whichever best queue empties: P(next mid move is up) now runs
+   1.9 / 2.6 / 3.9 / 5.6 / 9.5 per cent across the five buckets, monotone, where
+   the fixed-weight generator gave 6.1 / 4.9 / 4.8 / 6.0 / 9.1 and no signal at
+   all. Model II-b should sharpen it rather than create it.
+
+5. **Reference price: partly done, and it was not optional.** Levels are
+   anchored to `p_ref` now, not to the moving touch, and `theta` moves `p_ref`
+   onto an emptied best queue. Anchoring to the touch meant no order ever
+   arrived *inside* the spread, so the spread could only ever widen — median 4
+   ticks against ethusd's 1, at one tick 1% of the time against 91%, and
+   `mdp_params` refused the process outright. With the anchor fixed: median
+   spread 1 tick, 54% at one tick, and the process is usable.
+
+   What remains is the calibration. `theta` is 1.0, the paper's "purely order
+   book driven" setting, and is **not** fitted to the ten-minute volatility and
+   mean-reversion ratio the paper uses. `theta_reinit` and the redraw from the
+   invariant measure are not implemented at all.
 
 6. **Order sizes are uniform on a range.** The paper assumes one constant size
    per limit (the AES); arXiv:2405.18594 extends it to state-dependent size
@@ -189,8 +242,56 @@ should end up carrying roughly the share this implies, not more.
 
 ## Order of work
 
-Estimator first (1), because nothing below can be fitted without it. Then
-Model I (2, 3) and check it against the closed-form invariant distribution.
-Then Model II-b (4) for the imbalance signal. Then Model III (5), calibrating
-`theta` and `theta_reinit` to our captures' 10-minute volatility and
-mean-reversion ratio. Sizes (6) last.
+Estimator first (1), Model I next (2, 3) against the closed form. **Both done.**
+
+What the Model I process still cannot do, and why it is not yet the default for
+`backtest`, `evaluate` and `sim_demo`: **nothing trades behind the touch**.
+`lambda^M` is zero at every level but the best, so the volume reaching level 1
+is 0.0% against ethusd's 7.2%, and `level_ratio` — the fill rate one tick behind
+the touch relative to at it, which the MDP needs — comes out zero. The paper
+handles this in Model II-a: a market order reaches `Q_2` when `Q_1` is empty,
+because `Q_2` is then the best offer. That is the next piece, and it is a
+prerequisite for the switch rather than a refinement after it.
+
+Then Model II-b (4) to sharpen the imbalance signal, then the rest of Model III
+(5) — calibrating `theta` and `theta_reinit` against the ten-minute volatility
+and the mean-reversion ratio. Sizes (6) last.
+
+## Three defects found by auditing the Model I work, and what they cost
+
+Worth keeping, because two of them looked like model findings.
+
+**Orders the price walked away from never cancelled.** Levels are indexed from
+`p_ref` and only `kLevels` exist, so a stray was invisible to every queue: never
+counted, never eligible for cancellation, resting for ever. The book grew from
+101 to 408 orders over two million events and was still climbing. The paper
+never meets this because it simulates K queues with no book behind them. Fixed
+by cancelling strays independently at `cancel_rate[K-1] / (1 + cancel_half[K-1])`
+per order, derived from the fitted constants rather than added as a free one —
+which is the paper's own K = 3 finding applied outward, that Q4 and Q5 behave
+like Q3. The book now sits at 4 to 19 orders and is stable.
+
+That leak was also producing a **non-monotone fill hazard** — 3.9e-4 alone
+against 5.1e-4 with 240 ahead — which read like a model defect and was a wall of
+stale orders that never traded. With it fixed the hazard is monotone and the
+gradient is 7.0× (6.8e-3 / 3.2e-3 / 9.7e-4), against 2.8× for the fixed-weight
+generator and 60× on a real book.
+
+**`trade_rate` was never fitted.** It was the ratio of two numbers picked by
+hand, carried through a fit that only constrained the total rate, and written up
+as though it had been measured. Now fitted to the share of removals at the touch
+that are trades: 7.08% measured, 7.09% reproduced. The correction was 2.8×.
+
+## A property of Model I worth knowing before fitting to it
+
+The three measured rates per level **cannot all be matched**. At stationarity a
+birth-and-death queue's realised arrival rate equals its realised departure rate
+— a theorem, not a modelling choice — while ethusd's touch measures 0.899 adds
+per second against 1.338 cancels plus 0.102 trades. Trying to fit all three sent
+the solver to a cancel scale of 37,652.
+
+The gap is real and it is Model I's independence assumption failing: orders
+arrive at the touch from other levels when the price moves, which the model
+excludes by construction. What can be fitted is the stationary shape, the total
+event rate, and how departures divide between cancels and trades, and that is
+what the constants match.

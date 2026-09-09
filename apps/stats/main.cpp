@@ -285,7 +285,7 @@ int main(int argc, char** argv) {
   // not silent, but the book then describes a market that stopped existing.
   double band_pct = 0.02;
   int synthetic = 0;
-  bool calibrated = false;
+  bool calibrated = false, queue_reactive = false;
   // Negative leaves the FlowConfig default in place; see apps/evaluate for why
   // a tool holding its own copy of a default is a way to measure a process
   // nobody configured.
@@ -314,6 +314,7 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--grid-ms") == 0 && nx) grid_ms = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--synthetic") == 0 && nx) synthetic = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--calibrated") == 0) calibrated = true;
+    else if (std::strcmp(argv[i], "--queue-reactive") == 0) { queue_reactive = true; calibrated = true; }
     else if (std::strcmp(argv[i], "--seed")    == 0 && nx) seed = std::strtoull(argv[++i], nullptr, 10);
     else if (std::strcmp(argv[i], "--drift")   == 0 && nx) drift = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--informed") == 0 && nx) informed = std::atof(argv[++i]);
@@ -326,6 +327,10 @@ int main(int argc, char** argv) {
         "      [--calibrated]   --synthetic only: run the process fitted to the\n"
         "                       captures (FlowConfig::ethusd()) rather than the\n"
         "                       dense, fast one the other apps still use.\n"
+        "      [--queue-reactive]  --synthetic only: the same, but with Model I\n"
+        "                       flow -- rates that depend on each queue's own\n"
+        "                       size -- instead of fixed weights. Implies\n"
+        "                       --calibrated.\n"
         "      [--band-pct 0.02]\n"
         "\n"
         "  --capture-dir   every *_bitstamp.jsonl.gz in a directory, in name order.\n"
@@ -390,7 +395,9 @@ int main(int argc, char** argv) {
     // --calibrated selects the process fitted to the captures; without it,
     // the stress process every other app still runs on. Both are worth
     // measuring and the whole point of this tool is to tell them apart.
-    FlowConfig fc = calibrated ? FlowConfig::ethusd() : FlowConfig{};
+    FlowConfig fc = queue_reactive ? FlowConfig::ethusd_queue_reactive()
+                  : calibrated     ? FlowConfig::ethusd()
+                                   : FlowConfig{};
     fc.seed = seed; fc.mid = 10'000;
     if (!calibrated) { fc.levels = 8; fc.target_live = 4'000; }
     if (drift >= 0.0)    fc.drift_prob    = drift;

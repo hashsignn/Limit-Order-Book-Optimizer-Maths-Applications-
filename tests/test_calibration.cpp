@@ -176,6 +176,103 @@ int main() {
     CHECK_NEAR(m.moves_per_event, base.moves_per_event, 1e-9);
   }
 
+  // ---- Model I reproduces its own invariant distribution ------------------
+  // A birth-and-death queue's stationary law is closed form, so it is a TEST of
+  // the implementation rather than an assumption inside it:
+  //
+  //   rho(n) = lambda^L(n) / ( lambda^C(n+1) + lambda^M(n+1) )
+  //   pi(n)  = pi(0) * prod_{j=1..n} rho(j-1)
+  //
+  // Checked one level behind the touch, not at it. Level 0 here is the BEST
+  // queue, so it is empty only when a whole side is, and the closed form has no
+  // way to express that -- its q=0 mass is unreachable by construction and
+  // comparing against it would fail for a reason that is not a defect.
+  {
+    // WITH THE REFERENCE PRICE PINNED. The paper's Model I holds during periods
+    // when p_ref is CONSTANT; Model III is that plus price moves. Run against a
+    // moving reference the closed form is simply not the right law -- queues
+    // are relabelled underneath it every time the price steps, and the measured
+    // total variation was 0.30. So the three things that move p_ref are turned
+    // off here, which is the regime the closed form describes.
+    FlowConfig cfg = FlowConfig::ethusd_queue_reactive();
+    cfg.qr.theta             = 0.0;   // no endogenous move off an empty queue
+    cfg.drift_prob           = 0.0;   // no exogenous news
+    cfg.informed_impact_prob = 0.0;   // no impact behind an informed trade
+    const FlowConfig::Qr& k = cfg.qr;
+    constexpr int kQ = 16, kLvl = 1;
+
+    // The model's own law, from the same constants the generator runs on.
+    double pi[kQ] = {}, prod = 1.0, sum = 1.0;
+    pi[0] = 1.0;
+    for (int n = 1; n < kQ; ++n) {
+      const double x = n;
+      const double dep = k.cancel_rate[kLvl] * x / (x + k.cancel_half[kLvl]);
+      if (!(dep > 0.0)) break;
+      const double arr = (n - 1) == 0
+          ? k.add_empty[kLvl]
+          : k.add_rate[kLvl] * std::exp(-k.add_decay[kLvl] * (n - 2));
+      prod *= arr / dep;
+      pi[n] = prod;
+      sum  += prod;
+    }
+    for (double& v : pi) v /= sum;
+
+    // And what the generator actually does, sampled on a clock rather than per
+    // event: an event-sampled histogram is biased toward whatever states have
+    // the most events, which is the opposite of a stationary distribution.
+    FlowGenerator gen{cfg};
+    OrderBook book{5'000, 10'240, 1 << 20};
+    MatchingEngine match{book};
+    std::size_t fills_seen = 0;
+    double hist[kQ] = {}, samples = 0;
+    Nanos next_sample = 0;
+    constexpr Nanos kEvery = 30'000'000'000LL;
+
+    for (int i = 0; i < 1'500'000; ++i) {
+      const BookEvent e = gen.next();
+      if (next_sample == 0) next_sample = e.ts + kEvery;
+      if (e.type == EventType::Aggress) {
+        (void)match.submit_market(e.ts, e.order_id, e.side, e.qty, false);
+        for (std::size_t j = fills_seen; j < match.fills().size(); ++j)
+          if (book.qty_of(match.fills()[j].resting_id) == 0)
+            gen.forget_order(match.fills()[j].resting_id);
+        fills_seen = match.fills().size();
+      } else {
+        (void)book.apply(e);
+      }
+      gen.on_applied(e, book.qty_of(e.order_id));
+      gen.observe(book.has_bid(), book.best_bid(), book.has_ask(), book.best_ask());
+
+      if (e.ts < next_sample || !book.has_bid() || !book.has_ask()) continue;
+      next_sample = e.ts + kEvery;
+      ++samples;
+      for (int s = 0; s < 2; ++s) {
+        // Where the MODEL puts the queue, which is relative to the reference
+        // price and not to the touch. Sampling `best_bid - 1` instead measures
+        // a level the model never addresses, and reported a total variation of
+        // 0.195 against 0.046 for the queue that actually exists.
+        const Side side = (s == 0) ? Side::Bid : Side::Ask;
+        const Ticks px  = (s == 0) ? gen.mid() - kLvl : gen.mid() + 1 + kLvl;
+        const Qty  d    = book.qty_at(side, px);
+        int q = d <= 0 ? 0 : static_cast<int>(std::ceil(static_cast<double>(d) / cfg.qr.aes));
+        if (q >= kQ) q = kQ - 1;
+        hist[q] += 0.5;                       // both sides pooled, as the paper pools them
+      }
+    }
+    ::lobtest::report(samples > 100, "the invariant check got enough samples",
+                      __FILE__, __LINE__, std::to_string(samples) + " samples");
+
+    double tv = 0.0;
+    for (int q = 0; q < kQ; ++q) tv += std::fabs(hist[q] / samples - pi[q]);
+    tv *= 0.5;
+    // A tenth in total variation. The two are not required to agree exactly:
+    // the paper's Model I holds while the reference price is CONSTANT, and this
+    // generator moves it, which relabels queues. The bound is there to catch an
+    // intensity wired to the wrong rate, which moves this to a half.
+    ::lobtest::report(tv < 0.10, "Model I matches its own invariant distribution",
+                      __FILE__, __LINE__, "total variation " + std::to_string(tv));
+  }
+
   // ---- the message budget is a TIME, and survives a change of clock --------
   // The whole of docs/KNOWN-ISSUES.md 5. The budget was 200 EVENTS, which is
   // 0.5 ms at one generator setting and 3.7 seconds at another, so the same
