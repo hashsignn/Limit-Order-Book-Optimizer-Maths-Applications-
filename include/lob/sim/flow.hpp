@@ -141,33 +141,65 @@ struct FlowConfig {
   // the price moves when enough of it accumulates, so an informed order moves
   // the mid a tick only with probability informed_impact_prob.
   //
-  // That second parameter is not decoration, it is what makes the market
-  // quotable. The volatility a resting quote is exposed to over its lifetime L
-  // has to stay under the half-spread it earns, and every source counts:
+  // HOW BIG THIS CHANNEL HAS TO BE, and how that was decided.
+  //
+  // It used to be argued from a bound. The volatility a quote is exposed to
+  // over its lifetime L has to stay under the half-spread it earns:
   //
   //     L * (drift_prob + p_aggress * pi * informed_impact_prob)  <  half_spread^2
   //
-  // L is the quote's EXPOSURE lifetime, not the requote interval. A driver that
-  // requotes every 200 events still holds a quote whose target has not moved —
-  // that hysteresis is the point, since requoting surrenders queue position —
-  // so a touch-joining quote here rests about 15 ms, or L = 7500 events at ~2 us
-  // apart. Using the requote interval instead put the bound at pi < 0.6 when
-  // the measured crossover was below 0.1, which is how the error surfaced.
+  // with L in EVENTS, put at 7,500 because a quote rested about 15 ms and an
+  // event took 2 us. That gave pi * informed_impact_prob < 0.0021, and
+  // informed_impact_prob = 0.01 followed from it.
   //
-  // With L = 7500, aggressive orders at ~5.7% of the stream and half_spread of
-  // 1 tick, the bound is  pi * informed_impact_prob < 0.0021 once exogenous
-  // drift is small. At informed_impact_prob = 0.01 that leaves pi up to ~0.2,
-  // which is a realistic informed share and a quotable market.
+  // Both inputs to that arithmetic were wrong. The 2 us was an uncalibrated
+  // clock (see mean_gap_ns) and the 15 ms came from a message budget counted in
+  // events. The bound is also the wrong shape: it says when a market is
+  // QUOTABLE, which is a ceiling, and a ceiling does not pick a value. Any
+  // informed_impact_prob below it satisfies it, including zero, and zero is a
+  // market with no adverse selection at all.
   //
-  // One informed order in a hundred moving the price a tick is also the right
-  // order of magnitude for a real book: on the Bitstamp captures the touch
-  // moves far more often than trades occur, because most of what moves it is
-  // quotes being pulled rather than anything trading.
+  // So it is fitted now, to the one thing the captures state directly:
+  // P(the mid has moved against the resting side one second after a print).
+  // tools/mdp_params.py reports it as p_adverse_1.0s.
   //
-  // sweep-informed measures the curve rather than trusting this algebra, and
-  // it is the thing to re-run if any of these change.
+  //     ethusd, 8-hour capture, n=5,032 prints      33%
+  //     ethusd, 10-minute sample, n=54              48%
+  //     xrpusd, 10-minute sample, n=153             52%
+  //     btcusd, 10-minute sample, n=220             63%
+  //
+  //     generator, at pi = 0.20:
+  //       informed_impact_prob   0.01   0.10   0.50   0.75   0.85   1.00
+  //       p_adverse             13.6%  16.1%  26.2%  31.8%  33.4%  36.2%
+  //
+  // 0.85 reproduces the large-sample figure, and at pi = 0.50 the same value
+  // gives 50.7%, inside the range the three small samples span. At the old
+  // 0.01 the generator sits at 13.6% -- a market that barely punishes a maker
+  // at all, which is what made `evaluate --sweep-informed` flat from pi = 0 to
+  // pi = 0.7 and left the acceptance test with nothing to measure.
+  //
+  // TWO CAVEATS, both real.
+  //
+  // The measurement identifies the PRODUCT pi * informed_impact_prob, not the
+  // split. pi stays at 0.20 because it is the sweep's variable and moving it to
+  // a convenient place would be fitting the diagnostic to its own answer;
+  // pi = 0.5 with impact 0.75 fits the small samples equally well.
+  //
+  // And 0.85 is close to its ceiling of 1.0, which undercuts the reason this
+  // parameter exists -- information arriving in pieces, so that an informed
+  // order moves the price only sometimes. Read plainly, it says this generator
+  // cannot produce the observed adverse selection at a realistic informed share
+  // without making informed orders nearly always move the price. The missing
+  // mechanism is the one the captures show and this model does not have: most
+  // of what moves a real touch is quotes being PULLED, not anything trading --
+  // only 4.4% of ethusd's touch moves follow a print within 50 ms -- and orders
+  // pulled ahead of a price move are queue-reactive cancellation, which is
+  // Huang, Lehalle & Rosenbaum's mechanism and is not implemented here.
+  //
+  // sweep-informed measures the curve rather than trusting any of this, and it
+  // is the thing to re-run if any of these change.
   double        informed_frac        = 0.20;   // pi
-  double        informed_impact_prob = 0.01;   // chance an informed order moves the mid
+  double        informed_impact_prob = 0.85;   // chance an informed order moves the mid
   Ticks         informed_impact      = 1;      // ticks it moves when it does
 
   // Exogenous news: the mid moving with no trade behind it at all. Real prices

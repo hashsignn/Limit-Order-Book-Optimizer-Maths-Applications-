@@ -1,28 +1,28 @@
 {
   "simcal": {
     "pair": "simcal",
-    "dt_ms": 0.5,
+    "dt_ms": 100.0,
     "mid": {
-      "p_up": 0.009581638905910534,
-      "p_down": 0.009971589326499917,
-      "p_flat": 0.9804467717675895,
+      "p_up": 0.05820574509006432,
+      "p_down": 0.058419445344436556,
+      "p_flat": 0.8833748095654991,
       "median_abs_move_ticks": 0.5,
-      "winsorised_sd_ticks": 0.09543651125700867,
-      "raw_sd_ticks": 0.09543651125700867,
-      "max_abs_move_ticks": 1.0,
-      "samples": 17951,
-      "steps_kept_pct": 100.0,
+      "winsorised_sd_ticks": 0.18581039357157528,
+      "raw_sd_ticks": 0.1887550474689517,
+      "max_abs_move_ticks": 3.5,
+      "samples": 290126,
+      "steps_kept_pct": 88.21261561475734,
       "max_spread_ticks": 3.0
     },
     "spread": {
-      "median_ticks": 1.0,
-      "p90_ticks": 2.0,
-      "share_at_one_tick": 0.778631907308378
+      "median_ticks": 2.0,
+      "p90_ticks": 3.0,
+      "share_at_one_tick": 0.09140911233068305
     },
     "queue": {
-      "mean_touch_size": 29159.9,
-      "removed_per_s": 3369795.6544010597,
-      "drain_fraction_per_step": 0.05778133077275744,
+      "mean_touch_size": 546.6,
+      "removed_per_s": 1866.507132700306,
+      "drain_fraction_per_step": 0.34147587499090853,
       "note": "fraction of a full touch queue that leaves per epoch, both sides pooled",
       "scale_note": "mean_touch_size is the scale queue buckets are fractions of; it is written into the policy table header so the executor cannot bucket on another one",
       "bucket_edges": [
@@ -31,80 +31,86 @@
         0.35
       ]
     },
-    "hazard_size_band": {
-      "target": 10.0,
-      "n": 5261,
-      "applied": true
-    },
     "fill_hazard": [
+      {
+        "bucket": "alone",
+        "index": 0,
+        "n": 40066,
+        "fills": 8523,
+        "exposure_s": 18427.224326,
+        "hazard_per_s": 0.46252218181196303,
+        "mean_ahead": 0.0,
+        "p_fill_per_step": 0.04519888638148406
+      },
       {
         "bucket": "<2%",
         "index": 1,
-        "n": 23,
-        "fills": 23,
-        "exposure_s": 0.019167000000000003,
-        "hazard_per_s": 1199.979130797725,
-        "mean_ahead": 333.0,
-        "p_fill_per_step": 0.4511826372455736
+        "n": 1932,
+        "fills": 416,
+        "exposure_s": 874.459938,
+        "hazard_per_s": 0.47572219369070745,
+        "mean_ahead": 5.2644927536231885,
+        "p_fill_per_step": 0.0464583935272993
       },
       {
         "bucket": "<10%",
         "index": 2,
-        "n": 122,
-        "fills": 110,
-        "exposure_s": 0.352162,
-        "hazard_per_s": 312.3562451371812,
-        "mean_ahead": 1637.1475409836066,
-        "p_fill_per_step": 0.14459319045791652
+        "n": 7809,
+        "fills": 1322,
+        "exposure_s": 3695.171116,
+        "hazard_per_s": 0.3577642167302544,
+        "mean_ahead": 32.5196568062492,
+        "p_fill_per_step": 0.03514400974226428
       },
       {
         "bucket": "<35%",
         "index": 3,
-        "n": 406,
-        "fills": 278,
-        "exposure_s": 3.464283,
-        "hazard_per_s": 80.24748555473094,
-        "mean_ahead": 6612.283251231527,
-        "p_fill_per_step": 0.03932944424570828
+        "n": 27387,
+        "fills": 3228,
+        "exposure_s": 12680.952953,
+        "hazard_per_s": 0.25455500165989775,
+        "mean_ahead": 124.31668309782013,
+        "p_fill_per_step": 0.02513424063500236
       },
       {
         "bucket": "deep",
         "index": 4,
-        "n": 4704,
-        "fills": 1085,
-        "exposure_s": 89.922703,
-        "hazard_per_s": 12.065918436637743,
-        "mean_ahead": 45901.757015306124,
-        "p_fill_per_step": 0.006014797461254995
+        "n": 198783,
+        "fills": 15221,
+        "exposure_s": 92487.856431,
+        "hazard_per_s": 0.16457295678979797,
+        "mean_ahead": 645.0075056720142,
+        "p_fill_per_step": 0.01632261423139869
       }
     ],
     "level_ratio": {
       "volume_share_by_level": {
         "0": {
-          "volume": 8795731.0,
-          "prints": 267511,
+          "volume": 1871987.0,
+          "prints": 54487,
           "share": 1.0
         },
         "1": {
-          "volume": 18583.0,
-          "prints": 362,
-          "share": 0.0021127294593252114
+          "volume": 112447.0,
+          "prints": 1863,
+          "share": 0.060068259021029524
         },
         "2": {
-          "volume": 0.0,
-          "prints": 0,
-          "share": 0.0
+          "volume": 53616.0,
+          "prints": 870,
+          "share": 0.028641224538418268
         },
         "3": {
-          "volume": 0.0,
-          "prints": 0,
-          "share": 0.0
+          "volume": 33765.0,
+          "prints": 531,
+          "share": 0.018036984231193914
         }
       },
-      "ratio": 0.0021127294593252114,
-      "prints_one_behind": 362,
+      "ratio": 0.060068259021029524,
+      "prints_one_behind": 1863,
       "measured": true,
-      "note": "share of traded volume that reaches one tick past the touch, measured at the moment of each print. Unmeasured unless it lands in (0,1) on at least 20 prints. The solver compounds it geometrically for the levels beyond that"
+      "flat_across_levels": false,
+      "note": "share of traded volume that reaches one tick past the touch, measured at the moment of each print. Unmeasured unless it is below 0.5 on at least 20 prints AND falls with depth: a share that does not fall means the touch it was measured against is not the real one. The solver compounds it geometrically"
     },
     "imbalance": {
       "edges": [
@@ -116,47 +122,47 @@
         1.0
       ],
       "stationary": [
-        0.20710784313725492,
-        0.14939839572192512,
-        0.2994095365418895,
-        0.14806149732620322,
-        0.19602272727272727
+        0.12875233737210964,
+        0.22933459006673862,
+        0.28135727207771477,
+        0.22979066267349763,
+        0.13076513780993934
       ],
       "transition": [
         [
-          0.9373318988703604,
-          0.03523399677245831,
-          0.007799892415277031,
-          0.006455083378160301,
-          0.013179128563743949
+          0.5535481001751119,
+          0.26817133168413154,
+          0.12405147733274036,
+          0.041943463879700923,
+          0.012285626928315313
         ],
         [
-          0.04662439388287952,
-          0.8907124207385304,
-          0.05930622901902275,
-          0.0,
-          0.0033569563595673255
+          0.1498618475095213,
+          0.485983122993055,
+          0.263415726980808,
+          0.08041221716077963,
+          0.020327085355836008
         ],
         [
-          0.008186046511627907,
-          0.025674418604651163,
-          0.9324651162790698,
-          0.025116279069767444,
-          0.008558139534883722
+          0.05243396586249643,
+          0.2124415943549156,
+          0.4700939258129112,
+          0.21310908744159435,
+          0.05192142652808239
         ],
         [
-          0.0030097817908201654,
-          0.0,
-          0.05568096313017306,
-          0.8920240782543266,
-          0.04928517682468021
+          0.020947258329598088,
+          0.07976990886000299,
+          0.262662483191394,
+          0.48390856118332587,
+          0.15271178843567906
         ],
         [
-          0.015913611821540212,
-          0.0068201193520886615,
-          0.0076726342710997444,
-          0.036373969877806195,
-          0.9332196646774652
+          0.012785965684117906,
+          0.04069511658600968,
+          0.12491750989881215,
+          0.2676528816542015,
+          0.5539485261768587
         ]
       ],
       "median_next_move_ticks": [
@@ -167,31 +173,31 @@
         0.0
       ],
       "p_next_move_up": [
-        0.0,
-        0.0003729951510630362,
-        0.008186046511627907,
-        0.0030097817908201654,
-        0.033816425120772944
+        0.060900019456875225,
+        0.04940631767605108,
+        0.04825021455134929,
+        0.060197220977140295,
+        0.09104157501099867
       ],
       "p_next_move_down": [
-        0.03200645508337816,
-        0.0033569563595673255,
-        0.008558139534883722,
-        0.0018811136192626034,
-        0.0
+        0.09061344748033466,
+        0.062116346800089615,
+        0.04784495089158005,
+        0.04833408038248917,
+        0.06271997360316763
       ]
     },
     "adverse_selection": {
       "markout_0.5s_ticks_median": 0.0,
-      "markout_0.5s_bps": 0.004563005862825148,
-      "p_adverse_0.5s": 0.4705451364616782,
+      "markout_0.5s_bps": 0.07278581246849163,
+      "p_adverse_0.5s": 0.32842696422999984,
       "markout_1.0s_ticks_median": 0.0,
-      "markout_1.0s_bps": 0.001172186121163896,
-      "p_adverse_1.0s": 0.47642153032959395,
+      "markout_1.0s_bps": 0.11238108136103139,
+      "p_adverse_1.0s": 0.3698313359149889,
       "markout_5.0s_ticks_median": 0.0,
-      "markout_5.0s_bps": 0.005861805134919637,
-      "p_adverse_5.0s": 0.47750559790064706,
-      "n_prints": 267511
+      "markout_5.0s_bps": 0.13463137187617644,
+      "p_adverse_5.0s": 0.4419953383375851,
+      "n_prints": 54487
     },
     "usable_for_mdp": true,
     "unusable_because": []

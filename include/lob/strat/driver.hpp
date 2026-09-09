@@ -23,7 +23,23 @@
 namespace lob {
 
 struct DriverConfig {
-  int         quote_every  = 200;    // events between requotes: a message budget
+  // The message budget: how long a quote must stand before it may be moved.
+  //
+  // This was 200 EVENTS, and an event count is not a budget — it is a budget
+  // divided by whatever rate the generator happens to run at. At the old
+  // generator's 2.5 us an event, 200 events was 0.5 ms; at the calibrated
+  // 18.55 ms an event the same constant is 3.7 SECONDS, so the same code
+  // described a maker requoting twice a millisecond and a maker requoting
+  // twice a minute. Every constant downstream was chosen against the first
+  // reading: the MDP's 100 ms epoch, the 100 ms markout, and the informed-flow
+  // budget in flow.hpp, whose algebra is written in events at 2 us.
+  //
+  // A real exchange rate-limits in messages per SECOND, and a real maker's
+  // reaction time is a time. So this is nanoseconds, and it defaults to the
+  // MDP's decision epoch, which is the one cadence it must agree with: every
+  // probability in the table is per epoch, so a policy consulted on a
+  // different cadence is answering a question it was not solved for.
+  Nanos       quote_every_ns = 100'000'000LL;   // 100 ms, the table's epoch
   std::size_t markout_idx  = 3;      // 100 ms — long enough for information, short
                                      // enough that a maker plausibly still holds
   OrderId     first_id     = 900'000'000ULL;
@@ -37,21 +53,29 @@ struct RunResult {
   std::size_t         requotes = 0;
   // The run's wall span, so the cadences below can be derived rather than
   // assumed. The MDP's probabilities are all per decision epoch, and the epoch
-  // the executor actually runs at is set in three different files — the message
-  // budget here (in events), the event rate in FlowConfig, and the grid
+  // the executor actually runs at was set in three different files — the
+  // message budget here, the event rate in FlowConfig, and the grid
   // apps/stats sampled on. Nothing compared them until one of them was wrong.
+  // Two of the three are times now and can be compared directly.
   Nanos               span_ns   = 0;
 
-  // The shortest time in which the policy can change its action: the message
-  // budget converted from events into seconds. The policy is CONSULTED far more
-  // often than this — the budget only starts counting again once a quote
-  // actually moves, so between requotes the strategy is asked on every update —
-  // but it cannot act again until the budget clears, which makes this the
-  // granularity the model's epoch should match.
-  [[nodiscard]] double budget_floor_s(int quote_every) const noexcept {
-    if (stats.market_events == 0 || span_ns <= 0) return 0.0;
-    return static_cast<double>(quote_every) * static_cast<double>(span_ns)
-         / static_cast<double>(stats.market_events) / 1e9;
+  // The shortest time in which the policy can change its action. The policy is
+  // CONSULTED far more often than this — the budget only starts counting again
+  // once a quote actually moves, so between requotes the strategy is asked on
+  // every update — but it cannot act again until the budget clears, which makes
+  // this the granularity the model's epoch should match. It is now the budget
+  // itself, which is the point: it no longer depends on the generator's clock.
+  [[nodiscard]] static double budget_floor_s(Nanos quote_every_ns) noexcept {
+    return static_cast<double>(quote_every_ns) / 1e9;
+  }
+  // How many market events pass inside one budget period. Not a cadence -- the
+  // budget is a time now and does not depend on this -- but the number that
+  // says whether the process is being sampled at all. Five events an epoch and
+  // five thousand are different simulations of the same market.
+  [[nodiscard]] double events_per_budget(Nanos quote_every_ns) const noexcept {
+    if (span_ns <= 0) return 0.0;
+    return static_cast<double>(stats.market_events) * static_cast<double>(quote_every_ns)
+         / static_cast<double>(span_ns);
   }
   // How long a quote actually stayed put, on average.
   [[nodiscard]] double mean_hold_s() const noexcept {
@@ -109,7 +133,9 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
   OrderId       next_id  = dc.first_id;
   OrderId       bid_id   = 0, ask_id = 0;
   Ticks         cur_bid  = 0, cur_ask = 0;
-  std::uint64_t ev       = 0, last_quote = 0;
+  std::uint64_t ev       = 0;
+  Nanos         last_quote_ts = 0;
+  bool          quoted_once   = false;
   double        last_mid = 0.0;
   std::int64_t  peak = 0;
   Nanos         first_ts = 0, last_ts = 0;
@@ -174,7 +200,10 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
     if constexpr (requires { strat.set_resting(v, true, Ticks{}, true, Ticks{}); })
       strat.set_resting(v, bid_id != 0, cur_bid, ask_id != 0, cur_ask);
 
-    if (ev - last_quote < static_cast<std::uint64_t>(dc.quote_every)) return;
+    // The budget, in time. The first decision is free -- otherwise the strategy
+    // would sit out its first budget period doing nothing, which on a slow
+    // clock is a real part of a short run.
+    if (quoted_once && v.now - last_quote_ts < dc.quote_every_ns) return;
 
     const Quote q = strat.quote(v);
 
@@ -183,7 +212,8 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
     const bool bid_moved = q.bid_on != (bid_id != 0) || (q.bid_on && q.bid != cur_bid);
     const bool ask_moved = q.ask_on != (ask_id != 0) || (q.ask_on && q.ask != cur_ask);
     if (!bid_moved && !ask_moved) return;
-    last_quote = ev;
+    last_quote_ts = v.now;
+    quoted_once   = true;
     ++requotes;
 
     if (bid_moved && bid_id) {

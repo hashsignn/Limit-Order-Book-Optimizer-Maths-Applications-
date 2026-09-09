@@ -74,10 +74,9 @@ struct Outcome {
 Outcome run_once(bool with_latency, int n) {
   SimConfig cfg;
   cfg.use_latency        = with_latency;
+  cfg.flow               = FlowConfig::ethusd();
   cfg.flow.seed          = 20260904;   // identical flow in both runs
   cfg.flow.mid           = 10'000;
-  cfg.flow.levels        = 8;
-  cfg.flow.target_live   = 5'000;
   cfg.latency.median_ns  = 1'000'000;  // 1 ms, the crypto-over-WebSocket row
   cfg.latency.seed       = 7;
 

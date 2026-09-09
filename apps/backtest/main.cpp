@@ -30,15 +30,13 @@ void banner(const char* t) {
 SimConfig make_config(bool latency) {
   SimConfig c;
   c.use_latency       = latency;
-  // NOT FlowConfig::ethusd(), though that is the calibrated process and this
-  // one is 200x too thick. Switching it here alone is worse than leaving it:
-  // the driver requotes every 200 EVENTS, which is 0.5 ms on this clock and 3.7
-  // SECONDS on the calibrated one, so the quote life, the markout horizon and
-  // the table's epoch all come apart. docs/KNOWN-ISSUES.md 5.
+  // The process fitted to the captures. The stress process cannot be used
+  // here now that the message budget is a time: 200,000 of its events span
+  // half a second, so a maker on a 100 ms budget gets five decisions in a whole
+  // run. See docs/KNOWN-ISSUES.md 4 and 5.
+  c.flow              = FlowConfig::ethusd();
   c.flow.seed         = 20260904;
   c.flow.mid          = 10'000;
-  c.flow.levels       = 8;
-  c.flow.target_live  = 4'000;
   c.latency.seed      = 31;
   c.latency.median_ns = 1'000'000;
   return c;
