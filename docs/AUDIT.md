@@ -33,19 +33,19 @@ Results: **no secrets found**, **no untracked files**, **26/26 tests pass**.
   - `evaluate/`
     - [x] `main.cpp`
   - `jitter_probe/`
-    - [ ] `main.cpp`
+    - [x] `main.cpp`
   - `latency_demo/`
-    - [ ] `main.cpp`
+    - [x] `main.cpp`
   - `replay/`
-    - [ ] `main.cpp`
+    - [x] `main.cpp`
   - `sim_demo/`
-    - [ ] `main.cpp`
+    - [x] `main.cpp`
   - `solve/`
     - [x] `main.cpp`
   - `stats/`
     - [x] `main.cpp`
   - `tape/`
-    - [ ] `main.cpp`
+    - [x] `main.cpp`
 - `bench/`
   - [ ] `bench_book.cpp`
   - [ ] `bench_measure.cpp`
@@ -2210,6 +2210,331 @@ microstructure reasoning in the repository.
 - The position limit is re-enforced here even though the solver already imposed
   it (lines 89-92): "A table is not a place to discover that a constraint was
   dropped."
+
+---
+
+### `apps/replay/main.cpp`
+
+**Status:** [x] Reviewed (625 lines, read in full)
+
+**Issues Found:** `--verify` degenerates into a per-event O(n) invariant check
+whenever events are being rejected. Two smaller points.
+
+- **The verify cadence keys off `applied`, which does not advance on a reject**
+  (line 157): `if (verify && (applied % 10'000 == 0))`. `applied` increments only
+  on `BookError::Ok`, so once it reaches a multiple of 10,000 the condition
+  stays true for *every* rejected event until the next successful apply.
+  `check_invariants()` is O(window x orders) — on a 4,096-tick window with a
+  million resting orders that is not a check, it is a stall. The synthetic path
+  gets this right (`i % 10'000`, line 98) because it keys off the loop counter.
+- **`book.apply` is timed with the unserialised `tsc::now()`** (lines 76-78,
+  143-145). `include/lob/measure/stopwatch.hpp` states the rule: the unserialised
+  read "may reorder against surrounding work" and is "right for timing a stage
+  that takes hundreds of cycles or more". A book apply is 100-200 cycles, right
+  at the boundary, so the reported p50 carries a few cycles of reordering noise
+  the project's own guidance says to avoid here.
+- **The measurement-overhead figure is hardcoded** (line 116, `2.0 *
+  to_nanos(35)`), and `apps/latency_demo/main.cpp:161` hardcodes the same
+  quantity as `2.0 * to_nanos(30)`. Two different magic constants for one
+  measurable thing, in a repository whose whole argument is that you measure
+  rather than assume.
+- **`--price-decimals 99` is accepted** (line 177 of the argument loop) and then
+  silently defeats every decode, because `json::parse_decimal` refuses
+  `scale > 18`. The run reports zero events rather than a bad argument.
+
+**Severity:** Medium (the verify stall), Minor (the rest)
+
+**Why it matters:** `--verify` is the tool you reach for when a capture looks
+wrong, which is exactly when rejects are frequent. It gets slowest precisely
+when it is most needed.
+
+**Fix Recommendation:**
+```cpp
+std::uint64_t seen = 0;                 // every event, applied or not
+...
+++seen;
+if (verify && seen % 10'000 == 0) { ... }
+```
+and clamp the decimals arguments to `[0, 18]` at parse time.
+
+**Refactor Suggestion:** Measure the timer overhead once at startup — the code
+to do it is already in `apps/latency_demo` section 2 — and print the measured
+value in both tools instead of two different literals.
+
+**Tests Missing:** Nothing here needs a unit test; this is a reporting harness.
+`tests/test_split_replay.py` exercises the capture path end to end and is
+audited separately.
+
+**Performance Notes:** `pct()` (line 187) calls `std::nth_element` per
+percentile on the same vector. That is correct — `nth_element` yields the true
+k-th order statistic regardless of prior partial ordering — and it is O(n) per
+call rather than one sort for all six. At the sample counts involved it does not
+matter, and the comment explains why a `Histogram` is the wrong instrument here:
+the delay series is signed, and the histogram starts at zero.
+
+**Security Notes:** `slurp` (line 206) concatenates a file's lines with no
+separator. For the single-line JSON the recorder writes that is exact; for a
+pretty-printed snapshot it would still parse, because a JSON newline can only
+fall between tokens. It is safe, but it is safe by a property of JSON rather
+than by construction.
+
+**Market-Logic Notes:** The reporting is unusually disciplined, and several of
+the comments record real findings.
+- **The sequence chain is reported before anything derived from the data**
+  (lines 182-190), because it "is the only thing that can distinguish a quiet
+  market from a dropped message", and a broken chain is stated to invalidate
+  every queue position across the gap.
+- **The snapshot sets precision and centres the window but does not seed the
+  book near the touch** (lines 282-287 in the bitstamp path). The measurement
+  behind it is quoted: seeding scored 11.1% on xrpusd against 90.2% for building
+  from the stream alone, judged against the trade channel, because the snapshot
+  carries orders whose deletes happened before the capture began.
+- **The seed guard is verified rather than assumed** (lines 404-412): if the
+  price moved further over the session than the guard, a stale deep order can
+  become the touch, and the tool prints `TOO NARROW` instead of a number.
+- **"Read the median, distrust the tail"** for touch depth (lines 149-154): the
+  book is built from the stream, so when the touch empties, the next level it
+  knows about can be further out than the real one. The upper percentiles are a
+  property of the reconstruction, not the market — and the median is
+  corroborated against the snapshot's own touch, which involves no
+  reconstruction.
+- **The two feed channels are never pooled** (lines 331-334): in one capture
+  orders arrived 570 ms "late" and trades 88 ms "early", so pooling would report
+  a clock offset as jitter and bury the real variation, "which is two orders of
+  magnitude smaller".
+- **Marketable orders are held back rather than rested** (lines 426-437):
+  Bitstamp publishes an aggressive order as `order_created` at its limit price
+  before publishing the fills it causes, and resting those builds a crossed
+  book. Their fills are counted on the resting side only, "counting both would
+  double the traded volume".
+- **Fill and cancel are never aggregated** (lines 439-442), quoting docs/03 §5:
+  volume cancelled ahead of you is free progress up the queue; volume traded
+  ahead of you is progress plus the information that someone is buying.
+
+One process note: the synthetic path uses a default-constructed `FlowConfig`
+(line 50) rather than `FlowConfig::ethusd()`, so its spread and depth
+distributions are the uncalibrated generator's. That is legitimate — the file
+says so at line 177, "use this to measure the book, never to calibrate a model"
+— but it means the synthetic numbers this tool prints should not be compared
+with the calibrated figures in `docs/06-queue-reactive-plan.md`.
+
+---
+
+### `apps/tape/main.cpp`
+
+**Status:** [x] Reviewed (324 lines, read in full)
+
+**Issues Found:** Trades accumulate through the whole pre-`--start` period and
+are all dumped into the first frame. One dead variable. The shadow order
+contaminates the frame's own ladder and imbalance without that being said.
+
+- **`pending` is only cleared when a frame is written** (line 296), and the
+  `rel < start_ns` guard (line 256) `continue`s before any frame can be written.
+  With the defaults `--warmup 60 --start 120`, every trade in that 60-second
+  window is held in memory and then written into frame 0. The first frame of
+  every tape is wrong, and a large `--start` grows `pending` without bound.
+- **`fill_latencies` is filled and never read** (lines 170, 250). Dead.
+- **The shadow order is in the book when the frame is written.** `book.depth`,
+  `book.orders_at` and `fe.get().imbalance` (lines 272-275, 298) all include it.
+  The metadata note (line 188) says the order "adds size the real market never
+  saw and nobody reacted to it", which covers the concept, but a reader of the
+  tape's `"b"` ladder and `"i"` field is not told those specific numbers include
+  it.
+- **`std::fclose(out)` return value is discarded** (line 320), so a full disk
+  produces a truncated tape reported as success. Same pattern as
+  `include/lob/measure/journal.hpp`; `src/policy_table.cpp` shows the fix.
+- **`--fps -1` yields a negative `frame_gap`** (line 176), so every event emits a
+  frame. `fps > 0` is guarded for zero but not for negative.
+
+**Severity:** Medium (the first-frame trade dump), Minor (the rest)
+
+**Fix Recommendation:**
+```cpp
+// Clear the trade buffer on the pre-start path too: those prints belong to
+// frames that will never be written.
+if (rel < start_ns) { pending.clear(); continue; }
+```
+and `const double f = (fps > 0.0) ? fps : 10.0;` for the frame gap.
+
+**Refactor Suggestion:** Emit two imbalance fields, one computed from the book
+with our order and one without, or mark the frame's own contribution. The tape's
+stated purpose is that "a picture of a book must be a picture of THIS book"; the
+same standard applies to the derived numbers next to it.
+
+**Tests Missing:** A tape produced with `--start` well past `--warmup`, asserting
+frame 0 carries no more trades than one frame interval's worth.
+
+**Performance Notes:** `px_buf`/`qty_buf` are fixed `kMaxDepth` arrays and
+`depth` is clamped to `kMaxDepth` at parse time (line 97), so the ladder write
+cannot overflow. Frames are emitted only when something changed, so a quiet
+market costs bytes proportional to activity.
+
+**Security Notes:** `kOwnId = 0xFFFF'FFFF'FFFF'0001` is chosen far above any
+exchange id in these captures so it cannot collide (line 160). That is the right
+kind of care; a collision would silently merge our order with a real one.
+
+**Market-Logic Notes:** The fill derivation is the substance of this file and
+the reasoning behind its current form is recorded in place (lines 205-214).
+- A print at our price fills us when it is larger than what is queued in front
+  of us **at the moment of the print**, read live from `queue_ahead()`.
+- The earlier version accumulated traded volume and compared it to the queue as
+  it stood at placement. That version "can never fire once the queue drains by
+  CANCELLATION, which is how it almost always drains here — 99% of removals are
+  cancels." Reading the queue at print time is what makes a cancel count as the
+  progress it is, and it is the payoff of resting our order in the same FIFO as
+  everyone else's.
+- The two caveats are printed into the tape's own metadata rather than left in
+  the source: the order is a shadow, and a fill is derived rather than observed
+  because "a real feed's executes name specific order ids, and never ours".
+- One caveat is not stated: the trade-channel message is evaluated against the
+  book as of the *previous* line, because `queue_ahead` is read before this
+  line's order events are applied. The two channels have different delays
+  anyway, so the ordering is approximate by nature — but that is worth saying
+  where the other two caveats are said.
+
+---
+
+### `apps/sim_demo/main.cpp`
+
+**Status:** [x] Reviewed (154 lines, read in full)
+
+**Issues Found:** The requote cadence is on the event clock, which the same
+project already fixed elsewhere.
+
+- **`if (seen_ - last_quote_ < 200) return;`** (line 41) gates requoting on 200
+  *events*, and the comment justifies it with "message budgets are real". A
+  message budget is a rate per unit of **time**, and the number of events per
+  second varies by three orders of magnitude between instruments.
+  `include/lob/strat/driver.hpp` was changed to a nanosecond cadence
+  (`quote_every_ns`) for exactly this reason; this file still carries the old
+  form.
+
+**Severity:** Minor (a demo, not a measurement)
+
+**Why it matters:** It does not change the conclusion this demo draws, which is
+about aggressive fills rather than P&L levels. It matters as consistency: two
+files in the repository now disagree about what a message budget is.
+
+**Fix Recommendation:** Mirror the driver — hold a `Nanos last_quote_ts_` and
+compare against `v.now`.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** None. This is a demonstration; `tests/test_simulator.cpp`
+covers the simulator itself.
+
+**Performance Notes:** Not applicable.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Worth recording that **this file computes total P&L
+correctly and `include/lob/strat/pnl.hpp` does not.** Line 96 is
+`o.total = o.stats.realised_pnl + o.mark_to_market`, with the comment (lines
+89-90) explaining why: so the two runs are compared "on the same footing rather
+than on whoever happened to end flatter." `Attribution::total` omits exactly
+that term. The correct treatment already exists in the repository; it is the
+attribution path that lost it.
+
+The closing text (lines 143-152) is the right way to present a demo result: read
+the aggressive-fill row, not the P&L, because "the strategy never asks to cross
+the spread" and yet under latency some of its quotes land crossing. And then,
+explicitly, "That is the effect, not a strategy result. The agent is a
+deliberately naive baseline and the flow is zero-intelligence, so the levels
+mean nothing."
+
+---
+
+### `apps/latency_demo/main.cpp`
+
+**Status:** [x] Reviewed (163 lines, read in full)
+
+**Issues Found:** The closing overhead figure is hardcoded after having been
+measured 100 lines earlier. Unvalidated argument.
+
+- **Line 161 prints `2.0 * to_nanos(30)`** as the per-span overhead, while
+  section 2 (lines 56-63) *measures* the same quantity and prints it. The
+  measured value is scoped to that block and discarded.
+- **`std::atoi(argv[1])`** is unvalidated (line 43); a negative value skips
+  section 4 entirely and `rec.report()` prints a header with no rows.
+- **An 8 MiB `std::vector` is allocated and freed inside the 200-iteration cold
+  loop** (line 84). It is outside the timed span, so it does not corrupt the
+  measurement, but it churns 1.6 GB of allocation to do a cache eviction that
+  could reuse one buffer.
+- **`std::string(title).size()`** (line 36) allocates to compute a length that
+  `std::strlen` gives for free. `apps/sim_demo` uses `strlen` for the identical
+  helper.
+
+**Severity:** Minor (all)
+
+**Fix Recommendation:** Hoist the measured overhead into a variable at the top
+of `main` and use it at line 161. Hoist the eviction buffer out of the loop.
+
+**Refactor Suggestion:** `banner()` is duplicated verbatim in four apps with
+three different implementations of the underline length. One shared header would
+remove the drift.
+
+**Tests Missing:** None; this is the Phase 0 acceptance demo and its output is
+read by a human.
+
+**Performance Notes:** The measurement discipline is right. `fake_stage` is
+`[[gnu::noinline]]` so the optimiser cannot hoist it, `do_not_optimize` guards
+every result, and section 2 measures the timer's own cost first so every number
+after it can be read net of the instrument.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Sections 3 and 5 are the two that earn the file's
+existence.
+- **Cold versus warm** (lines 75-78): the first call after an idle period pays
+  for cold instruction cache, cold predictors and a cold TLB, and "market bursts
+  follow quiet periods, so this is the case that actually costs money".
+  Reporting only the warm number is named as "the most common way to publish a
+  latency figure that is not real."
+- **Coordinated omission** (lines 141-142): the same underlying reality recorded
+  two ways, where "the uncorrected histogram reports a better p99.9 precisely
+  *because* it stalled." That is the correct demonstration of the effect.
+
+---
+
+### `apps/jitter_probe/main.cpp`
+
+**Status:** [x] Reviewed (50 lines, read in full)
+
+**Issues Found:** A negative argument makes it run effectively forever.
+
+- **`std::atoi(argv[1])` is unvalidated** (line 21) and flows into
+  `tsc::from_nanos(seconds * 1e9)` (line 29), which casts a negative `double` to
+  `std::uint64_t`. That conversion is undefined; in practice it produces a
+  near-`UINT64_MAX` deadline, so `jitter_probe -1` spins until killed while
+  filling a histogram.
+
+**Severity:** Minor
+
+**Fix Recommendation:**
+```cpp
+int seconds = argc > 1 ? std::atoi(argv[1]) : 5;
+if (seconds <= 0) { std::fprintf(stderr, "seconds must be positive\n"); return 2; }
+```
+
+**Refactor Suggestion:** None. Fifty lines that do one thing.
+
+**Tests Missing:** None; the output is a measurement of the machine, not of the
+code.
+
+**Performance Notes:** The loop is the measurement: two serialised reads and a
+histogram record, nothing else. The 1 s histogram ceiling means a pathological
+stall is clamped, and `summary()` does report the clamped count — unlike
+`LatencyRecorder::report()`, which is the finding recorded under
+`include/lob/measure/recorder.hpp`.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Not applicable, but the closing paragraph (lines 45-48)
+states the correct reading: "the median is the cost of the clock read; p99.9 and
+max are the machine interrupting you. Anything you build here has that as its
+floor." Establishing that floor before attributing any improvement to your own
+code is the Phase 0 acceptance criterion, and this is the free, portable
+stand-in for `cyclictest` that makes it reproducible.
 
 ---
 
