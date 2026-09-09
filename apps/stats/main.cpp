@@ -129,7 +129,18 @@ class Accumulator {
     // aggressor's side is mislabelled or the touch is stale, and every level
     // measurement built on this column is wrong. Counted, and reported at the
     // end, rather than left to be discovered by a number that looks plausible.
-    if (dist < 0) ++n_neg_dist_;
+    if (dist < 0) {
+      ++n_neg_dist_;
+      // HOW FAR in front, which says WHICH fault this is. One tick means the
+      // level was there and we had already removed it: the delete for it
+      // arrived before the print that caused it, so the touch we compared
+      // against had moved on. Many ticks means the level was never in our book
+      // at all -- a genuinely missing level.
+      //
+      // Guessing between those two cost two wrong diagnoses. It is one counter.
+      const Ticks d = -dist;
+      neg_hist_[d <= 1 ? 0 : d <= 4 ? 1 : d <= 16 ? 2 : 3]++;
+    }
     std::fprintf(f_trd_, "%.3f,%lld,%d,%lld,%lld,%lld,%lld\n",
                  static_cast<double>(rel) / 1e6, static_cast<long long>(px),
                  taker_side, static_cast<long long>(qty),
@@ -192,6 +203,7 @@ class Accumulator {
   [[nodiscard]] std::uint64_t orders() const noexcept { return n_ord_; }
   [[nodiscard]] std::uint64_t abandoned() const noexcept { return n_abandoned_; }
   [[nodiscard]] std::uint64_t prints_before_touch() const noexcept { return n_neg_dist_; }
+  [[nodiscard]] const std::uint64_t* before_touch_depth() const noexcept { return neg_hist_; }
   [[nodiscard]] std::uint64_t trades() const noexcept { return n_trd_; }
   [[nodiscard]] std::uint64_t mids()   const noexcept { return n_mid_; }
 
@@ -220,6 +232,7 @@ class Accumulator {
   std::vector<double>        prof_sum_ = std::vector<double>(2 * kProfileDepth, 0.0);
   std::vector<std::uint64_t> prof_n_   = std::vector<std::uint64_t>(2 * kProfileDepth, 0);
   std::uint64_t n_ord_ = 0, n_trd_ = 0, n_mid_ = 0, n_neg_dist_ = 0, n_abandoned_ = 0;
+  std::uint64_t neg_hist_[4] = {};   // 1 tick, 2-4, 5-16, 17+
 };
 
 bool slurp(const char* path, std::string& out) {
@@ -613,9 +626,16 @@ int main(int argc, char** argv) {
                  share > 10.0 ? "31" : "33",
                  static_cast<unsigned long long>(acc.prints_before_touch()), share,
                  share > 10.0
-                     ? "  At this share the level measurement is not usable. Check the touch\n"
-                       "  headroom below: a window the price approached is the first suspect.\n"
+                     ? "  At this share the level measurement is not usable.\n"
                      : "  Dropped from the level measurement.\n");
+    const std::uint64_t* h = acc.before_touch_depth();
+    std::fprintf(stderr, "    how far in front:  1 tick %llu   2-4 %llu   5-16 %llu   17+ %llu\n",
+                 static_cast<unsigned long long>(h[0]), static_cast<unsigned long long>(h[1]),
+                 static_cast<unsigned long long>(h[2]), static_cast<unsigned long long>(h[3]));
+    std::fprintf(stderr, "    Mostly 1 tick means the delete for that level reached us before the\n"
+                         "    print did, so the touch had already moved -- a message-ordering race,\n"
+                         "    and the prints are simply unusable for the level split. Mostly deep\n"
+                         "    means levels genuinely missing from the reconstruction.\n");
   }
   return 0;
 }

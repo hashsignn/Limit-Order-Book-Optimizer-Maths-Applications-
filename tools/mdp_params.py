@@ -224,16 +224,33 @@ def estimate(csvdir, pair, max_spread, order_size):
     # every market order that reaches the second level passed through the first.
     # A ratio at or above 1 is noise wearing the shape of a result. Marked
     # unmeasured so the solver demands an explicit value instead of using it.
-    measured = bool(np.isfinite(ratio) and 0.0 < ratio < 1.0 and n_behind >= 20)
+    # A quote one tick behind the touch on a book that sits AT one tick should
+    # trade far less often than one at it -- the simulator measures 0.2%, and a
+    # clean ten-minute ethusd sample measured 7%. A share up near a half means
+    # the touch this was measured against is not the real touch, so "one tick
+    # past it" is not a real distance either. That is what a teleporting touch
+    # looks like from this side, and both eight-hour captures show it: btcusd
+    # reports 30.8% / 29.2% / 29.1% across three levels and ethusd 62.1% /
+    # 61.4% / 61.0%, flat, when penetration must fall with depth.
+    #
+    # Flat-and-high is therefore its own rejection, separate from the count.
+    # Believing it would repeat the exact error that made the first solved
+    # policy quote behind the touch and take a thirty-eighth of the fills.
+    flat = bool(np.isfinite(lv.get(2, {}).get("share", float("nan")))
+                and ratio > 0 and lv[2]["share"] / ratio > 0.8)
+    measured = bool(np.isfinite(ratio) and 0.0 < ratio < 0.5 and n_behind >= 20
+                    and not flat)
     out["level_ratio"] = {
         "volume_share_by_level": {str(k): v for k, v in lv.items()},
         "ratio": float(ratio) if np.isfinite(ratio) else None,
         "prints_one_behind": n_behind,
         "measured": measured,
+        "flat_across_levels": flat,
         "note": "share of traded volume that reaches one tick past the touch, "
-                "measured at the moment of each print. Unmeasured unless it "
-                "lands in (0,1) on at least 20 prints. The solver compounds it "
-                "geometrically for the levels beyond that",
+                "measured at the moment of each print. Unmeasured unless it is "
+                "below 0.5 on at least 20 prints AND falls with depth: a share "
+                "that does not fall means the touch it was measured against is "
+                "not the real one. The solver compounds it geometrically",
     }
 
     # ---- imbalance, and how it moves --------------------------------------
