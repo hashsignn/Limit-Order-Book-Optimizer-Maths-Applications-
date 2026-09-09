@@ -285,6 +285,7 @@ int main(int argc, char** argv) {
   // not silent, but the book then describes a market that stopped existing.
   double band_pct = 0.02;
   int synthetic = 0;
+  bool calibrated = false;
   // Negative leaves the FlowConfig default in place; see apps/evaluate for why
   // a tool holding its own copy of a default is a way to measure a process
   // nobody configured.
@@ -312,6 +313,7 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--warmup")  == 0 && nx) warmup_sec = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--grid-ms") == 0 && nx) grid_ms = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--synthetic") == 0 && nx) synthetic = std::atoi(argv[++i]);
+    else if (std::strcmp(argv[i], "--calibrated") == 0) calibrated = true;
     else if (std::strcmp(argv[i], "--seed")    == 0 && nx) seed = std::strtoull(argv[++i], nullptr, 10);
     else if (std::strcmp(argv[i], "--drift")   == 0 && nx) drift = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--informed") == 0 && nx) informed = std::atof(argv[++i]);
@@ -321,6 +323,9 @@ int main(int argc, char** argv) {
         "stats --capture <file> [--capture <file> ...] | --capture-dir <dir>\n"
         "      | --synthetic <n_events>\n"
         "      [--outdir .] [--warmup 60] [--grid-ms 100] [--seed N] [--label NAME]\n"
+        "      [--calibrated]   --synthetic only: run the process fitted to the\n"
+        "                       captures (FlowConfig::ethusd()) rather than the\n"
+        "                       dense, fast one the other apps still use.\n"
         "      [--band-pct 0.02]\n"
         "\n"
         "  --capture-dir   every *_bitstamp.jsonl.gz in a directory, in name order.\n"
@@ -382,8 +387,12 @@ int main(int argc, char** argv) {
     // Driven exactly as Simulator drives it, including routing aggressive flow
     // through the matcher: without that path nothing ever fills passively, and
     // a fill rate of zero is not a measurement of this process.
-    FlowConfig fc;
-    fc.seed = seed; fc.mid = 10'000; fc.levels = 8; fc.target_live = 4'000;
+    // --calibrated selects the process fitted to the captures; without it,
+    // the stress process every other app still runs on. Both are worth
+    // measuring and the whole point of this tool is to tell them apart.
+    FlowConfig fc = calibrated ? FlowConfig::ethusd() : FlowConfig{};
+    fc.seed = seed; fc.mid = 10'000;
+    if (!calibrated) { fc.levels = 8; fc.target_live = 4'000; }
     if (drift >= 0.0)    fc.drift_prob    = drift;
     if (informed >= 0.0) fc.informed_frac = informed;
     FlowGenerator gen{fc};

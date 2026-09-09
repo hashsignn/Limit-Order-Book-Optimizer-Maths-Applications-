@@ -101,7 +101,7 @@ if(LOB_BUILD_TESTS)
   # this is the test that the decoder agrees with an exchange.
   file(GLOB LOB_SAMPLE_CAPTURES "${CMAKE_CURRENT_SOURCE_DIR}/data/samples/*_bitstamp.jsonl*")
   list(SORT LOB_SAMPLE_CAPTURES)
-  foreach(t types arena histogram tsc journal book book_differential features matching simulator strategies pnl order_map properties bitstamp policy)
+  foreach(t types arena histogram tsc journal book book_differential features matching simulator strategies pnl order_map properties bitstamp policy calibration)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} PRIVATE lob)
     add_test(NAME ${t} COMMAND test_${t})

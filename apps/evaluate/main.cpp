@@ -58,6 +58,11 @@ SimConfig make_config(std::uint64_t seed, bool latency, Nanos median_ns) {
   const double drift = g_drift;
   SimConfig c;
   c.use_latency      = latency;
+  // The stress process, deliberately -- see the note in apps/backtest and
+  // docs/KNOWN-ISSUES.md 5. On the calibrated one this test reports JoinTouch
+  // earning 8.4 ticks per fill against a 2-tick spread and an informed sweep
+  // that is flat to 70%, which by evaluate's own stated criterion means the
+  // number cannot be interpreted.
   c.flow.seed        = seed;
   c.flow.mid         = 10'000;
   c.flow.levels      = 8;

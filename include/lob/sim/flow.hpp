@@ -32,6 +32,44 @@ struct FlowConfig {
   Ticks         mid            = 10'000;   // starting mid, in ticks
   Ticks         half_spread    = 1;
   std::uint32_t levels         = 10;       // how far from the touch orders land
+
+  // WHERE an add lands, as a share of adds per level from the touch.
+  //
+  // This was uniform, and uniform is not what a book does. Measured on the
+  // ethusd capture in data/samples, 47.8% of adds join the BEST queue and the
+  // rest decay away from it, while the generator put 32.6% at the touch and
+  // MORE one tick behind it than at it:
+  //
+  //                        L0     L1     L2     L3     L4     L5
+  //     ethusd adds     47.8%  13.2%   9.6%   9.1%   9.9%  10.4%
+  //     generator       32.6%  20.9%  14.0%  11.8%  10.5%  10.1%
+  //
+  // and the standing profile follows: ethusd rests 69.9% of its near-touch
+  // orders AT the touch, the generator 28.8%.
+  //
+  // What this is NOT. It is not the reason the touch was too stable -- that
+  // was the level of the book, three orders of magnitude of it, and this shape
+  // barely moves the move rate. It is also not evidence that touch orders are
+  // short-lived: dividing the two profiles above gives a relative lifetime of
+  // 1.46 at the touch against 0.45 to 0.71 behind it, so an order at the touch
+  // lives LONGER than one behind it, which is the opposite of what was assumed
+  // before it was measured. See docs/KNOWN-ISSUES.md 4.
+  //
+  // The weights are the placement shape and nothing more. They are set from the
+  // measured ADD distribution rather than the standing one, because placement
+  // is what this function chooses; the standing profile is an outcome.
+  //
+  // The numbers are the ethusd row above, from the ten-minute capture committed
+  // in data/samples so that anyone can reproduce them. The eight-hour capture
+  // agrees within a few points (52.6 / 14.2 / 11.2 / 11.2 / 10.8) and is not
+  // in the repository.
+  //
+  // Levels beyond the sixth are an extrapolation, held at the level-5 rate,
+  // because the measurement covers six. Say so rather than imply the shape was
+  // measured all the way out.
+  static constexpr std::size_t kMaxLevels = 16;
+  double add_level_weight[kMaxLevels] = {47.8, 13.2,  9.6,  9.1,  9.9, 10.4, 10.4, 10.4,
+                                         10.4, 10.4, 10.4, 10.4, 10.4, 10.4, 10.4, 10.4};
   Qty           min_qty        = 1;
   Qty           max_qty        = 500;
   // Relative weights, FITTED to the event mix measured within five levels of
@@ -168,7 +206,69 @@ struct FlowConfig {
   // and reproducing that is the controller's job, not the weights'. Freeing the
   // weights of it is what lets the mix be fitted to data at all.
   std::size_t   target_live    = 20'000;
+
+  // Mean nanoseconds between events. This was `1 + rng() % 5000` written inline
+  // -- a 2.5 us mean, so ~400,000 events a second, chosen for no reason beyond
+  // making a test run quickly.
+  //
+  // ethusd on Bitstamp runs at 53.9 events a second within 2% of the mid. The
+  // default here is four orders of magnitude off, and that mattered: the
+  // per-SECOND touch move rate is the product of the per-event rate and this
+  // number, so an error here can cancel an error there and did. See
+  // FlowConfig::ethusd() and docs/KNOWN-ISSUES.md issue 4.
+  Nanos         mean_gap_ns    = 2'500;
   std::uint64_t seed           = 20260904;
+
+  // ---- the calibration ----------------------------------------------------
+  // Everything above is the STRESS configuration: a dense, fast book whose job
+  // is to drive the matching engine through every ordering it can produce. It
+  // is deliberately not a market, and the differential and property tests want
+  // it exactly as it is.
+  //
+  // This is the other job. Measured on the three ten-minute captures in
+  // data/samples, per event and pooling both sides:
+  //
+  //                        ethusd   btcusd   xrpusd  |  stress cfg
+  //     events/second        53.9     96.0     57.4  |    400,000
+  //     orders at touch       3.8      4.5      3.1  |        857
+  //     touch moves/event  3.3e-2   6.5e-2   6.9e-2  |     8.0e-5
+  //     touch moves/second    1.80     6.23     3.95  |      32.0
+  //
+  // Three instruments, one venue, and they agree: a touch is three to five
+  // orders, a few dozen events arrive a second, and three to seven per cent of
+  // them move the price. The stress configuration is four orders of magnitude
+  // out on the first two and they hid each other -- the per-second rate is the
+  // product of the per-event rate and the clock, so a book 200x too thick and a
+  // clock 7,400x too fast came out looking merely 18x too volatile, and with
+  // the sign reversed. It was recorded that way. See docs/KNOWN-ISSUES.md 4.
+  //
+  // What a touch that cannot be consumed costs: the price then moves only when
+  // the exogenous walk moves it, so a fill carries no information, and adverse
+  // selection -- the entire risk a market maker is paid to bear -- becomes
+  // noise the policy can neither predict nor be compensated for.
+  //
+  // target_live is fitted, not derived. It is the only free parameter here and
+  // the response to it is STEEP -- doubling it from 16 to 32 divides the move
+  // rate by nineteen -- so this is a knife-edge and not a law:
+  //
+  //     target_live      8      12      16      24      32   |  ethusd
+  //     at touch       3.6     4.9     6.3     9.3    12.2   |     3.8
+  //     spread        2.90    2.33    2.12    2.01    1.99   |     2.3
+  //     moves/event  1.0e-1  4.3e-2  1.9e-2  3.6e-3  9.4e-4  |  3.3e-2
+  //     one-sided     1.8%    0.2%    0.0%    0.0%    0.0%   |     --
+  //
+  // Twelve, because it is the only value within 30% on all four at once. Eight
+  // matches the touch count best and then overshoots the move rate threefold
+  // and leaves a side of the book empty 1.8% of the time.
+  [[nodiscard]] static FlowConfig ethusd() noexcept {
+    FlowConfig c;
+    c.levels      = 8;
+    c.target_live = 12;
+    // 1 s / 53.9 events. next() draws uniformly on [1, 2*mean), so the mean of
+    // the draw is mean_gap_ns.
+    c.mean_gap_ns = 18'550'000;
+    return c;
+  }
 };
 
 // Emits a stream that is always *structurally* valid: it only cancels or fills
@@ -189,7 +289,12 @@ class FlowGenerator {
     BookEvent e{};
     e.ts  = ts_;
     e.seq = seq_++;
-    ts_  += 1 + static_cast<Nanos>(rng_() % 5000);   // ~µs-scale gaps
+    // Uniform on [1, 2*mean_gap_ns), so the mean gap is mean_gap_ns. Poisson
+    // arrivals would be exponential rather than uniform; that is a real
+    // difference and it is not modelled here, because nothing downstream reads
+    // the gap DISTRIBUTION -- only the rate, which this gets right.
+    ts_  += 1 + static_cast<Nanos>(rng_() % static_cast<std::uint64_t>(
+                    cfg_.mean_gap_ns > 0 ? 2 * cfg_.mean_gap_ns : 1));
 
     // Impact from the last informed trade lands before this event, so the
     // aggressor that carried the information traded at the OLD price and
@@ -288,6 +393,24 @@ class FlowGenerator {
  private:
   struct Live { OrderId id; Qty qty; Ticks price; Side side; };
 
+  // Weighted choice of how far from the touch an add lands. Linear scan over at
+  // most sixteen weights, which costs nothing next to the book update that
+  // follows and keeps the distribution in one readable place.
+  [[nodiscard]] std::uint32_t pick_level() noexcept {
+    const std::uint32_t n = cfg_.levels < FlowConfig::kMaxLevels
+                          ? cfg_.levels : static_cast<std::uint32_t>(FlowConfig::kMaxLevels);
+    if (n == 0) return 0;
+    double total = 0.0;
+    for (std::uint32_t i = 0; i < n; ++i) total += cfg_.add_level_weight[i];
+    if (!(total > 0.0)) return static_cast<std::uint32_t>(rng_() % n);
+    double r = uniform() * total;
+    for (std::uint32_t i = 0; i < n; ++i) {
+      r -= cfg_.add_level_weight[i];
+      if (r <= 0.0) return i;
+    }
+    return n - 1;
+  }
+
   [[nodiscard]] double uniform() noexcept {
     return static_cast<double>(rng_() >> 11) * (1.0 / 9007199254740992.0);
   }
@@ -301,7 +424,7 @@ class FlowGenerator {
   // roughly like a real one and, more importantly for testing, keeps levels
   // shallow enough that they empty and re-fill constantly.
   [[nodiscard]] Ticks price_for(Side s) noexcept {
-    const auto away = static_cast<Ticks>(rng_() % cfg_.levels);
+    const auto away = static_cast<Ticks>(pick_level());
     Ticks p = (s == Side::Bid) ? mid_ - cfg_.half_spread - away
                                : mid_ + cfg_.half_spread + away;
     // Clamp to the near side of the touch, so the stream stays non-crossing
