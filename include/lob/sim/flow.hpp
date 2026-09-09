@@ -17,6 +17,7 @@
 // §11, and nothing calibrated should be fitted to it.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <random>
 #include <unordered_map>
@@ -33,16 +34,48 @@ struct FlowConfig {
   std::uint32_t levels         = 10;       // how far from the touch orders land
   Qty           min_qty        = 1;
   Qty           max_qty        = 500;
-  // Relative weights. Cancels dominate real order flow; executes are rarer.
-  double        w_add          = 0.50;
-  double        w_delete       = 0.28;
-  double        w_reduce       = 0.09;
-  double        w_execute      = 0.09;
+  // Relative weights, FITTED to the event mix measured within five levels of
+  // the touch on the ethusd captures: adds 43.5%, cancels 53.9%, trades 2.60%.
+  // These reproduce 45.8 / 51.7 / 2.45 -- close, and stated rather than
+  // asserted. The weights are not the mix: an aggressive order produces several
+  // trade events, an add can be throttled by target_live, and a replace is both
+  // an add and a cancel, so the map from one to the other was searched, not
+  // solved.
+  //
+  // The generator previously ran adds 50.9%, cancels 38.7%, and 14.2% of events
+  // producing a trade one way or another -- more than five times the real trade
+  // rate, on a book where cancels dominate.
+  double        w_add          = 0.42;
+  double        w_delete       = 0.38;
+  double        w_reduce       = 0.13;
   double        w_replace      = 0.04;
+
+  // FABRICATED FILLS. Zero for the simulator, on purpose.
+  //
+  // An Execute here is emitted on a uniformly random resting order chosen from
+  // anywhere in the book: no aggressor caused it, it consumes nothing from the
+  // front of any queue, and its victim is picked without reference to queue
+  // position. Measured, that path carried 56.2% of the simulator's fills by
+  // count and 87.0% by volume -- the skew because it takes the whole resting
+  // order half the time while an aggressive order is usually one to forty lots.
+  //
+  // Queue position is the state variable the entire Phase 5 MDP exists to
+  // exploit, and a fill drawn uniformly over resting orders is independent of
+  // it. Eighty-seven per cent of the volume was averaging that signal away
+  // inside the process the acceptance test is measured on.
+  //
+  // It stays available because the generator has a second job: driving the book
+  // hard enough to prove it correct, where exercising the Execute path is the
+  // point (tests/test_book_differential, test_properties, test_features and
+  // bench/bench_book all set it). The default is zero because of which mistake
+  // is worse. A book test that loses Execute coverage still passes and covers
+  // less; a simulator with fabricated fills still runs and answers a different
+  // question. The dangerous one should be the one you have to ask for.
+  double        w_execute      = 0.0;
   // Aggressive orders that cross the spread. Without these nothing ever trades
   // against a resting quote, so the fill model is never exercised — which is
   // the one thing a market-making simulator has to get right.
-  double        w_aggress      = 0.06;
+  double        w_aggress      = 0.025;
   Qty           aggress_max    = 400;
 
   // ---- informed and uninformed flow (Glosten & Milgrom 1985) --------------
@@ -121,10 +154,19 @@ struct FlowConfig {
   // times over. That single number was why every strategy lost money in the
   // Phase 5 evaluation and why the optimal action was to stop quoting.
   double        drift_prob     = 1e-5;
-  // Adds outnumber removals in these weights, so without a brake the book grows
-  // without bound and every benchmark ends up measuring an absurdly deep queue.
-  // Past this many resting orders, adds are suppressed and the book holds
-  // roughly stationary — which is what a real venue's book does intraday.
+  // How many orders the book holds, held there by a TWO-SIDED controller.
+  //
+  // This used to be a ceiling: past it, adds were suppressed. That works only
+  // while adds outnumber removals, and it silently does nothing when they do
+  // not. Fitting the weights to the measured near-touch event mix -- where
+  // cancels outnumber adds, because orders drift in from levels further out --
+  // flipped the balance, and the book drained from 20,001 resting orders to
+  // TWENTY with nothing to stop it. Every test and every simulation then ran
+  // against an almost empty book, and all of them still passed.
+  //
+  // A real venue's book is stationary because entry and exit balance there too,
+  // and reproducing that is the controller's job, not the weights'. Freeing the
+  // weights of it is what lets the mix be fitted to data at all.
   std::size_t   target_live    = 20'000;
   std::uint64_t seed           = 20260904;
 };
@@ -134,6 +176,12 @@ struct FlowConfig {
 // with genuine gaps is a separate test case, driven by corrupting this output.
 class FlowGenerator {
  public:
+  // Bounds on the add-rate controller. Wide enough to refill an empty book or
+  // drain an overfull one quickly, narrow enough that the event mix near the
+  // target is the fitted one rather than the controller's.
+  static constexpr double kMinAddGain = 0.15;
+  static constexpr double kMaxAddGain = 8.0;
+
   explicit FlowGenerator(FlowConfig cfg = {})
       : cfg_(cfg), rng_(cfg.seed), mid_(cfg.mid) {}
 
@@ -155,8 +203,17 @@ class FlowGenerator {
 
     // Nothing resting yet: only Add is legal.
     const bool can_touch_existing = !live_.empty();
-    // Suppress adds once the book is at its target size, so removals catch up.
-    const double w_add = live_.size() >= cfg_.target_live ? cfg_.w_add * 0.15 : cfg_.w_add;
+    // Scale the add weight by how far the book is from its target: a book at
+    // half size adds twice as eagerly, one at double size a quarter as much.
+    // Clamped, so neither end can run away, and equal to cfg_.w_add exactly at
+    // target -- so the fitted event mix is what the book actually produces when
+    // it is where it should be.
+    const double fill = cfg_.target_live > 0
+        ? static_cast<double>(live_.size()) / static_cast<double>(cfg_.target_live)
+        : 1.0;
+    const double gain  = fill <= 0.0 ? kMaxAddGain
+                       : std::min(kMaxAddGain, std::max(kMinAddGain, 1.0 / (fill * fill)));
+    const double w_add = cfg_.w_add * gain;
     const double total = w_add + cfg_.w_delete + cfg_.w_reduce + cfg_.w_execute
                        + cfg_.w_replace + cfg_.w_aggress;
     const double r = uniform() * total;

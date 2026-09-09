@@ -166,9 +166,19 @@ in the simulator is fake — the `w_aggress` path does go through the matching
 engine and does consume front-first. It says the two paths are mixed, and the
 mix is not something anyone chose on purpose.
 
-**Not yet measured:** what share of the simulator's fills arrive by each path.
-That number decides whether this is a distortion or a dominant one, and it
-should be measured before the fix is scoped.
+**Measured, and it was dominant:** 56.2% of the simulator's fills by count and
+**87.0% by volume** arrived by the fabricated path. The volume skew is because
+a fabricated execute takes the whole resting order half the time, while an
+aggressive order is usually one to forty lots.
+
+**Fixed** the same day. `w_execute` now defaults to zero, so every fill goes
+through the matching engine and consumes the front of a queue. It remains
+available because the generator has a second job -- driving the book hard
+enough to prove it correct, where exercising the Execute path is the point --
+and the four places that need it now ask for it explicitly. The default is zero
+because of which mistake is worse: a book test that loses Execute coverage
+still passes and covers less, while a simulator with fabricated fills still
+runs and answers a different question.
 
 **A caution about the test that found this.** The comparison was originally set
 up to check whether cancel intensity is proportional to the number of resting
@@ -177,3 +187,44 @@ zero-intelligence one does not. That test does not discriminate: uniform
 sampling over resting orders produces the same proportionality for a reason that
 has nothing to do with the book being reactive. The finding above came from a
 different column than the one the test was built to read.
+
+---
+
+## 4. The generator's touch moves sixty times too often
+
+**Found** 2026-09-09, measuring the corrected generator against the ethusd
+capture.
+
+| | touch moves |
+|---|---|
+| synthetic | **18.5 /s** |
+| ethusd (8-hour capture) | **0.29 /s** |
+
+Sixty-fold. The event mix is now fitted -- adds 45.5%, cancels 50.6%, trades
+3.93% against a measured 43.5 / 53.9 / 2.60 -- so the generator produces roughly
+the right KINDS of event in roughly the right proportions, and still moves its
+price sixty times too fast. Mix and dynamics are separate calibrations and only
+the first has been done.
+
+**Caveat on the real number.** ethusd's 0.29/s comes from a capture where the
+`max_spread` filter discards 39% of steps and the book has the holes of issue 1,
+both of which suppress observed moves. The true figure is higher than 0.29 and
+the gap is therefore smaller than sixty-fold, but the sign is not in doubt.
+
+**Why it matters.** Adverse selection is the mid moving against a maker after a
+fill, and its rate is set by how often the mid moves. A process that moves sixty
+times too often prices a market maker's central risk sixty times too high, which
+is exactly the direction that makes quoting look unattractive -- see issue 2,
+where a touch quote came out worth −0.0138 ticks an epoch.
+
+**It also cost a test.** `tests/test_simulator.cpp` asserted that latency turns
+some passive quotes into aggressive fills. That needs the opposite touch to
+collapse a spread onto the quote within its flight, and at 200,000 events it
+happened zero times once the trade rate was fitted -- the assertion had been
+resting on a process that traded five times too often. It passes at a million
+events (151 such fills), and the count is now measured in the test rather than
+assumed.
+
+**Next.** Calibrate the touch dynamics, not just the mix: the rate at which the
+best level is consumed or cancelled away is a queue-reactive quantity, and the
+table `stats` already writes has it per level and per queue size.

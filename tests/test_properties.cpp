@@ -30,7 +30,7 @@ int main() {
   // would show up as depth that is not there, which is the sort of error a
   // strategy would happily trade against for a long time.
   {
-    FlowConfig cfg; cfg.seed = 11; cfg.mid = 10'000; cfg.levels = 8; cfg.target_live = 3'000;
+    FlowConfig cfg; cfg.seed = 11; cfg.mid = 10'000; cfg.levels = 8; cfg.target_live = 3'000; cfg.w_execute = 0.09;
     FlowGenerator gen{cfg};
     OrderBook book{kBase, kWindow, kOrders};
 
@@ -134,7 +134,7 @@ int main() {
 
   // ==== PROPERTY: features stay in their mathematical range =================
   {
-    FlowConfig cfg; cfg.seed = 99; cfg.mid = 10'000; cfg.levels = 8; cfg.target_live = 2'000;
+    FlowConfig cfg; cfg.seed = 99; cfg.mid = 10'000; cfg.levels = 8; cfg.target_live = 2'000; cfg.w_execute = 0.09;
     FlowGenerator gen{cfg};
     OrderBook book{kBase, kWindow, kOrders};
     FeatureEngine fe;
@@ -234,7 +234,7 @@ int main() {
 
   // ==== PROPERTY: clear then replay == fresh replay ========================
   {
-    FlowConfig cfg; cfg.seed = 555; cfg.mid = 10'000; cfg.levels = 6; cfg.target_live = 800;
+    FlowConfig cfg; cfg.seed = 555; cfg.mid = 10'000; cfg.levels = 6; cfg.target_live = 800; cfg.w_execute = 0.09;
     std::vector<BookEvent> events;
     {
       FlowGenerator gen{cfg};

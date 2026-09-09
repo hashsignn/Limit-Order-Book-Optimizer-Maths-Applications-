@@ -161,7 +161,7 @@ int main() {
   // distribution rather than just a mean.
   {
     std::printf("\nmixed replay (synthetic flow)\n");
-    FlowConfig cfg; cfg.mid = 10'000; cfg.levels = 12; cfg.seed = 99;
+    FlowConfig cfg; cfg.mid = 10'000; cfg.levels = 12; cfg.seed = 99; cfg.w_execute = 0.09;
     FlowGenerator gen{cfg};
     OrderBook b{kBase, kWindow, kOrders};
     Histogram h{1'000'000, 3};

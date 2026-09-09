@@ -392,6 +392,13 @@ int main(int argc, char** argv) {
 
     Nanos first_ts = 0, prev_ts = 0, next_grid = 0;
     std::size_t fills_seen = 0;
+    // Fills arrive by two paths and only one of them is a trade. An Aggress
+    // event goes through the matching engine and consumes the front of the
+    // queue; an Execute event is fabricated on a uniformly random resting
+    // order. Both end up as a fill in every statistic downstream, and the split
+    // decides how much of the queue-position signal the second one dilutes.
+    std::uint64_t n_matched = 0, n_fabricated = 0;
+    Qty q_matched = 0, q_fabricated = 0;
     for (int i = 0; i < synthetic; ++i) {
       const BookEvent e = gen.next();
       if (first_ts == 0) { first_ts = e.ts; next_grid = e.ts; }
@@ -407,6 +414,24 @@ int main(int argc, char** argv) {
         // made the two sources disagree about what the columns meant.
         const Ticks pre_bid = book.has_bid() ? book.best_bid() : 0;
         const Ticks pre_ask = book.has_ask() ? book.best_ask() : 0;
+        // The queue-reactive table has to see fills from the MATCHING ENGINE,
+        // not only the ones the generator fabricates. Hooked to the else-branch
+        // alone it saw nothing but fabricated executes -- so with those turned
+        // off it reported a book in which no trade ever happens, while stats
+        // counted 78,142 of them three lines away.
+        //
+        // A market order consumes the front of the touch, so the queue state
+        // the trade found is the one BEFORE the sweep, exactly as for any other
+        // event: read it here, once, rather than after each partial fill has
+        // already changed it.
+        if (warmed) {
+          BookEvent tr{};
+          tr.type  = EventType::Execute;
+          tr.side  = opposite(e.side);
+          tr.price = (tr.side == Side::Bid) ? pre_bid : pre_ask;
+          tr.qty   = e.qty;
+          if (tr.price > 0) qr.on_event(book, tr);
+        }
         (void)match.submit_market(e.ts, e.order_id, e.side, e.qty, /*mine=*/false);
         for (std::size_t k = fills_seen; k < match.fills().size(); ++k) {
           const Fill& f = match.fills()[k];
@@ -424,9 +449,15 @@ int main(int argc, char** argv) {
                          f.resting_side == Side::Bid ? 1 : 0, f.qty);
           }
           if (gone) gen.forget_order(f.resting_id);
+          if (warmed) { ++n_matched; q_matched += f.qty; }
         }
         fills_seen = match.fills().size();
+        if (warmed) qr.on_state(book, rel);
       } else {
+        if (warmed && e.type == EventType::Execute) {
+          ++n_fabricated;
+          q_fabricated += e.qty;
+        }
         acc.before_apply(book, e, rel, warmed);
         if (warmed) qr.on_event(book, e);
         (void)book.apply(e);
@@ -439,6 +470,24 @@ int main(int argc, char** argv) {
         next_grid = e.ts + grid;
         if (warmed) acc.on_grid(book, rel);
       }
+    }
+    {
+      const double n = static_cast<double>(n_matched + n_fabricated);
+      const double q = static_cast<double>(q_matched + q_fabricated);
+      std::fprintf(stderr,
+          "  fills by path: %llu matched through the engine (%.1f%% of count, %.1f%% of "
+          "volume),\n                 %llu fabricated on a random resting order "
+          "(%.1f%%, %.1f%%)\n",
+          static_cast<unsigned long long>(n_matched),
+          n > 0 ? 100.0 * static_cast<double>(n_matched) / n : 0.0,
+          q > 0 ? 100.0 * static_cast<double>(q_matched) / q : 0.0,
+          static_cast<unsigned long long>(n_fabricated),
+          n > 0 ? 100.0 * static_cast<double>(n_fabricated) / n : 0.0,
+          q > 0 ? 100.0 * static_cast<double>(q_fabricated) / q : 0.0);
+      std::fprintf(stderr,
+          "  Only the matched path consumes the front of a queue, so only it carries any\n"
+          "  information about queue position. The fabricated share is how much of the\n"
+          "  signal the Phase 5 policy is asked to exploit has been averaged away.\n");
     }
   } else {
     // ---- a recorded venue capture ----

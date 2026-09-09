@@ -165,6 +165,9 @@ int main() {
   // carried state is where incremental code goes wrong.
   {
     FlowConfig cfg;
+    // The book must be driven through its Execute path to be proved correct, and
+    // the generator no longer fabricates one by default -- see FlowConfig::w_execute.
+    cfg.w_execute = 0.09;
     cfg.seed = 20260904; cfg.mid = 10'000; cfg.levels = 8; cfg.target_live = 3'000;
     FlowGenerator gen{cfg};
     OrderBook  book{5'000, 10'240, 1 << 16};
