@@ -75,3 +75,51 @@ given to `solve` explicitly with `--level-ratio` and defended.
 **How to check a fix.** `stats --capture-dir <dir>` prints the share and the
 histogram. A fix moves the 5–16 and 17+ rows toward zero; the 1-tick row should
 not move, because that one is the channel race and no book change touches it.
+
+---
+
+## 2. The MDP prices a touch quote as a guaranteed loser on real data
+
+**Found** 2026-09-09, solving ethusd from the 8-hour capture. The policy quotes
+one tick behind the touch in **81.8% of states and at the touch in none** — the
+same pathology fixed earlier against the simulator, arrived at from a different
+direction.
+
+**The arithmetic, from the numbers the solve printed.** Averaged across
+imbalance, P(mid moves) is 2.9% an epoch while P(fill at the touch, alone in the
+queue) is 0.141% — **moves are 21x more likely than fills**. A touch quote taken
+by a move earns `edge_ticks[0]` = 0.5 and then has `move_ticks` = 1.0 applied
+against the resulting inventory, so each one is worth −0.5:
+
+| | ticks/epoch |
+|---|---|
+| at the touch | 2.9% x (−0.50) + 0.141% x (+0.50) = **−0.0138** |
+| one tick behind | 0.0141% x (+1.50) = **+0.0002** |
+
+Nothing about the policy is wrong given those inputs. One of the inputs is.
+
+**Two candidates. Both measurable. Neither yet measured.**
+
+1. `move_ticks` is 1.0 here against 0.5 on the clean ten-minute capture, and it
+   comes from the same degraded book as issue 1 — 60% of the time at one tick
+   against 92%. If the true figure is 0.5 the move-fill is break-even, not −0.5,
+   and the fill income decides it.
+2. `expand()` charges the FULL move against every move-fill. The markout
+   measured on this very capture says the mid moves against the passive side
+   **33% of the time**, not always. Charging a certain loss where the data shows
+   a one-in-three chance is a different error, in the same direction, and it
+   does not need issue 1 to be true.
+
+Note what is NOT a candidate: `taken_by_move()` firing for a quote at the touch.
+That looks like an over-assumption in a book where 99.7% of removals are
+cancels, and it is not one — a maker does not cancel its own quote, so for the
+touch to move past our price our order must have been taken.
+
+**What it does not affect.** The Phase 5 acceptance test, which runs on the
+simulator, where the same solver produces a policy that quotes at the touch in
+73% of states. This is the real-instrument table only, and that table is a
+demonstration artefact.
+
+**Do not fix by picking one.** Measure `move_ticks` on a book without issue 1's
+holes, and separately measure P(mid move is adverse | our quote was taken), and
+let the two numbers say which it is.
