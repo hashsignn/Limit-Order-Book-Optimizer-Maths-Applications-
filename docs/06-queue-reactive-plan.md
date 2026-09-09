@@ -369,8 +369,65 @@ What the process looks like after it:
 The imbalance profile now runs 0.4 / 0.9 / 1.8 / 2.4 / 3.1 against ethusd's
 0.3 / 0.4 / 0.8 / 0.6 / 3.0 — the same level and nearly the same range.
 
-Still open: the residual lift gap, which is what a proper Hawkes kernel with a
-fitted decay would close, and adverse selection at 24% against 33%.
+## The Hawkes kernel, measured — and what it turned out not to fix
+
+The kernel is directly observable: replay a capture, bin the lag since the most
+recent print on that side, and accumulate both the cancels and the **time** spent
+at each lag. The ratio to the unconditional rate is the kernel.
+
+| lag, ms | 0–25 | 25–50 | 50–100 | 100–200 | 200–400 | 400–800 | 800+ |
+|---|---|---|---|---|---|---|---|
+| ethusd | **26.8** | 13.1 | 1.6\* | 10.1 | 2.0 | 1.4 | 0.9 |
+| btcusd | **12.9** | 5.4 | 3.1 | 2.4 | 1.7 | 1.1 | ~0.9 |
+
+\* two events; noise.
+
+An order of magnitude above baseline inside 25 ms, back to baseline within a few
+hundred. The first kernel assumed gain 5 with a one-second decay — twenty times
+too weak and ten times too slow.
+
+**A single exponential is the wrong family.** Weighted by event count the fit
+lands on gain 19.3 / τ 145 ms for ethusd and gain 2.9 / τ 448 ms for btcusd, and
+neither reproduces its own first bin. `rate − 1` falls by about half per doubling
+of lag, so α ≈ 1: a power law, the shape Bacry and Muzy find for financial Hawkes
+kernels. Reproducing it properly needs a sum of exponentials; one term is what is
+implemented.
+
+Trades excite trades far harder — 247× baseline in the first 25 ms on ethusd, 91×
+on btcusd — but most of that is mechanical, not informational: one market order
+sweeping several limits appears as several prints in quick succession, which the
+paper says explicitly. Not modelled, for that reason.
+
+**And the kernel is not what limits this process.** Sweeping it end to end:
+
+| gain / τ | P(move \| print) | P(move \| random) | lift | adverse | **η** |
+|---|---|---|---|---|---|
+| 5 / 1.0 s | 30.2% | 15.7% | 1.92 | 23.7% | 0.39 |
+| **19.3 / 0.145 s** | **29.2%** | **18.2%** | **1.61** | **22.1%** | **0.41** |
+| 30 / 0.09 s | 26.4% | 17.4% | 1.51 | 19.8% | 0.40 |
+| 60 / 0.05 s | 23.1% | 14.1% | 1.65 | 16.7% | 0.40 |
+| ethusd | 57.4% | 17.7% | 3.24 | 48.1% | **0.84** |
+| btcusd | 68.6% | 19.6% | 3.50 | — | **0.48** |
+
+The lift barely moves across a twelvefold range of gain and a twentyfold range of
+decay. What does not move **at all** is η, the Robert–Rosenbaum mean-reversion
+ratio — continuations over twice the alternations — pinned at 0.40 in every
+configuration against ethusd's 0.84. Below 0.5 the price alternates more than a
+random walk: it moves and comes straight back, so a move caused by a print is
+gone again before the one-second horizon the lift is measured over.
+
+That is `theta`'s parameter, not the kernel's. The paper calibrates `theta` and
+`theta_reinit` against the ten-minute volatility **and** η for exactly this
+reason, and `theta` is still 1.0 here, unfitted.
+
+Shipped at the ethusd fit — the kernel fitted to the mechanism it models rather
+than to a downstream statistic. It also lands the process volatility closer than
+the ad-hoc pair did, 18.2% against 17.7% where gain 5 gave 15.7%, and its lower
+lift is bounded by mean reversion rather than by anything in the kernel.
+
+**Still open:** η at 0.40 against 0.84, which is the binding constraint and is
+`theta`'s to fix; adverse selection at 22% against 33%; and the power-law shape,
+which needs a second exponential term.
 
 ## Model II-a: what was implemented, and what level_ratio actually needed
 

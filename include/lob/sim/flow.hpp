@@ -553,32 +553,65 @@ struct FlowConfig {
     // where Model I put it: an excitation that also raises the average is two
     // changes wearing one name.
     //
-    // THE GAIN IS FITTED TO THE UNCONDITIONAL MOVE RATE, NOT TO THE LIFT, and
-    // the sweep says why that is the honest choice:
+    // THE KERNEL IS MEASURED. Replaying the captures, binning the lag since
+    // the most recent print on that side and accumulating both the cancels and
+    // the TIME spent at each lag, the cancellation rate at the hit touch runs
+    // (as a multiple of its own baseline):
     //
-    //     gain   P(mv|print)  P(mv|random)   lift   adverse
-    //        0      28.5%        28.6%       1.00    18.5%
-    //        2      29.5%        23.0%       1.28    21.5%
-    //        3      30.0%        21.1%       1.43    22.4%
-    //        5      30.2%        15.7%       1.92    23.7%
-    //        8      27.2%         7.0%       3.90    22.2%
-    //       12      39.7%         0.0%       1984     36.5%
-    //     ethusd    57.4%        17.7%       3.24    48.1%
+    //     lag, ms    0-25  25-50  50-100  100-200  200-400  400-800  800+
+    //     ethusd     26.8   13.1    1.6*    10.1      2.0      1.4     0.9
+    //     btcusd     12.9    5.4    3.1      2.4      1.7      1.1     ~0.9
+    //                                  * two events; noise
     //
-    // Gain 8 lands the lift almost exactly. It is still the wrong answer: the
-    // numerator never moves, and the lift rises only because the DENOMINATOR
-    // collapses -- by gain 12 the price does not move at all except after a
-    // trade. Matching one statistic by breaking another is the mistake the old
-    // informed_impact_prob fit made in the opposite direction, and taking gain
-    // 8 here would be making it again facing the other way.
+    // Enormous and fast: an order of magnitude above baseline inside 25 ms, and
+    // back to it by a few hundred. The first version of this kernel assumed
+    // gain 5 with a one-second decay, which is twenty times too weak and ten
+    // times too slow.
     //
-    // Five, because it is the value whose unconditional move rate matches the
-    // instrument: 15.7% against ethusd's 17.7%. The lift it buys is 1.92 of a
-    // measured 3.24, and the honest reading is that this kernel gets the
-    // process most of the way from "a fill says nothing" to "a fill says
-    // something", and not all the way.
-    double excite_gain = 5.0;      // multiplies lambda^C at the hit touch
-    double excite_tau_s = 1.0;     // decay, in seconds
+    // A SINGLE EXPONENTIAL IS THE WRONG FAMILY, and the fit says so: weighted
+    // by event count it lands on gain 19.3 with tau 145 ms for ethusd and gain
+    // 2.9 with tau 448 ms for btcusd, and neither reproduces its own first bin.
+    // The decay is much faster at short lags than at long ones, which is a
+    // power law rather than an exponential -- (rate - 1) falls by about half
+    // per doubling of lag, so alpha near 1, the shape Bacry and Muzy find for
+    // financial Hawkes kernels. Reproducing that properly needs a sum of
+    // exponentials; one term is what is here.
+    //
+    // Trades excite trades far harder still -- 247x baseline in the first 25 ms
+    // on ethusd, 91x on btcusd -- but most of that is mechanical rather than
+    // informational: the paper notes that one market order sweeping several
+    // limits appears as several prints in quick succession. It is not modelled
+    // for that reason.
+    //
+    // AND THE KERNEL IS NOT WHAT LIMITS THIS PROCESS. Sweeping it end to end:
+    //
+    //     gain / tau      P(mv|print)  P(mv|random)  lift  adverse   eta
+    //     5    / 1.0 s       30.2%        15.7%      1.92   23.7%   0.39
+    //     19.3 / 0.145 s     29.2%        18.2%      1.61   22.1%   0.41
+    //     30   / 0.09 s      26.4%        17.4%      1.51   19.8%   0.40
+    //     60   / 0.05 s      23.1%        14.1%      1.65   16.7%   0.40
+    //     ethusd             57.4%        17.7%      3.24   48.1%   0.84
+    //     btcusd             68.6%        19.6%      3.50    ----   0.48
+    //
+    // The lift barely moves across a twelvefold range of gain and a twentyfold
+    // range of decay. What does not move AT ALL is eta, the Robert-Rosenbaum
+    // mean-reversion ratio -- continuations over twice the alternations -- which
+    // sits at 0.40 in every configuration against ethusd's 0.84. Below 0.5 the
+    // price alternates more than a random walk: it moves and comes straight
+    // back, so a move caused by a print is gone again before the one-second
+    // horizon the lift is measured over.
+    //
+    // That is theta's parameter, not this one. The paper calibrates theta and
+    // theta_reinit against the ten-minute volatility AND eta for exactly this
+    // reason, and theta is still at 1.0 here, unfitted. See docs/06.
+    //
+    // So the constants below are the ethusd fit -- the kernel fitted to the
+    // mechanism it models, rather than to a downstream statistic. It also
+    // happens to land the process volatility closer than the old ad-hoc pair
+    // did (18.2% against 17.7%, where gain 5 gave 15.7%), and its slightly
+    // lower lift is bounded by mean reversion rather than by anything here.
+    double excite_gain  = 19.3;    // multiplies lambda^C at the hit touch
+    double excite_tau_s = 0.145;   // decay, in seconds
 
     // The compensation, and why it is not optional. A kernel that fires on a
     // Poisson stream of rate m with decay tau carries a mean of gain * m * tau,
