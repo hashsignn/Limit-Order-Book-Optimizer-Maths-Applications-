@@ -540,8 +540,51 @@ metaorder overrides which side is hit, and that was the side Model II-b chose
 from the queue state. Kept anyway: the flow property is real, measured and
 reproduced, and the statistic it costs is one already broken by the impact gap.
 
-**Still open:** the price impact of a trade, which now blocks both η and adverse
-selection; and the kernel's power-law shape, which needs a second exponential.
+## Phase 5 on the calibrated process: the loop closes, and the test loses power
+
+`backtest` and `evaluate` run `FlowConfig::ethusd_queue_reactive()` now. The
+pipeline goes end to end — measure the process, estimate the MDP parameters,
+solve, evaluate — so Phase 3 and Phase 5 are one loop rather than two phases.
+
+The policy is healthy: it quotes both sides at the touch in 29.7% of states,
+skews to touch/+1 in 51.4%, and pulls a side only at the inventory limit.
+
+| strategy | session P&L | spread-cap | adv-select | passive | aggressive |
+|---|---|---|---|---|---|
+| JoinTouch | −698 | 6,216 | −404 | 2,211 | 0 |
+| TabulatedMDP | −1,834 | 668 | −410 | 261 | 0 |
+| ConstantSpread | −1,792 | 797 | −716 | 290 | 3 |
+| GLFT | −1,605 | 794 | −743 | 286 | 3 |
+| InventorySkew | −787,757 | −758,996 | 161,463 | 20 | **151,514** |
+| AvellanedaStoikov | −818,188 | −690,193 | 192,311 | 24 | **136,294** |
+
+```
+TabulatedMDP minus JoinTouch, paired by seed:
+  mean -1136.5   95% CI [-3871.9, +1515.7]   over 16 seeds, 6 of them positive
+```
+
+**A tie, where the fixed-weight process gave a clear loss** (−1,703, CI
+[−2,118, −1,321], 1 of 24 positive). But read the interval before reading the
+mean: ±2,700 around −1,136. The test has lost most of its power.
+
+**Why.** JoinTouch captures 6,216 of spread and pays 404 of adverse selection —
++5,812 of trading edge — and still ends at −698. The difference is the closing
+inventory marked at the closing mid, against a peak position of 59. With η ≈ 0.5
+the price random-walks, so that mark is noise, and it is now large enough to
+drown the comparison the test exists to make. **Every strategy loses money on
+this process**, which is what a random walk plus a real spread should do to a
+maker who carries inventory.
+
+Two baselines are pathological and were not before: `InventorySkew` and
+`AvellanedaStoikov` send 151,514 and 136,294 **aggressive** fills in 250,000
+events. Their quotes cross a book whose spread is one tick 96% of the time. That
+is a strategy-parameter problem exposed by a tighter process, not a solver
+problem, and it is unfixed.
+
+**Still open:** the price impact of a trade, which blocks η, adverse selection
+and the lift together; the acceptance test's power, which needs either more
+seeds or an inventory-neutral comparison; those two baselines; and the kernel's
+power-law shape.
 
 ## Model II-a: what was implemented, and what level_ratio actually needed
 
