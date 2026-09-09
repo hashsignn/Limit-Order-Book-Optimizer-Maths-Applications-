@@ -2006,44 +2006,93 @@ on a one-sided book and five of the six strategies use it unguarded.
 **1. `InventorySkew` and `AvellanedaStoikov` quote through the market.**
 `assemble` clamps the half-spread into `[min_half, max_half]` (lines 93-94) but
 never clamps the **centre**. Both strategies centre on the Ho-Stoll reservation
-price `r = mid - inv·γ·σ²·(T-t)` (line 148), and with the shipped defaults
-`γ = 0.05`, `σ = 1.0`, `horizon = 1e5` that is `mid - inv·5000` ticks. I ran the
-formulas directly against a one-tick book with mid 10,000.5:
+price `r = mid - inv*gamma*sigma^2*(T-t)` (line 148). With the **defaults in
+`QuoteParams`** — `gamma = 0.05`, `sigma = 1.0`, `horizon = 1e5` — that is
+`mid - inv*5000` ticks. Evaluated against a one-tick book with mid 10,000.5:
 
 | inventory | reservation price | InventorySkew bid / ask | A-S half | A-S bid / ask |
 |---|---|---|---|---|
 | 0 | 10,000.5 | 9,999 / 10,002 | 50.0 | 9,950 / 10,051 |
 | 1 | 5,000.5 | 4,999 / 5,002 | 50.0 | 4,950 / 5,051 |
-| 5 | −14,999.5 | −15,001 / −14,998 | 50.0 | −15,050 / −14,949 |
-| 200 | −989,999.5 | −990,001 / −989,998 | 50.0 | −990,050 / −989,949 |
+| 5 | -14,999.5 | -15,001 / -14,998 | 50.0 | -15,050 / -14,949 |
+| 50 | -239,999.5 | -240,001 / -239,998 | 50.0 | -240,050 / -239,949 |
 
 At an inventory of **one share** the ask is quoted 4,999 ticks below the best
-bid — a sell at any price. At five shares both quotes are outside the book's
-price window and are rejected outright. That is the mechanism behind the
-151,514 and 136,294 aggressive fills these two strategies produce in a
-250,000-event run: they are not quoting wide, they are crossing.
+bid: a sell at any price.
 
-Note also that A-S's own contribution is discarded. `optimal_spread` evaluates
-to `0.05·1·1e5 + 40·ln(1.0333) ≈ 5001` ticks, a half-spread of 2,500, which
-`assemble` clamps to `max_half = 50`. So the A-S spread formula has no effect on
+**Which callers hit it.** This is the part worth being precise about, because
+the defaults are not universal:
+
+| caller | gamma | sigma | horizon | skew per share |
+|---|---|---|---|---|
+| `QuoteParams` defaults | 0.05 | 1.0 | 1e5 | 5,000 ticks |
+| `apps/evaluate/main.cpp:77` `base_params()` | default | default | default | 5,000 ticks |
+| `apps/backtest/main.cpp:118` | 0.05 | 0.5 | 1.0 | 0.0125 ticks |
+| `tests/test_strategies.cpp:24` | 0.05 | 0.5 | 1.0 | 0.0125 ticks |
+
+`base_params()` sets only `size` and `max_inventory` and leaves the three risk
+parameters at their defaults. `apps/evaluate` is the **Phase 5 acceptance
+test**. The backtest and the test suite both override `horizon` to 1.0, which is
+exactly why nothing catches this.
+
+Running the acceptance test confirms it:
+```
+$ ./build/evaluate --table policy/ethusd.bin --seeds 2 --events 60000
+strategy                session P&L   spread-cap   adv-select  peak inv    pasv    aggr requotes
+ConstantSpread                643.8        238.8       -263.8      58.5      86       0      888
+InventorySkew             -171431.8    -181010.5       5411.2       8.5       2   37224    37166
+AvellanedaStoikov         -140578.8    -164483.5     -21399.2       9.0       6   31748    31807
+GLFT                          627.0        226.8       -263.8      55.5      84       0      871
+ImbalanceSkew                 178.5        225.2       -275.2      58.0      82       1     1195
+JoinTouch                    -304.5       1523.5       -148.8      58.0     530       0     1068
+TabulatedMDP                 -304.5       1523.5       -148.8      58.0     530       0     1068
+```
+`InventorySkew` takes **2 passive fills and 37,224 aggressive ones**;
+`AvellanedaStoikov` takes 6 and 31,748. Their peak inventory is 8.5 against
+58.5 for `ConstantSpread`, because they dump the position the instant they
+acquire it. Neither is quoting.
+
+Note also that A-S's own contribution is discarded even where it is sane.
+`optimal_spread` at the defaults evaluates to
+`0.05*1*1e5 + 40*ln(1.0333) ~= 5001` ticks, a half-spread of 2,500, which
+`assemble` clamps to `max_half = 50`. The A-S spread formula has no effect on
 the quotes at all; what remains is a 50-tick spread around a broken centre.
 
-**2. `GLFT` and `ImbalanceSkew` are `ConstantSpread` in disguise.** With the
-same defaults, `base = 0.0219` and `inventory_term = 0.2146`:
+**2. `GLFT` and `ImbalanceSkew` collapse to `ConstantSpread`.** With
+`base(p) = 0.0219` and `inventory_term(p) = 0.2146` at the defaults:
 
 | q (inventory / size) | half_bid | after clamp | half_ask | after clamp |
 |---|---|---|---|---|
 | 0 | 0.129 | 1.0 | 0.129 | 1.0 |
-| 2 | 0.558 | 1.0 | −0.300 | 1.0 |
-| 20 | 4.421 | 4.4 | −4.163 | 1.0 |
+| 2 | 0.558 | 1.0 | -0.300 | 1.0 |
+| 20 | 4.421 | 4.4 | -4.163 | 1.0 |
 
-`min_half = 1` swallows the entire inventory term below `q ≈ 4.1`, i.e. an
-inventory of 40 shares out of a 200 limit. `half_ask` is negative for any
-`q > 0.6` and is clamped for the whole long range, so GLFT's ask **never widens
-with inventory**. `ImbalanceSkew` adds a tilt of at most ±1 tick to those
-clamped values, and since `q.bid = floor(mid - half_bid)` on a one-tick book,
-a half-spread anywhere in `[1, 1.13]` floors to the same tick. The tilt changes
-no quote.
+`min_half = 1` swallows the entire inventory term below `q ~= 4.1`, and the
+position limit in `evaluate` is 50 shares — `q <= 5`. `half_ask` is negative for
+any `q > 0.6`, so GLFT's ask **never widens with inventory** anywhere in its
+working range. `ImbalanceSkew` adds a tilt of at most +-1 tick to those clamped
+values, and since `q.bid = floor(mid - half_bid)` on a one-tick book, a
+half-spread anywhere in `[1, 1.13]` floors to the same tick.
+
+The measured table above is the confirmation: GLFT scores 627.0 against
+ConstantSpread's 643.8, with 84 passive fills against 86 and 871 requotes
+against 888. They are the same strategy.
+
+**2b. `TabulatedMDP` is byte-identical to `JoinTouch`.** Every column matches
+(-304.5, 1523.5, -148.8, 58.0, 530, 0, 1068), and the acceptance test's own
+paired comparison reports:
+```
+  TabulatedMDP minus JoinTouch, paired by seed:
+    mean +0.0   95% CI [+0.0, +0.0]   over 2 seeds, 0 of them positive
+```
+An identically-zero difference is not a result, it is a signal that the solved
+policy emits the join-the-touch action in every state the run reaches, or that
+the table lookup is not differentiating states. The tool flags the *first*
+comparison as degenerate ("the criterion is degenerate here; read the second
+comparison") but says nothing about the second being exactly zero. That is the
+one number the Phase 5 acceptance criterion turns on, and it currently carries
+no information. It should be investigated before the criterion is quoted
+anywhere.
 
 **3. `detail::mid_of` does not check that the book is two-sided** (lines
 107-109). `OrderBook::best_bid()` returns 0 for an empty side, so a book with no
@@ -2054,16 +2103,17 @@ unguarded; only `JoinTouch` checks (line 236).
 returns a lowercase hyphenated name, and it is not `constexpr` like the others.
 Cosmetic, but it lands in every comparison table.
 
-**Severity:** **Critical** (findings 1 and 2 — the baseline comparison in
-`docs/BASELINE.md` does not measure what it reports for four of six rows),
-Medium (finding 3), Minor (finding 4)
+**Severity:** **Critical** (findings 1, 2 and 2b — the Phase 5 acceptance
+table in `apps/evaluate` does not measure what it reports for five of its
+seven rows), Medium (finding 3), Minor (finding 4)
 
-**Why it matters:** The whole argument of Phase 4 is that a learned policy must
-beat honest baselines. Four of the six are not baselines: two are
-aggressive-order generators whose losses are a parameterisation artefact, and
-two are the null hypothesis wearing another name. A policy that beats them has
-demonstrated nothing, and a policy that loses to `ConstantSpread` has actually
-lost to three strategies at once.
+**Why it matters:** The whole argument of Phases 4 and 5 is that a learned
+policy must beat honest baselines. In the acceptance test, four of the six are
+not baselines: two are aggressive-order generators whose 171,000-tick losses are
+a parameterisation artefact, and two are the null hypothesis wearing another
+name. The fifth, `JoinTouch`, is the only baseline that both trades and quotes
+sensibly — and the learned policy ties it exactly. So the acceptance table has
+one real comparison in it and that comparison returns zero.
 
 The file's header already knows half of this. Lines 16-28 explain that models
 1-5 quote a half-spread from the mid, and that on a one-tick book the smallest
@@ -2092,26 +2142,41 @@ join-the-touch quoters, which is a defensible baseline.
 //    gamma * sigma^2 * horizon is the skew per unit of inventory. Choose it so
 //    that a full position skews by a few ticks:
 //        skew_at_limit = max_inventory/size * gamma * sigma^2 * horizon
-//    With max_inventory 200, size 10, a 5-tick skew at the limit needs
-//    gamma * sigma^2 * horizon = 0.25, not 5000.
+//    With max_inventory 50, size 10, a 5-tick skew at the limit needs
+//    gamma * sigma^2 * horizon = 1.0, not 5000.
 ```
-Set `horizon` to the events actually remaining in a decision epoch rather than
-the whole run, or state `gamma` in ticks-per-share directly. Then lower
-`min_half` to 0 so GLFT's sub-tick offsets survive to the rounding step, where
-`floor`/`ceil` will quantise them honestly.
+Change the **defaults in `QuoteParams`**, not just the callers — the callers
+that override them are the ones that work, and the caller that does not is the
+acceptance test. Set `horizon` to the events remaining in a decision epoch
+rather than the whole run, or state `gamma` in ticks-per-share directly. Then
+lower `min_half` to 0 so GLFT's sub-tick offsets survive to the rounding step,
+where `floor`/`ceil` will quantise them honestly.
+
+3. Separately, find out why `TabulatedMDP` and `JoinTouch` produce identical
+   output. Dump the action distribution the table actually emits over a run
+   (`TabulatedPolicy` already counts `off_grid`; a per-action histogram beside
+   it is a few lines) and check whether the solved policy is constant.
 
 **Refactor Suggestion:** Add a `sanity()` check to `QuoteParams` that computes
 the implied skew at the inventory limit and refuses a configuration that exceeds
 a few ticks. A parameter set that makes a market maker cross the spread should
 fail loudly at construction, not silently in the results table.
 
-**Tests Missing:** This is the gap that let the finding through.
-`tests/test_strategies.cpp` is audited separately, but no test asserts the one
-property every quoting strategy must have: **a quote never crosses the book it
-was computed from.** One parameterised test over all six strategies, all
-inventory levels from `-max` to `+max`, asserting `q.bid < best_ask` and
-`q.ask > best_bid`, would have caught findings 1 and 3 immediately. A second
-asserting that GLFT's quotes actually vary with inventory would have caught 2.
+**Tests Missing:** Two specific gaps, and they are what let this through.
+- `tests/test_strategies.cpp:159-177` **does** sweep all five strategies over
+  inventories from -150 to +150 and assert `q.bid < q.ask`. That only forbids a
+  *self*-crossed pair. It never asserts the property that matters: **a quote
+  never crosses the book it was computed from** — `q.bid < best_ask` and
+  `q.ask > best_bid`. Adding those two lines to the existing loop would have
+  caught findings 1 and 3 on the day they were written.
+- That same test builds its `QuoteParams` at line 24 with `horizon = 1.0`, so
+  the shipped defaults are never exercised anywhere in the suite. A test that
+  runs the sweep with a **default-constructed** `QuoteParams` is the one that
+  would have caught the real defect.
+- Nothing asserts that GLFT's quotes vary with inventory once the `min_half`
+  clamp is applied. `test_strategies.cpp:127-141` tests `half_bid`/`half_ask`
+  as raw doubles, before the clamp, so it passes while the clamped quotes are
+  constant.
 
 **Performance Notes:** `GLFT::inventory_term` calls `std::pow` and `std::sqrt`
 on every quote (lines 194-197) over parameters that never change during a run.
