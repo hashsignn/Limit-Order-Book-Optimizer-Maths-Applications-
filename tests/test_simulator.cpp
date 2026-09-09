@@ -82,8 +82,17 @@ int main() {
 
   // ---- latency changes outcomes, and in the direction the theory predicts ----
   {
-    const SimStats zero = run(false, 200'000);
-    const SimStats slow = run(true,  200'000);
+    // A million events, not two hundred thousand, and the number is measured
+    // rather than picked. An unintended crossing needs the OPPOSITE touch to
+    // collapse a full spread onto our quote inside its one-millisecond flight,
+    // which is far rarer than the touch merely moving. Once the generator's
+    // aggressive weight was fitted to the real trade rate -- 2.6% of events,
+    // down from an effective 14% -- two hundred thousand events produced
+    // exactly zero of them and this assertion failed. It is not that latency
+    // stopped causing aggression: 500k events give 87 and a million give 151.
+    // The test had been relying on a process that traded five times too often.
+    const SimStats zero = run(false, 1'000'000);
+    const SimStats slow = run(true,  1'000'000);
 
     // A purely passive agent cannot cross by itself. With zero latency it never
     // does. Under latency its quotes are decided on a stale book, so some land

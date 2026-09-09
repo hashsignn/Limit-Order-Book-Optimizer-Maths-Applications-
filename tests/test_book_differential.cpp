@@ -61,6 +61,9 @@ bool same_state(const OrderBook& fast, const ReferenceBook& ref, std::string* wh
 // One run over `n` events with a given seed. Returns false on first divergence.
 bool run(std::uint64_t seed, int n, bool with_own, std::string* why) {
   FlowConfig cfg;
+  // The book must be driven through its Execute path to be proved correct, and
+  // the generator no longer fabricates one by default -- see FlowConfig::w_execute.
+  cfg.w_execute = 0.09;
   cfg.seed   = seed;
   cfg.mid    = 10'000;
   cfg.levels = 12;

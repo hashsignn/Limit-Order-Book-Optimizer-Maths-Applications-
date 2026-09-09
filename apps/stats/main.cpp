@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "lob/book/order_book.hpp"
+#include "lob/feat/queue_reactive.hpp"
 #include "lob/feed/bitstamp.hpp"
 #include "lob/feed/json.hpp"
 #include "lob/feed/line_reader.hpp"
@@ -284,6 +285,7 @@ int main(int argc, char** argv) {
   // not silent, but the book then describes a market that stopped existing.
   double band_pct = 0.02;
   int synthetic = 0;
+  bool calibrated = false;
   // Negative leaves the FlowConfig default in place; see apps/evaluate for why
   // a tool holding its own copy of a default is a way to measure a process
   // nobody configured.
@@ -311,6 +313,7 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--warmup")  == 0 && nx) warmup_sec = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--grid-ms") == 0 && nx) grid_ms = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--synthetic") == 0 && nx) synthetic = std::atoi(argv[++i]);
+    else if (std::strcmp(argv[i], "--calibrated") == 0) calibrated = true;
     else if (std::strcmp(argv[i], "--seed")    == 0 && nx) seed = std::strtoull(argv[++i], nullptr, 10);
     else if (std::strcmp(argv[i], "--drift")   == 0 && nx) drift = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--informed") == 0 && nx) informed = std::atof(argv[++i]);
@@ -320,6 +323,9 @@ int main(int argc, char** argv) {
         "stats --capture <file> [--capture <file> ...] | --capture-dir <dir>\n"
         "      | --synthetic <n_events>\n"
         "      [--outdir .] [--warmup 60] [--grid-ms 100] [--seed N] [--label NAME]\n"
+        "      [--calibrated]   --synthetic only: run the process fitted to the\n"
+        "                       captures (FlowConfig::ethusd()) rather than the\n"
+        "                       dense, fast one the other apps still use.\n"
         "      [--band-pct 0.02]\n"
         "\n"
         "  --capture-dir   every *_bitstamp.jsonl.gz in a directory, in name order.\n"
@@ -368,6 +374,11 @@ int main(int argc, char** argv) {
   std::fprintf(f_arr, "gap_us\n");
 
   Accumulator acc{f_ord, f_trd, f_mid, f_arr};
+  // Queue-reactive intensities (Huang, Lehalle & Rosenbaum). Measured on both
+  // sources deliberately: the whole claim about the synthetic generator is that
+  // its rates do NOT depend on queue size, and the only way to say that is to
+  // measure the same thing on both and put the two curves side by side.
+  QueueReactive qr;
   const Nanos warm = static_cast<Nanos>(warmup_sec * 1e9);
   const Nanos grid = static_cast<Nanos>(grid_ms * 1e6);
 
@@ -376,8 +387,12 @@ int main(int argc, char** argv) {
     // Driven exactly as Simulator drives it, including routing aggressive flow
     // through the matcher: without that path nothing ever fills passively, and
     // a fill rate of zero is not a measurement of this process.
-    FlowConfig fc;
-    fc.seed = seed; fc.mid = 10'000; fc.levels = 8; fc.target_live = 4'000;
+    // --calibrated selects the process fitted to the captures; without it,
+    // the stress process every other app still runs on. Both are worth
+    // measuring and the whole point of this tool is to tell them apart.
+    FlowConfig fc = calibrated ? FlowConfig::ethusd() : FlowConfig{};
+    fc.seed = seed; fc.mid = 10'000;
+    if (!calibrated) { fc.levels = 8; fc.target_live = 4'000; }
     if (drift >= 0.0)    fc.drift_prob    = drift;
     if (informed >= 0.0) fc.informed_frac = informed;
     FlowGenerator gen{fc};
@@ -386,6 +401,13 @@ int main(int argc, char** argv) {
 
     Nanos first_ts = 0, prev_ts = 0, next_grid = 0;
     std::size_t fills_seen = 0;
+    // Fills arrive by two paths and only one of them is a trade. An Aggress
+    // event goes through the matching engine and consumes the front of the
+    // queue; an Execute event is fabricated on a uniformly random resting
+    // order. Both end up as a fill in every statistic downstream, and the split
+    // decides how much of the queue-position signal the second one dilutes.
+    std::uint64_t n_matched = 0, n_fabricated = 0;
+    Qty q_matched = 0, q_fabricated = 0;
     for (int i = 0; i < synthetic; ++i) {
       const BookEvent e = gen.next();
       if (first_ts == 0) { first_ts = e.ts; next_grid = e.ts; }
@@ -401,6 +423,24 @@ int main(int argc, char** argv) {
         // made the two sources disagree about what the columns meant.
         const Ticks pre_bid = book.has_bid() ? book.best_bid() : 0;
         const Ticks pre_ask = book.has_ask() ? book.best_ask() : 0;
+        // The queue-reactive table has to see fills from the MATCHING ENGINE,
+        // not only the ones the generator fabricates. Hooked to the else-branch
+        // alone it saw nothing but fabricated executes -- so with those turned
+        // off it reported a book in which no trade ever happens, while stats
+        // counted 78,142 of them three lines away.
+        //
+        // A market order consumes the front of the touch, so the queue state
+        // the trade found is the one BEFORE the sweep, exactly as for any other
+        // event: read it here, once, rather than after each partial fill has
+        // already changed it.
+        if (warmed) {
+          BookEvent tr{};
+          tr.type  = EventType::Execute;
+          tr.side  = opposite(e.side);
+          tr.price = (tr.side == Side::Bid) ? pre_bid : pre_ask;
+          tr.qty   = e.qty;
+          if (tr.price > 0) qr.on_event(book, tr);
+        }
         (void)match.submit_market(e.ts, e.order_id, e.side, e.qty, /*mine=*/false);
         for (std::size_t k = fills_seen; k < match.fills().size(); ++k) {
           const Fill& f = match.fills()[k];
@@ -418,12 +458,19 @@ int main(int argc, char** argv) {
                          f.resting_side == Side::Bid ? 1 : 0, f.qty);
           }
           if (gone) gen.forget_order(f.resting_id);
+          if (warmed) { ++n_matched; q_matched += f.qty; }
         }
         fills_seen = match.fills().size();
+        if (warmed) qr.on_state(book, rel);
       } else {
+        if (warmed && e.type == EventType::Execute) {
+          ++n_fabricated;
+          q_fabricated += e.qty;
+        }
         acc.before_apply(book, e, rel, warmed);
+        if (warmed) qr.on_event(book, e);
         (void)book.apply(e);
-        if (warmed) acc.after_apply(book, e, rel);
+        if (warmed) { acc.after_apply(book, e, rel); qr.on_state(book, rel); }
       }
       gen.on_applied(e, book.qty_of(e.order_id));
       gen.observe(book.has_bid(), book.best_bid(), book.has_ask(), book.best_ask());
@@ -432,6 +479,24 @@ int main(int argc, char** argv) {
         next_grid = e.ts + grid;
         if (warmed) acc.on_grid(book, rel);
       }
+    }
+    {
+      const double n = static_cast<double>(n_matched + n_fabricated);
+      const double q = static_cast<double>(q_matched + q_fabricated);
+      std::fprintf(stderr,
+          "  fills by path: %llu matched through the engine (%.1f%% of count, %.1f%% of "
+          "volume),\n                 %llu fabricated on a random resting order "
+          "(%.1f%%, %.1f%%)\n",
+          static_cast<unsigned long long>(n_matched),
+          n > 0 ? 100.0 * static_cast<double>(n_matched) / n : 0.0,
+          q > 0 ? 100.0 * static_cast<double>(q_matched) / q : 0.0,
+          static_cast<unsigned long long>(n_fabricated),
+          n > 0 ? 100.0 * static_cast<double>(n_fabricated) / n : 0.0,
+          q > 0 ? 100.0 * static_cast<double>(q_fabricated) / q : 0.0);
+      std::fprintf(stderr,
+          "  Only the matched path consumes the front of a queue, so only it carries any\n"
+          "  information about queue position. The fabricated share is how much of the\n"
+          "  signal the Phase 5 policy is asked to exploit has been averaged away.\n");
     }
   } else {
     // ---- a recorded venue capture ----
@@ -537,8 +602,9 @@ int main(int argc, char** argv) {
 
       for (int i = 0; i < d.n; ++i) {
         acc.before_apply(book, d.ev[i], rel, warmed);
+        if (warmed) qr.on_event(book, d.ev[i]);
         book.apply(d.ev[i]);
-        if (warmed) acc.after_apply(book, d.ev[i], rel);
+        if (warmed) { acc.after_apply(book, d.ev[i], rel); qr.on_state(book, rel); }
       }
       if (book.has_bid() && book.has_ask()) {
         if (lo_touch == 0 || book.best_bid() < lo_touch) lo_touch = book.best_bid();
@@ -601,6 +667,7 @@ int main(int argc, char** argv) {
   }
 
   acc.write_depth(f_dep);
+  if (std::FILE* f_qr = open_out(dir, name, "qr")) { qr.write(f_qr); std::fclose(f_qr); }
   for (std::FILE* f : {f_ord, f_trd, f_mid, f_dep, f_arr}) std::fclose(f);
   std::fprintf(stderr, "%s: %llu orders, %llu trades, %llu mid samples\n", name.c_str(),
                static_cast<unsigned long long>(acc.orders()),
