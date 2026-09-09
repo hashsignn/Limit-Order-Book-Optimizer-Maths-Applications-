@@ -24,6 +24,20 @@
 // and so cannot be wrong about one. That is a finer grid than any model wants —
 // the point is that regrouping coarse buckets is impossible and regrouping fine
 // ones is a sum.
+//
+// AND OF THE ORDER COUNT, which is a separate axis for a reason.
+//
+// The mechanism this measurement exists to find is independent per-order
+// cancellation: if every resting order cancels on its own clock, a queue with
+// twice as many ORDERS in it produces twice the cancels, and lambda_cancel is
+// proportional to the count. Share quantity is not that count. A queue of six
+// million shares may be three large orders or three hundred small ones, and
+// keyed on quantity alone the two are the same bucket.
+//
+// Measured on quantity alone, ethusd returned a cancel slope of -0.03 +- 0.08,
+// which rejects proportionality at better than twelve standard errors and would
+// have been reported as "real books do not cancel independently". Holding the
+// count fixed and varying quantity, and the reverse, is what tells those apart.
 #pragma once
 
 #include <cstdint>
@@ -39,6 +53,7 @@ class QueueReactive {
  public:
   static constexpr int kLevels  = 5;    // levels from the touch, each side
   static constexpr int kBuckets = 32;   // log2 of queue size, so up to 4e9
+  static constexpr int kOrders  = 8;    // log2 of the order count, so up to 255
   enum Ev { kAdd = 0, kCancel = 1, kTrade = 2, kNumEv = 3 };
 
   // Call BEFORE the event is applied: the intensity at a queue size is the rate
@@ -62,9 +77,10 @@ class QueueReactive {
     const Ticks d = (e.side == Side::Bid) ? (t - e.price) : (e.price - t);
     if (d < 0 || d >= kLevels) return;
     const int lvl = static_cast<int>(d);
-    const int q   = bucket(b.qty_at(e.side, e.price));
-    if (ev < 0) { ++counts_[s][lvl][q][kCancel]; ++counts_[s][lvl][q][kAdd]; }
-    else        { ++counts_[s][lvl][q][ev]; }
+    const int q   = bucket(b.qty_at(e.side, e.price), kBuckets);
+    const int n   = bucket(b.orders_at(e.side, e.price), kOrders);
+    if (ev < 0) { ++counts_[s][lvl][q][n][kCancel]; ++counts_[s][lvl][q][n][kAdd]; }
+    else        { ++counts_[s][lvl][q][n][ev]; }
   }
 
   // Call AFTER the event is applied, to accrue the time each queue spent at its
@@ -78,44 +94,54 @@ class QueueReactive {
       const Ticks t   = (s == 0) ? b.best_bid() : b.best_ask();
       for (int l = 0; l < kLevels; ++l) {
         const Ticks px = (s == 0) ? (t - l) : (t + l);
-        const int q = bucket(b.qty_at(side, px));
-        if (dt > 0.0 && cur_[s][l] >= 0) expo_[s][l][cur_[s][l]] += dt;
-        cur_[s][l] = q;
+        const int q = bucket(b.qty_at(side, px), kBuckets);
+        const int n = bucket(b.orders_at(side, px), kOrders);
+        if (dt > 0.0 && cur_q_[s][l] >= 0) expo_[s][l][cur_q_[s][l]][cur_n_[s][l]] += dt;
+        cur_q_[s][l] = q;
+        cur_n_[s][l] = n;
       }
     }
     last_ = now;
   }
 
   void write(std::FILE* f) const {
-    std::fprintf(f, "side,level,log2_qty,adds,cancels,trades,exposure_s\n");
+    std::fprintf(f, "side,level,log2_qty,log2_orders,adds,cancels,trades,exposure_s\n");
     for (int s = 0; s < 2; ++s)
       for (int l = 0; l < kLevels; ++l)
-        for (int q = 0; q < kBuckets; ++q) {
-          const std::uint64_t a = counts_[s][l][q][kAdd], c = counts_[s][l][q][kCancel],
-                              t = counts_[s][l][q][kTrade];
-          if (a == 0 && c == 0 && t == 0 && expo_[s][l][q] <= 0.0) continue;
-          std::fprintf(f, "%d,%d,%d,%llu,%llu,%llu,%.6f\n", s, l, q,
-                       static_cast<unsigned long long>(a),
-                       static_cast<unsigned long long>(c),
-                       static_cast<unsigned long long>(t), expo_[s][l][q]);
-        }
+        for (int q = 0; q < kBuckets; ++q)
+          for (int n = 0; n < kOrders; ++n) {
+            const std::uint64_t a = counts_[s][l][q][n][kAdd],
+                                c = counts_[s][l][q][n][kCancel],
+                                t = counts_[s][l][q][n][kTrade];
+            if (a == 0 && c == 0 && t == 0 && expo_[s][l][q][n] <= 0.0) continue;
+            std::fprintf(f, "%d,%d,%d,%d,%llu,%llu,%llu,%.6f\n", s, l, q, n,
+                         static_cast<unsigned long long>(a),
+                         static_cast<unsigned long long>(c),
+                         static_cast<unsigned long long>(t), expo_[s][l][q][n]);
+          }
   }
 
  private:
   // floor(log2(q)), so bucket b covers [2^b, 2^(b+1)). An empty queue is its
   // own bucket 0, because a queue nobody is in is a different state from a
   // queue with one lot in it -- the reference price moves off an empty one.
-  [[nodiscard]] static int bucket(Qty q) noexcept {
-    if (q <= 0) return 0;
+  // One overload, because Qty and the order count are different integer types
+  // and letting the compiler choose between two was ambiguous for neither.
+  // Negative is not a queue: it clamps to the empty bucket rather than
+  // shifting a negative, which is undefined.
+  template <typename T>
+  [[nodiscard]] static int bucket(T v, int cap) noexcept {
+    if (v <= T{0}) return 0;
+    auto u = static_cast<std::uint64_t>(v);
     int b = 0;
-    auto u = static_cast<std::uint64_t>(q);
-    while (u > 1 && b < kBuckets - 1) { u >>= 1; ++b; }
+    while (u > 1 && b < cap - 1) { u >>= 1; ++b; }
     return b;
   }
 
-  std::uint64_t counts_[2][kLevels][kBuckets][kNumEv] = {};
-  double        expo_[2][kLevels][kBuckets] = {};
-  int           cur_[2][kLevels] = {{-1, -1, -1, -1, -1}, {-1, -1, -1, -1, -1}};
+  std::uint64_t counts_[2][kLevels][kBuckets][kOrders][kNumEv] = {};
+  double        expo_[2][kLevels][kBuckets][kOrders] = {};
+  int           cur_q_[2][kLevels] = {{-1, -1, -1, -1, -1}, {-1, -1, -1, -1, -1}};
+  int           cur_n_[2][kLevels] = {{-1, -1, -1, -1, -1}, {-1, -1, -1, -1, -1}};
   Nanos         last_ = 0;
 };
 
