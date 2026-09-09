@@ -6283,9 +6283,14 @@ size, tracking rule and provenance rather than byte by byte; every text file was
 read line by line.
 
 ### Critical
-| # | Item | File | Owner |
-|---|---|---|---|
-| C1 | **Five of the seven rows in the Phase 5 acceptance table do not measure what they report.** `InventorySkew` and `AvellanedaStoikov` centre on a reservation price of `mid − inventory·5000` ticks under the shipped `QuoteParams` defaults, and `assemble` clamps the half-spread but never the centre — so at an inventory of one share the ask is quoted 4,999 ticks below the best bid. Measured: 2 passive fills against 37,224 aggressive ones. `GLFT` and `ImbalanceSkew` have the opposite failure: `min_half = 1` swallows their entire inventory term across the whole ±50 position range, so both are `ConstantSpread` with extra arithmetic. And `TabulatedMDP` is byte-identical to `JoinTouch` in all seven columns, with the paired comparison reporting mean +0.0, CI [+0.0, +0.0]. | `include/lob/strat/quoting.hpp`, `apps/evaluate/main.cpp` | research |
+
+**C1 is fixed.** The finding is kept below as it was written; the fix, the
+measured before-and-after, the regression tests and the diagnosis of the
+`TabulatedMDP` tie are in `docs/KNOWN-ISSUES.md` 6.
+
+| # | Item | File | Owner | Status |
+|---|---|---|---|---|
+| C1 | **Five of the seven rows in the Phase 5 acceptance table do not measure what they report.** `InventorySkew` and `AvellanedaStoikov` centre on a reservation price of `mid − inventory·5000` ticks under the shipped `QuoteParams` defaults, and `assemble` clamps the half-spread but never the centre — so at an inventory of one share the ask is quoted 4,999 ticks below the best bid. Measured: 2 passive fills against 37,224 aggressive ones. `GLFT` and `ImbalanceSkew` have the opposite failure: `min_half = 1` swallows their entire inventory term across the whole ±50 position range, so both are `ConstantSpread` with extra arithmetic. And `TabulatedMDP` is byte-identical to `JoinTouch` in all seven columns, with the paired comparison reporting mean +0.0, CI [+0.0, +0.0]. | `include/lob/strat/quoting.hpp`, `apps/evaluate/main.cpp` | research | **FIXED** |
 
 `apps/backtest` and `tests/test_strategies.cpp` both override `horizon` to 1.0
 and are unaffected. `apps/evaluate`'s `base_params()` sets only `size` and
@@ -6346,7 +6351,7 @@ Ordered by what unblocks the most work, not by severity alone. Hour estimates
 are for a person who knows this codebase.
 
 ### Immediate — the acceptance test does not currently measure anything
-- **PR: "Fix the quoting defaults and stop quotes crossing the market"** — 3 h.
+- ~~**PR: "Fix the quoting defaults and stop quotes crossing the market"**~~ — **DONE.**
   Two changes in `include/lob/strat/quoting.hpp`: pass the touch into
   `assemble()` and clamp the quote to it, and set `QuoteParams`'s defaults so
   the implied skew at the inventory limit is a few ticks rather than 250,000.
@@ -6354,8 +6359,12 @@ are for a person who knows this codebase.
   `tests/test_strategies.cpp:159-177` — `q.bid < best_ask` and
   `q.ask > best_bid` — and run that sweep a second time with a
   default-constructed `QuoteParams`. Closes **C1** for four of the five rows.
-- **PR: "Find out why TabulatedMDP ties JoinTouch exactly"** — 3 h,
-  investigation. Add a per-action histogram beside the existing `off_grid`
+- ~~**PR: "Find out why TabulatedMDP ties JoinTouch exactly"**~~ — **DONE, and it
+  is not a bug.** 97.8% of the solved policy is JoinTouch's rule exactly; the
+  304 states that differ need `|inventory| >= 3` while alone at the touch, which
+  60,000 events never reach. At 250,000 events over 6 seeds the tie breaks by
+  3.4 ticks on one extra requote. See `docs/KNOWN-ISSUES.md` 6. What remains is
+  a research question, not a defect: Add a per-action histogram beside the existing `off_grid`
   counter in `include/lob/strat/tabulated.hpp` and dump it over a run. Either
   the solved policy is constant, or the lookup is not differentiating states.
   Until this is answered the Phase 5 criterion has no signal. Closes the rest

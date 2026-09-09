@@ -455,3 +455,90 @@ the five buckets — barely monotone — where real ethusd runs 0.7 to 2.7 per c
 monotonically, and its queue-position gradient is 2.8x against the 60x measured
 on a real book. A policy has little to exploit here. That is Phase 3 work, not
 Phase 5's.
+
+## 6. The Phase 5 acceptance table measured parameterisation, not strategy — FIXED, and the criterion is degenerate
+
+**Symptom.** In `apps/evaluate`, `InventorySkew` took 2 passive fills and 37,224
+aggressive ones over 60,000 events; `AvellanedaStoikov` took 6 and 31,748. Both
+lost roughly 150,000 ticks x shares. `GLFT` scored 627.0 against
+`ConstantSpread`'s 643.8 with 84 passive fills against 86 — the same strategy
+with extra arithmetic. And `TabulatedMDP` was byte-identical to `JoinTouch` in
+all seven columns, with the paired comparison reporting mean +0.0, CI
+[+0.0, +0.0].
+
+**Cause, part one: the centre was never clamped.** `detail::assemble` clamped the
+half-spread into `[min_half, max_half]` and nothing clamped the centre. A
+half-spread is a distance from a centre, so a strategy centred far from the
+market emitted orders straight through it. With the shipped `QuoteParams`
+defaults — `gamma 0.05`, `sigma 1.0`, `horizon 1e5` — the Ho-Stoll skew is
+`gamma * sigma^2 * horizon` = **5,000 ticks per share**, so at an inventory of
+one share the reservation price is 5,000 ticks below the mid and the ask is
+quoted 4,999 ticks below the best bid.
+
+Why it survived: `apps/backtest` (line 118) and `tests/test_strategies.cpp`
+(line 24) both override `horizon` to 1.0. `apps/evaluate`'s `base_params()` sets
+only `size` and `max_inventory` and leaves the risk parameters alone — so the
+acceptance test was the one caller that got the raw default, and no test ever
+constructed a default `QuoteParams` and asked a strategy for a quote.
+
+**Cause, part two: `min_half = 1` erased GLFT's signal.** GLFT's inventory term
+is 0.13 ticks at flat inventory and 1.20 at a 50-share limit. Clamping the
+half-spread up to 1 collapsed the whole range onto one value, so on a one-tick
+book GLFT quoted 9999/10002 at flat inventory and 9999/10002 at full.
+
+**Fix.**
+- `assemble` now takes the book and clamps each side to the **opposite** touch:
+  `bid <= best_ask - 1`, `ask >= best_bid + 1`. Joining or improving the touch
+  stays allowed; resting at or through the other side cannot happen. A one-sided
+  book returns no quote at all, which also fixes `mid_of` reading half the other
+  side's price when `best_bid()` answers 0 for an empty side.
+- `horizon` defaults to 1.0 and `min_half` to 0 — the values every working
+  caller already chose, and the tick grid is the real floor anyway.
+- `QuoteParams::skew_per_share()` and `skew_at_limit()` name the product, so a
+  configuration can be checked rather than multiplied out by hand.
+
+**Result**, 2 seeds x 60,000 events:
+
+| strategy | passive before → after | aggressive before → after | P&L before → after |
+|---|---|---|---|
+| InventorySkew | 2 → 117 | 37,224 → 0 | −171,431.8 → +122.0 |
+| AvellanedaStoikov | 6 → 165 | 31,748 → 2 | −140,578.8 → +120.0 |
+| GLFT | 84 → 464 | 0 → 15 | +627.0 → +241.8 |
+| ImbalanceSkew | 82 → 378 | 1 → 22 | +178.5 → +1,026.0 |
+
+**Tests added** to `tests/test_strategies.cpp`, each verified to fail on the old
+code: every strategy's quote is asserted not to cross the book it was computed
+from, the whole sweep is repeated on a **default-constructed** `QuoteParams`,
+`skew_at_limit()` is asserted quotable, a one-sided book is asserted to produce
+no quote, and GLFT's clamped quotes are asserted to vary with inventory **on a
+one-tick book** — a wide book hides it, because at a 4-tick spread the mid is a
+whole tick and even a clamped 1.0 against 1.2 lands on different ticks.
+
+**The TabulatedMDP tie was not a bug, and the answer is worse than one.**
+Dumping the action distribution of `policy/ethusd.bin` over all 14,080 states:
+
+```
+action (bid,ask)   states   share
+   1 (0,1)          1280    9.1%     pull the bid   — exactly inventory +5
+   4 (1,0)          1280    9.1%     pull the ask   — exactly inventory -5
+   5 (1,1)         11216   79.7%     quote both at the touch
+   6 (1,2)           160    1.1%     ask one tick behind
+   9 (2,1)           144    1.0%     bid one tick behind
+```
+
+**97.8% of the state space is JoinTouch's rule exactly** — quote both sides at
+the touch, pull one side at the position limit. The 1,280-state blocks are one
+whole inventory level across every bid, ask and imbalance state. Only 304 states
+(2.2%) differ, all of them "quote one side a tick behind", and they need
+`|inventory| >= 3` **while alone at the touch**, which a 60,000-event run never
+reaches. At 250,000 events over 6 seeds the tie does break: TabulatedMDP −84.4
+against JoinTouch −87.8, on one extra requote out of 4,491.
+
+So value iteration on this process converges to join-the-touch. That is a real
+result, and it means the Phase 5 acceptance criterion is comparing a policy
+against a baseline it has essentially reproduced. **Open**: whether that is the
+truth about large-tick market making — where the decision is queue position
+rather than price — or an artefact of a state space too coarse to express
+anything else. The 2.2% of states that do differ are the place to look.
+
+---
