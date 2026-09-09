@@ -78,7 +78,7 @@ not move, because that one is the channel race and no book change touches it.
 
 ---
 
-## 2. The MDP prices a touch quote as a guaranteed loser on real data
+## 2. The MDP prices a touch quote as a guaranteed loser on real data — FIXED
 
 **Found** 2026-09-09, solving ethusd from the 8-hour capture. The policy quotes
 one tick behind the touch in **81.8% of states and at the touch in none** — the
@@ -128,8 +128,8 @@ tables is evidence about the simulator at least as much as about ethusd.
 holes, and separately measure P(mid move is adverse | our quote was taken), and
 let the two numbers say which it is.
 
-**Update 2026-09-09: the second measurement exists now, and a THIRD cause was
-found that is not on the list above.**
+**Fixed 2026-09-09. Both remaining causes were measured, and one of them was
+not on the list above.**
 
 P(the mid has moved against the resting side, one second after a print) is 33%
 on the eight-hour ethusd capture (n=5,032) and 48-63% on the three ten-minute
@@ -145,10 +145,47 @@ entirely, was incomplete. With the penalty derived from measured volatility
 (issue 5) the ethusd table's value at flat inventory goes from negative to
 **+0.0013** and it quotes in every state rather than pulling.
 
-It still prefers one tick behind the touch at flat inventory, and quotes at the
-touch only on the skewed side (18.2% of states, against the 0% this entry
-recorded). So the penalty explains why the market looked unquotable; it does not
-explain the preference for standing behind. That part is candidate 2's.
+That left the preference for standing one tick behind, which is candidate 2's,
+and it is fixed too. `expand()` now splits the move-fill branch in two: the move
+is still against us at the holding horizon with probability `p_move_adverse`,
+taken from the measurement above, and has reverted otherwise. Both outcomes
+leave the same state and differ only in the reward, so the branch is a split of
+the same probability mass rather than a change to it — which matters, because a
+transition function that creates mass is not a contraction and value iteration
+has diverged here once already.
+
+Only the move-FILL is rescaled, not the mark on inventory we already hold. A
+move marks an existing position in whichever direction it goes and both
+directions are in the expansion, so that charge is symmetric and averages out. A
+move-fill is one-sided by construction — we are only filled on the side the move
+goes through — so over-charging it biases every decision about quoting at the
+touch, always in the same direction.
+
+**The result, on the real instrument this entry is about.**
+
+| ethusd policy | before | after |
+|---|---|---|
+| quotes both sides at the touch | **0%** | **79.7%** |
+| quotes one tick behind | 81.8% | 2.1% |
+| skews one side at the inventory limit | — | 18.2% |
+| value at flat inventory | negative | positive |
+
+The charge applied is 48% of the move on ethusd and 37% on the simulator, both
+measured rather than chosen.
+
+**Deliberately conservative.** The split charges the move with probability
+`p_move_adverse` and nothing otherwise, so it ignores the fills where the mid
+came back the other way and the trade turned out profitable. The true expected
+markout is smaller than what this charges. A proportion is a robust statistic on
+54 prints and a mean over that tail is not, so the maker is under-credited on
+purpose.
+
+**What it did to the acceptance test.** The gap to JoinTouch halved, from
+-3,418 to **-1,703** (95% CI [-2,118, -1,321], 1 of 24 seeds positive), with the
+policy quoting both sides at the touch in 27.3% of simulator states against
+10.7% before, and taking 3,108 passive fills against JoinTouch's 3,362. It still
+fails. See issue 5 for why that is most likely the process rather than the
+solver.
 
 ---
 
@@ -391,10 +428,12 @@ against 20x historically.
 
 ```
 TabulatedMDP minus JoinTouch, paired by seed:
-  mean -3418.3   95% CI [-3942.1, -2913.5]   over 24 seeds, 0 of them positive
+  mean -1703.4   95% CI [-2117.7, -1321.3]   over 24 seeds, 1 of them positive
 ```
 
-This is a real result rather than an abstention: the policy trades (2,837
+(-3,418 when this was written; issue 2's move-fill fix, landed after, halved it.)
+
+This is a real result rather than an abstention: the policy trades (3,108
 passive fills against JoinTouch's 3,362) and earns less. It skews for inventory
 — peak position 40.5 against JoinTouch's 59.0 — and pays for it in P&L on a
 process where carrying inventory is not punished enough to be worth avoiding.

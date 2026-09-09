@@ -125,6 +125,7 @@ std::uint64_t MdpParams::hash() const noexcept {
   h = fnv(h, p_up, sizeof p_up);
   h = fnv(h, p_down, sizeof p_down);
   h = fnv(h, &move_ticks, sizeof move_ticks);
+  h = fnv(h, &p_move_adverse, sizeof p_move_adverse);
   h = fnv(h, imb_transition, sizeof imb_transition);
   h = fnv(h, p_fill, sizeof p_fill);
   h = fnv(h, p_advance, sizeof p_advance);
@@ -141,6 +142,7 @@ bool MdpParams::validate(std::string* why) const {
   if (!(dt_s > 0.0)) return fail("dt_s must be positive");
   if (!(discount > 0.0 && discount < 1.0)) return fail("discount must be in (0, 1)");
   if (!(move_ticks > 0.0)) return fail("move_ticks must be positive");
+  if (!prob(p_move_adverse)) return fail("p_move_adverse outside [0,1]");
   if (!(inventory_penalty >= 0.0)) return fail("inventory_penalty must not be negative");
 
   for (int i = 0; i < kImbBuckets; ++i) {
@@ -196,16 +198,34 @@ void expand(const MdpParams& p, std::uint32_t state, std::uint8_t action,
   };
 
   // ---- the mid moved up: it went through our ask ----
+  //
+  // Two outcomes when it took our quote, not one. The move is still against us
+  // at the holding horizon with probability p_move_adverse and has reverted
+  // otherwise; both leave the same state, they differ only in what the fill
+  // cost. Charging the move with certainty here is what made a touch quote
+  // arithmetically a loser on real data -- see MdpParams::p_move_adverse and
+  // docs/KNOWN-ISSUES.md 2. Where the quote was NOT at the touch there is no
+  // fill, and the move marks existing inventory in full: that charge is
+  // symmetric across this branch and the next and is left alone.
+  const double pa_adv = p.p_move_adverse;
   if (pu > 0.0) {
     const bool hit = taken_by_move(a0);
-    emit(pu, s.inventory - (hit ? 1 : 0), step_away(b0), hit ? kNoQuote : step_toward(a0),
-         hit ? p.edge_ticks[0] : 0.0, p.move_ticks);
+    if (hit) {
+      emit(pu * pa_adv,         s.inventory - 1, step_away(b0), kNoQuote, p.edge_ticks[0], p.move_ticks);
+      emit(pu * (1.0 - pa_adv), s.inventory - 1, step_away(b0), kNoQuote, p.edge_ticks[0], 0.0);
+    } else {
+      emit(pu, s.inventory, step_away(b0), step_toward(a0), 0.0, p.move_ticks);
+    }
   }
   // ---- the mid moved down: it went through our bid ----
   if (pd > 0.0) {
     const bool hit = taken_by_move(b0);
-    emit(pd, s.inventory + (hit ? 1 : 0), hit ? kNoQuote : step_toward(b0), step_away(a0),
-         hit ? p.edge_ticks[0] : 0.0, -p.move_ticks);
+    if (hit) {
+      emit(pd * pa_adv,         s.inventory + 1, kNoQuote, step_away(a0), p.edge_ticks[0], -p.move_ticks);
+      emit(pd * (1.0 - pa_adv), s.inventory + 1, kNoQuote, step_away(a0), p.edge_ticks[0], 0.0);
+    } else {
+      emit(pd, s.inventory, step_toward(b0), step_away(a0), 0.0, -p.move_ticks);
+    }
   }
   // ---- the mid held: we may be filled where we stand ----
   if (pf > 0.0) {

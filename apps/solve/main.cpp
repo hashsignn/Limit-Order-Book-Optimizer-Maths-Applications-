@@ -162,6 +162,22 @@ int main(int argc, char** argv) {
   p.move_ticks = to_double(json::find_scalar(mid, "median_abs_move_ticks"), 0.5);
   if (!(p.move_ticks > 0.0)) p.move_ticks = 0.5;
 
+  // How often a move that took our quote is still against us a second later.
+  // Measured; see MdpParams::p_move_adverse. The horizon is one second because
+  // that is the default --horizon, so the two agree about how long the model
+  // cares. A params file without the measurement keeps the old behaviour of
+  // charging every move-fill in full, which is wrong but is at least the
+  // behaviour every table before this was solved with.
+  const json::View adv = json::find(P, "adverse_selection");
+  const double p_adv = to_double(json::find_scalar(adv, "p_adverse_1.0s"), -1.0);
+  if (p_adv >= 0.0 && p_adv <= 1.0) {
+    p.p_move_adverse = p_adv;
+  } else {
+    std::fprintf(stderr, "  \033[33mno p_adverse_1.0s in %s: charging every move-fill the "
+                         "full move, which docs/KNOWN-ISSUES.md 2 says is wrong\033[0m\n",
+                 params_path);
+  }
+
   // The inventory penalty, from Avellaneda-Stoikov's gamma * sigma^2 * q^2.
   //
   // SCALE FROM THE PROCESS, PREFERENCE FROM THE USER. sigma is measured -- the
@@ -371,6 +387,8 @@ int main(int argc, char** argv) {
               pair, kNumStates, kNumActions,
               1e3 * p.dt_s, horizon_s, p.discount, phi_per_s, p.inventory_penalty,
               derived ? "  (gamma 1 x measured sigma^2)" : "  (given)");
+  std::printf("  move-fill charged %.0f%% of the move (measured; the rest reverts)\n",
+              100.0 * p.p_move_adverse);
   std::printf("  mid move %.2f ticks   P(up) %.3f..%.3f across imbalance\n",
               p.move_ticks, p.p_up[0], p.p_up[kImbBuckets - 1]);
   std::printf("  queue scale %lld shares, %.3f%% of it drains per epoch\n",

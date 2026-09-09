@@ -44,6 +44,35 @@ struct MdpParams {
   // book moving by one tick, which is what these books actually do.
   double move_ticks = 0.5;
 
+  // Probability that a move which took our quote is STILL against us at the
+  // holding horizon, rather than having reverted.
+  //
+  // The model used to charge the full move on every move-fill, with certainty.
+  // That is one of the two candidates docs/KNOWN-ISSUES.md 2 named, and the
+  // measurement it asked for now exists: P(the mid has moved against the
+  // resting side one second after a print) is 33% on the eight-hour ethusd
+  // capture (n=5,032) and 48-63% on the three ten-minute samples. Not 100%.
+  //
+  // WHY THIS BRANCH AND NOT THE MARK ON EXISTING INVENTORY, which the same
+  // move also applies. A move marks a position we already hold in whichever
+  // direction it goes, and up and down are both in the expansion, so over the
+  // two branches that charge is symmetric and averages out. A move-FILL is
+  // one-sided by construction — we are only filled on the side the move goes
+  // through — so an over-charge there does not cancel against anything. It
+  // biases every decision about whether to quote at the touch, in the same
+  // direction, always. That is the asymmetry worth fixing.
+  //
+  // CONSERVATIVE ON PURPOSE. This charges the move with probability
+  // p_move_adverse and nothing otherwise, so it ignores the cases where the
+  // mid came back the other way and the fill turned out to be profitable. The
+  // true expected markout is therefore smaller than what this charges, and a
+  // mean over that tail is not a robust statistic on n=54 prints while a
+  // proportion is. Better to under-credit the maker than to fit an outlier.
+  //
+  // 1.0 reproduces the old behaviour exactly, and is the default so that a
+  // params file with no measurement in it changes nothing.
+  double p_move_adverse = 1.0;
+
   double imb_transition[kImbBuckets][kImbBuckets] = {};
 
   // Probability our order is filled where it stands during one epoch, by price
