@@ -132,6 +132,12 @@ if(LOB_BUILD_TESTS)
   # capture is measured from a book that was reseeded or truncated mid-stream.
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND AND LOB_SAMPLE_CAPTURES)
+    add_test(NAME queue_reactive_exposure
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_queue_reactive.py
+                     $<TARGET_FILE:stats> ${CMAKE_CURRENT_SOURCE_DIR}/data/samples)
+    set_tests_properties(queue_reactive_exposure PROPERTIES TIMEOUT 300)
+
     add_test(NAME capture_split_replay
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_split_replay.py

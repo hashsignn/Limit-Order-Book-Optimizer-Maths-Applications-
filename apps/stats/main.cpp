@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "lob/book/order_book.hpp"
+#include "lob/feat/queue_reactive.hpp"
 #include "lob/feed/bitstamp.hpp"
 #include "lob/feed/json.hpp"
 #include "lob/feed/line_reader.hpp"
@@ -368,6 +369,11 @@ int main(int argc, char** argv) {
   std::fprintf(f_arr, "gap_us\n");
 
   Accumulator acc{f_ord, f_trd, f_mid, f_arr};
+  // Queue-reactive intensities (Huang, Lehalle & Rosenbaum). Measured on both
+  // sources deliberately: the whole claim about the synthetic generator is that
+  // its rates do NOT depend on queue size, and the only way to say that is to
+  // measure the same thing on both and put the two curves side by side.
+  QueueReactive qr;
   const Nanos warm = static_cast<Nanos>(warmup_sec * 1e9);
   const Nanos grid = static_cast<Nanos>(grid_ms * 1e6);
 
@@ -422,8 +428,9 @@ int main(int argc, char** argv) {
         fills_seen = match.fills().size();
       } else {
         acc.before_apply(book, e, rel, warmed);
+        if (warmed) qr.on_event(book, e);
         (void)book.apply(e);
-        if (warmed) acc.after_apply(book, e, rel);
+        if (warmed) { acc.after_apply(book, e, rel); qr.on_state(book, rel); }
       }
       gen.on_applied(e, book.qty_of(e.order_id));
       gen.observe(book.has_bid(), book.best_bid(), book.has_ask(), book.best_ask());
@@ -537,8 +544,9 @@ int main(int argc, char** argv) {
 
       for (int i = 0; i < d.n; ++i) {
         acc.before_apply(book, d.ev[i], rel, warmed);
+        if (warmed) qr.on_event(book, d.ev[i]);
         book.apply(d.ev[i]);
-        if (warmed) acc.after_apply(book, d.ev[i], rel);
+        if (warmed) { acc.after_apply(book, d.ev[i], rel); qr.on_state(book, rel); }
       }
       if (book.has_bid() && book.has_ask()) {
         if (lo_touch == 0 || book.best_bid() < lo_touch) lo_touch = book.best_bid();
@@ -601,6 +609,7 @@ int main(int argc, char** argv) {
   }
 
   acc.write_depth(f_dep);
+  if (std::FILE* f_qr = open_out(dir, name, "qr")) { qr.write(f_qr); std::fclose(f_qr); }
   for (std::FILE* f : {f_ord, f_trd, f_mid, f_dep, f_arr}) std::fclose(f);
   std::fprintf(stderr, "%s: %llu orders, %llu trades, %llu mid samples\n", name.c_str(),
                static_cast<unsigned long long>(acc.orders()),
