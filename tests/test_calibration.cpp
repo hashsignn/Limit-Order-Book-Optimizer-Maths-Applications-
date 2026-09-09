@@ -21,8 +21,11 @@
 #include "lob/book/order_book.hpp"
 #include "lob/sim/flow.hpp"
 #include "lob/sim/matching.hpp"
+#include "lob/strat/driver.hpp"
+#include "lob/strat/quoting.hpp"
 #include "test_util.hpp"
 
+#include <cmath>
 #include <string>
 
 using namespace lob;
@@ -171,6 +174,53 @@ int main() {
     // is the invariant the original measurement lacked.
     const Measured base = measure(FlowConfig::ethusd(), 200'000);
     CHECK_NEAR(m.moves_per_event, base.moves_per_event, 1e-9);
+  }
+
+  // ---- the message budget is a TIME, and survives a change of clock --------
+  // The whole of docs/KNOWN-ISSUES.md 5. The budget was 200 EVENTS, which is
+  // 0.5 ms at one generator setting and 3.7 seconds at another, so the same
+  // constant described two completely different traders and every cadence
+  // downstream -- the MDP epoch, the markout horizon -- was chosen against
+  // whichever reading happened to be current.
+  //
+  // Run the same strategy on two clocks a factor of ten apart. The requote
+  // cadence in SECONDS must not move; the events inside one budget period must.
+  {
+    QuoteParams qp; qp.max_inventory = 50;
+    DriverConfig dc;                                   // 100 ms budget
+
+    auto run_at = [&](Nanos gap) {
+      SimConfig c;
+      c.use_latency = false;
+      c.flow        = FlowConfig::ethusd();
+      c.flow.mean_gap_ns = gap;
+      c.flow.seed   = 4242;
+      c.flow.mid    = 10'000;
+      return run_strategy(JoinTouch{qp}, c, 120'000, dc);
+    };
+    const RunResult slow = run_at(FlowConfig::ethusd().mean_gap_ns);
+    const RunResult fast = run_at(FlowConfig::ethusd().mean_gap_ns / 10);
+
+    // A quote's life is a multiple of the budget -- hysteresis holds it longer
+    // when the target has not moved -- so it is bounded below by the budget and
+    // must not scale with the clock.
+    const double want = RunResult::budget_floor_s(dc.quote_every_ns);
+    ::lobtest::report(slow.mean_hold_s() >= want * 0.9, "quote life respects the budget",
+                      __FILE__, __LINE__, std::to_string(slow.mean_hold_s()) + " s");
+    ::lobtest::report(fast.mean_hold_s() >= want * 0.9, "quote life respects the budget, fast clock",
+                      __FILE__, __LINE__, std::to_string(fast.mean_hold_s()) + " s");
+
+    // Ten times the events in the same wall-clock budget period. This is the
+    // number that is ALLOWED to move, and the one that used to be fixed while
+    // the cadence moved instead.
+    const double ev_slow = slow.events_per_budget(dc.quote_every_ns);
+    const double ev_fast = fast.events_per_budget(dc.quote_every_ns);
+    ::lobtest::report(ev_fast > ev_slow * 5.0, "a faster clock puts more events in a budget",
+                      __FILE__, __LINE__,
+                      std::to_string(ev_slow) + " -> " + std::to_string(ev_fast));
+
+    // And the budget itself is exactly what it was set to, on any clock.
+    CHECK_NEAR(RunResult::budget_floor_s(dc.quote_every_ns), 0.1, 1e-12);
   }
 
   return lobtest::summary("calibration");

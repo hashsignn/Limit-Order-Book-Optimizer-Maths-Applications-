@@ -58,15 +58,13 @@ SimConfig make_config(std::uint64_t seed, bool latency, Nanos median_ns) {
   const double drift = g_drift;
   SimConfig c;
   c.use_latency      = latency;
-  // The stress process, deliberately -- see the note in apps/backtest and
-  // docs/KNOWN-ISSUES.md 5. On the calibrated one this test reports JoinTouch
-  // earning 8.4 ticks per fill against a 2-tick spread and an informed sweep
-  // that is flat to 70%, which by evaluate's own stated criterion means the
-  // number cannot be interpreted.
+  // The process fitted to the captures -- see apps/backtest and
+  // docs/KNOWN-ISSUES.md 4 and 5. Every acceptance number recorded before this
+  // was measured on a process whose touch took 35,000 events to clear, sampled
+  // 40,000 events to a decision epoch.
+  c.flow             = FlowConfig::ethusd();
   c.flow.seed        = seed;
   c.flow.mid         = 10'000;
-  c.flow.levels      = 8;
-  c.flow.target_live = 4'000;
   if (drift >= 0.0)      c.flow.drift_prob    = drift;
   if (g_informed >= 0.0) c.flow.informed_frac = g_informed;
   c.latency.seed     = seed ^ std::uint64_t{0x9E3779B97F4A7C15};
@@ -376,12 +374,20 @@ int main(int argc, char** argv) {
     const DriverConfig dc{};
     const RunResult warm = run_strategy(JoinTouch{p}, make_config(calib_seed + 91, latency, median_ns),
                                         std::min(events, 100'000));
-    const double dt   = warm.budget_floor_s(dc.quote_every);
+    const double dt   = RunResult::budget_floor_s(dc.quote_every_ns);
     const double hold = warm.mean_hold_s();
     const double want = table.header().dt_s;
-    std::printf("  epoch       %.3f ms message budget (%d events), %.3f ms mean quote life,\n"
-                "              table solved for %.3f ms\n",
-                1e3 * dt, dc.quote_every, 1e3 * hold, 1e3 * want);
+    const double evb  = warm.events_per_budget(dc.quote_every_ns);
+    std::printf("  epoch       %.3f ms message budget (%.1f market events), %.3f ms mean\n"
+                "              quote life, table solved for %.3f ms\n",
+                1e3 * dt, evb, 1e3 * hold, 1e3 * want);
+    // A budget that spans no events is a policy deciding against a book that
+    // has not changed; one that spans thousands is a policy that cannot react.
+    // The budget is a time now, so this is a statement about the PROCESS.
+    if (evb > 0.0 && (evb < 1.0 || evb > 1000.0))
+      std::printf("              \033[33m%.1f market events pass in one budget period. The "
+                  "process is\n              being sampled at the wrong scale for this "
+                  "cadence.\033[0m\n", evb);
     if (want > 0.0 && dt > 0.0 && (dt / want > 1.25 || want / dt > 1.25))
       std::printf("              \033[33mBudget and table differ by %.1fx. Every probability in the\n"
                   "              table is per epoch, so the policy is being asked about a different\n"

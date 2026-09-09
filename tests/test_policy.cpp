@@ -153,6 +153,63 @@ int main() {
     CHECK(stochastic(p, &why));    // and the shipped check agrees
   }
 
+  // ---- the move-fill charge is a split, not a change of mass ----
+  //
+  // docs/KNOWN-ISSUES.md 2: charging every move-fill the full move made a touch
+  // quote arithmetically a loser on real data, where the measurement says the
+  // move has reverted by the holding horizon two thirds of the time. The branch
+  // is now two outcomes rather than one, and the thing to prove is that it is a
+  // SPLIT: the same probability mass, differing only in reward. A branch that
+  // creates mass is not a contraction and value iteration diverges on it, which
+  // has happened here once already.
+  {
+    std::vector<Transition> tr;
+    for (const double adv : {0.0, 0.33, 0.5, 1.0}) {
+      MdpParams p = demo();
+      p.p_move_adverse = adv;
+      std::string why;
+      ::lobtest::report(p.validate(&why), "a split move-fill still validates",
+                        __FILE__, __LINE__, why);
+      double worst = 0.0;
+      for (std::uint32_t st = 0; st < kNumStates; st += 37) {
+        for (std::uint8_t a = 0; a < kNumActions; ++a) {
+          if (!admissible(st, a)) continue;
+          tr.clear();
+          expand(p, st, a, tr);
+          double sum = 0.0;
+          for (const Transition& t : tr) { CHECK(t.prob >= 0.0); sum += t.prob; }
+          worst = std::max(worst, std::fabs(sum - 1.0));
+        }
+      }
+      ::lobtest::report(worst < 1e-9, "a split move-fill still sums to 1", __FILE__, __LINE__,
+                        "p_move_adverse " + std::to_string(adv) + ", worst "
+                        + std::to_string(worst));
+    }
+
+    // And the direction is not a matter of taste: charging LESS of the move
+    // cannot make a touch quote worth less. Solving is the only honest way to
+    // check it, because the charge reaches the decision through the value
+    // function rather than directly.
+    auto touch_states = [](const MdpParams& q) {
+      const SolveResult sr = solve(q, 1e-8, 40000);
+      ::lobtest::report(sr.converged, "solves with a split move-fill", __FILE__, __LINE__, "");
+      int n = 0;
+      for (std::uint32_t st = 0; st < kNumStates; ++st) {
+        const lob::policy::Action act = decode_action(sr.policy[st]);
+        if (act.bid == 1 && act.ask == 1) ++n;   // both sides quoted AT the touch
+      }
+      return n;
+    };
+    MdpParams full = demo(), part = demo();
+    full.p_move_adverse = 1.0;
+    part.p_move_adverse = 0.33;
+    const int n_full = touch_states(full), n_part = touch_states(part);
+    ::lobtest::report(n_part >= n_full, "charging less of the move never quotes less",
+                      __FILE__, __LINE__,
+                      std::to_string(n_full) + " -> " + std::to_string(n_part)
+                      + " states quoting both sides at the touch");
+  }
+
   // ---- the same, with fill probabilities a real calibration produces ----
   //
   // The demo process above fills at 0.4% an epoch, and at those numbers almost

@@ -3,224 +3,224 @@
     "pair": "sim",
     "levels": {
       "0": {
-        "exposure_s": 6.897862,
+        "exposure_s": 55421.758265,
         "adds_vs_orders": {
-          "beta": -0.009487341148781947,
-          "se": 0.012918903038601152,
-          "log_intercept": 9.359590191256201,
+          "beta": 0.13055283192121778,
+          "se": 0.06687650190708537,
+          "log_intercept": 1.3430303739992833,
           "buckets_used": 4,
-          "events": 79573,
+          "events": 240226,
           "verdict": "FLAT: rate ignores the queue"
         },
         "cancels_vs_orders": {
-          "beta": -0.010510318139767258,
-          "se": 0.04621980042610909,
-          "log_intercept": 10.35863327829466,
+          "beta": 0.9949351492485147,
+          "se": 0.0878252623697642,
+          "log_intercept": 0.6752658559832736,
           "buckets_used": 4,
-          "events": 215869,
-          "verdict": "FLAT: rate ignores the queue"
+          "events": 311111,
+          "verdict": "PROPORTIONAL: independent per-order behaviour"
         },
         "trades_vs_orders": {
-          "beta": 0.010843596227334445,
-          "se": 0.014307172151424238,
-          "log_intercept": 8.514096454238494,
+          "beta": 0.11195316929579092,
+          "se": 0.003449652995291432,
+          "log_intercept": -0.5260061603688581,
           "buckets_used": 4,
-          "events": 34632,
-          "verdict": "FLAT: rate ignores the queue"
+          "events": 36436,
+          "verdict": "between flat and proportional"
         },
-        "adds_vs_qty": {
-          "beta": -0.005290408468220734,
-          "se": 0.0035732389973910676,
-          "log_intercept": 9.382637027005456,
+        "adds_vs_qaes": {
+          "beta": 0.09505859450604055,
+          "se": 0.012781994636618362,
+          "log_intercept": 1.3808336405987756,
           "buckets_used": 12,
-          "events": 79573,
-          "verdict": "FLAT: rate ignores the queue"
+          "events": 240217,
+          "verdict": "between flat and proportional"
         },
-        "cancels_vs_qty": {
-          "beta": -0.0003339181424696051,
-          "se": 0.0060651603258359355,
-          "log_intercept": 10.35328843906814,
-          "buckets_used": 12,
-          "events": 215869,
-          "verdict": "FLAT: rate ignores the queue"
+        "cancels_vs_qaes": {
+          "beta": 0.711125791828041,
+          "se": 0.03629456979336915,
+          "log_intercept": 1.011068637591615,
+          "buckets_used": 13,
+          "events": 311101,
+          "verdict": "between flat and proportional"
         },
-        "trades_vs_qty": {
-          "beta": -0.00022317201339996703,
-          "se": 0.0045033843993985915,
-          "log_intercept": 8.522681280220485,
-          "buckets_used": 12,
-          "events": 34632,
-          "verdict": "FLAT: rate ignores the queue"
+        "trades_vs_qaes": {
+          "beta": 0.07136868106650363,
+          "se": 0.011004602684110241,
+          "log_intercept": -0.4834188791970125,
+          "buckets_used": 10,
+          "events": 36419,
+          "verdict": "between flat and proportional"
         }
       },
       "1": {
-        "exposure_s": 6.897858999999999,
+        "exposure_s": 55421.758266,
         "adds_vs_orders": {
-          "beta": 0.016126575768681296,
-          "se": 0.016431796214470343,
-          "log_intercept": 9.329019620479945,
-          "buckets_used": 4,
-          "events": 78399,
-          "verdict": "FLAT: rate ignores the queue"
+          "beta": 0.32253561744465076,
+          "se": 0.0654932269072401,
+          "log_intercept": 0.2967146785516037,
+          "buckets_used": 3,
+          "events": 87181,
+          "verdict": "between flat and proportional"
         },
         "cancels_vs_orders": {
-          "beta": 1.0413228597724602,
-          "se": 0.364527868154558,
-          "log_intercept": 8.769769468151596,
-          "buckets_used": 4,
-          "events": 88384,
-          "verdict": "PROPORTIONAL: independent per-order behaviour"
+          "beta": 1.978950376694313,
+          "se": 0.4364838715680809,
+          "log_intercept": -0.5705781188856538,
+          "buckets_used": 3,
+          "events": 99155,
+          "verdict": "between flat and proportional"
         },
         "trades_vs_orders": {
           "beta": null,
           "note": "20+ events in only 0 bucket(s)"
         },
-        "adds_vs_qty": {
-          "beta": 0.005937896851831382,
-          "se": 0.0015898735564380412,
-          "log_intercept": 9.318526179362603,
-          "buckets_used": 12,
-          "events": 78399,
+        "adds_vs_qaes": {
+          "beta": 0.15042592902138385,
+          "se": 0.04104965981781844,
+          "log_intercept": 0.42521740201143043,
+          "buckets_used": 8,
+          "events": 47191,
           "verdict": "between flat and proportional"
         },
-        "cancels_vs_qty": {
-          "beta": 0.3171962497330378,
-          "se": 0.07885288802556527,
-          "log_intercept": 8.12707257924288,
-          "buckets_used": 12,
-          "events": 88384,
+        "cancels_vs_qaes": {
+          "beta": 0.5845038603489338,
+          "se": 0.08108734069430257,
+          "log_intercept": 0.850062186342941,
+          "buckets_used": 10,
+          "events": 96197,
           "verdict": "between flat and proportional"
         },
-        "trades_vs_qty": {
+        "trades_vs_qaes": {
           "beta": null,
           "note": "20+ events in only 0 bucket(s)"
         }
       },
       "2": {
-        "exposure_s": 6.8978649999999995,
+        "exposure_s": 55421.758271,
         "adds_vs_orders": {
-          "beta": 0.04546076970311177,
-          "se": 0.01002547087831508,
-          "log_intercept": 9.294937877796542,
-          "buckets_used": 4,
-          "events": 77082,
-          "verdict": "between flat and proportional"
+          "beta": -0.003538501949778384,
+          "se": 0.06726571418981157,
+          "log_intercept": 0.05537390013588569,
+          "buckets_used": 3,
+          "events": 58488,
+          "verdict": "FLAT: rate ignores the queue"
         },
         "cancels_vs_orders": {
-          "beta": 1.066683070585348,
-          "se": 0.37697339237894156,
-          "log_intercept": 8.73563283730004,
-          "buckets_used": 4,
-          "events": 86899,
-          "verdict": "PROPORTIONAL: independent per-order behaviour"
+          "beta": 2.431080818467945,
+          "se": 0.33519490730291857,
+          "log_intercept": -1.0056603021548827,
+          "buckets_used": 3,
+          "events": 66007,
+          "verdict": "between flat and proportional"
         },
         "trades_vs_orders": {
           "beta": null,
           "note": "20+ events in only 0 bucket(s)"
         },
-        "adds_vs_qty": {
-          "beta": 0.012745458481771662,
-          "se": 0.0018237676271211348,
-          "log_intercept": 9.278984509643333,
-          "buckets_used": 12,
-          "events": 77083,
+        "adds_vs_qaes": {
+          "beta": -0.008252778218351848,
+          "se": 0.02599268386894297,
+          "log_intercept": 0.046703324032866596,
+          "buckets_used": 6,
+          "events": 22432,
+          "verdict": "FLAT: rate ignores the queue"
+        },
+        "cancels_vs_qaes": {
+          "beta": 0.407335576311895,
+          "se": 0.10616606967804146,
+          "log_intercept": 0.8492782664794414,
+          "buckets_used": 8,
+          "events": 63227,
           "verdict": "between flat and proportional"
         },
-        "cancels_vs_qty": {
-          "beta": 0.32161360742104644,
-          "se": 0.07989897112686525,
-          "log_intercept": 8.098566760908154,
-          "buckets_used": 12,
-          "events": 86902,
-          "verdict": "between flat and proportional"
-        },
-        "trades_vs_qty": {
+        "trades_vs_qaes": {
           "beta": null,
           "note": "20+ events in only 0 bucket(s)"
         }
       },
       "3": {
-        "exposure_s": 6.897860999999999,
+        "exposure_s": 55421.758267,
         "adds_vs_orders": {
-          "beta": 0.0788709710428942,
-          "se": 0.026319892949545558,
-          "log_intercept": 9.25611051704731,
-          "buckets_used": 4,
-          "events": 75643,
-          "verdict": "between flat and proportional"
+          "beta": -0.07453695681029111,
+          "se": 0.03975514767847345,
+          "log_intercept": 0.015051579588769083,
+          "buckets_used": 3,
+          "events": 54613,
+          "verdict": "FLAT: rate ignores the queue"
         },
         "cancels_vs_orders": {
-          "beta": 1.0833341006207422,
-          "se": 0.3787160949564015,
-          "log_intercept": 8.698185403134213,
-          "buckets_used": 4,
-          "events": 85506,
-          "verdict": "PROPORTIONAL: independent per-order behaviour"
+          "beta": 2.5144385491197165,
+          "se": 0.29151960147927897,
+          "log_intercept": -1.0834008800063462,
+          "buckets_used": 3,
+          "events": 61742,
+          "verdict": "between flat and proportional"
         },
         "trades_vs_orders": {
           "beta": null,
           "note": "20+ events in only 0 bucket(s)"
         },
-        "adds_vs_qty": {
-          "beta": 0.02348578267187803,
-          "se": 0.0026589187718959865,
-          "log_intercept": 9.223732910882267,
-          "buckets_used": 12,
-          "events": 75643,
+        "adds_vs_qaes": {
+          "beta": -0.005015536601450932,
+          "se": 0.024547040980404868,
+          "log_intercept": -0.030029841381565135,
+          "buckets_used": 6,
+          "events": 19816,
+          "verdict": "FLAT: rate ignores the queue"
+        },
+        "cancels_vs_qaes": {
+          "beta": 0.4888594217359894,
+          "se": 0.12972476892160967,
+          "log_intercept": 0.8318791652224793,
+          "buckets_used": 7,
+          "events": 59015,
           "verdict": "between flat and proportional"
         },
-        "cancels_vs_qty": {
-          "beta": 0.3291590600973388,
-          "se": 0.07805228810066527,
-          "log_intercept": 8.040039098430206,
-          "buckets_used": 12,
-          "events": 85505,
-          "verdict": "between flat and proportional"
-        },
-        "trades_vs_qty": {
+        "trades_vs_qaes": {
           "beta": null,
           "note": "20+ events in only 0 bucket(s)"
         }
       },
       "4": {
-        "exposure_s": 6.897862999999999,
+        "exposure_s": 55421.758265,
         "adds_vs_orders": {
-          "beta": 0.135820768371556,
-          "se": 0.033782634538381935,
-          "log_intercept": 9.180335543577824,
-          "buckets_used": 4,
-          "events": 72519,
+          "beta": -0.07328509643788192,
+          "se": 0.017634338152807034,
+          "log_intercept": 0.06604004274198133,
+          "buckets_used": 3,
+          "events": 57475,
           "verdict": "between flat and proportional"
         },
         "cancels_vs_orders": {
-          "beta": 1.1234021414733024,
-          "se": 0.39520748021768176,
-          "log_intercept": 8.630875768021623,
-          "buckets_used": 4,
-          "events": 81859,
-          "verdict": "PROPORTIONAL: independent per-order behaviour"
+          "beta": 2.4417087601604175,
+          "se": 0.31200715136567,
+          "log_intercept": -1.0236708150289373,
+          "buckets_used": 3,
+          "events": 64795,
+          "verdict": "between flat and proportional"
         },
         "trades_vs_orders": {
           "beta": null,
           "note": "20+ events in only 0 bucket(s)"
         },
-        "adds_vs_qty": {
-          "beta": 0.03911607258639833,
-          "se": 0.00363866634523921,
-          "log_intercept": 9.1289592172425,
-          "buckets_used": 12,
-          "events": 72518,
+        "adds_vs_qaes": {
+          "beta": -0.014111163064675452,
+          "se": 0.011881964317816022,
+          "log_intercept": 0.0339016310007569,
+          "buckets_used": 6,
+          "events": 21912,
+          "verdict": "FLAT: rate ignores the queue"
+        },
+        "cancels_vs_qaes": {
+          "beta": 0.4478409295943528,
+          "se": 0.11194694570288236,
+          "log_intercept": 0.8396378705238733,
+          "buckets_used": 7,
+          "events": 61979,
           "verdict": "between flat and proportional"
         },
-        "cancels_vs_qty": {
-          "beta": 0.33345592418348957,
-          "se": 0.08004181612808484,
-          "log_intercept": 7.9911656472883354,
-          "buckets_used": 12,
-          "events": 81858,
-          "verdict": "between flat and proportional"
-        },
-        "trades_vs_qty": {
+        "trades_vs_qaes": {
           "beta": null,
           "note": "20+ events in only 0 bucket(s)"
         }

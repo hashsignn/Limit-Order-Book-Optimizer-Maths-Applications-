@@ -88,7 +88,13 @@ int main(int argc, char** argv) {
   const char* params_path = "policy/mdp.json";
   const char* pair = nullptr;
   const char* out_path = nullptr;
-  double phi_per_s = 10.0, horizon_s = 1.0, level_ratio = -1.0;
+  // -1 means "derive it from the process". A bare number here was another
+  // constant that only looked harmless because of the epoch it was chosen on:
+  // 10 ticks/lot^2/s is 0.005 per epoch on a 0.5 ms grid and 1.0 per epoch on
+  // a 100 ms one, so the same flag went from negligible to twenty times the
+  // per-epoch edge without anyone typing a different number. See
+  // docs/KNOWN-ISSUES.md 5.
+  double phi_per_s = -1.0, gamma = 1.0, horizon_s = 1.0, level_ratio = -1.0;
   bool force = false;
 
   for (int i = 1; i < argc; ++i) {
@@ -97,15 +103,21 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--pair")   == 0 && nx) pair = argv[++i];
     else if (std::strcmp(argv[i], "--out")    == 0 && nx) out_path = argv[++i];
     else if (std::strcmp(argv[i], "--penalty") == 0 && nx) phi_per_s = std::atof(argv[++i]);
+    else if (std::strcmp(argv[i], "--risk-aversion") == 0 && nx) gamma = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--horizon") == 0 && nx) horizon_s = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--level-ratio") == 0 && nx) level_ratio = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--force") == 0) force = true;
     else {
       std::fprintf(stderr,
         "solve --pair <name> [--params policy/mdp.json] [--out <file.bin>]\n"
-        "  --penalty <phi>       inventory penalty, ticks per lot squared per SECOND (10).\n"
+        "  --penalty <phi>       inventory penalty, ticks per lot squared per SECOND.\n"
         "                        Per second, not per epoch: a preference should not\n"
-        "                        change because the decision grid did.\n"
+        "                        change because the decision grid did. Omit it and\n"
+        "                        it is DERIVED as gamma * sigma^2 / dt from the mid\n"
+        "                        volatility the params measured, which is\n"
+        "                        Avellaneda-Stoikov's inventory term.\n"
+        "  --risk-aversion <g>   gamma in that expression (1). Charging a lot exactly\n"
+        "                        the variance it carries is gamma = 1.\n"
         "  --horizon <seconds>   how far ahead the policy cares, in SECONDS (1.0).\n"
         "                        Converted to a per-epoch discount here. Given as a\n"
         "                        per-epoch number it would mean a different horizon\n"
@@ -146,12 +158,52 @@ int main(int argc, char** argv) {
   // gives the epoch discount whose e-folding time is H seconds, so the same
   // --horizon means the same thing on any grid.
   p.discount = std::exp(-p.dt_s / horizon_s);
-  // The preference is per second; the model charges it per epoch.
-  p.inventory_penalty = phi_per_s * p.dt_s;
-
   const json::View mid = json::find(P, "mid");
   p.move_ticks = to_double(json::find_scalar(mid, "median_abs_move_ticks"), 0.5);
   if (!(p.move_ticks > 0.0)) p.move_ticks = 0.5;
+
+  // How often a move that took our quote is still against us a second later.
+  // Measured; see MdpParams::p_move_adverse. The horizon is one second because
+  // that is the default --horizon, so the two agree about how long the model
+  // cares. A params file without the measurement keeps the old behaviour of
+  // charging every move-fill in full, which is wrong but is at least the
+  // behaviour every table before this was solved with.
+  const json::View adv = json::find(P, "adverse_selection");
+  const double p_adv = to_double(json::find_scalar(adv, "p_adverse_1.0s"), -1.0);
+  if (p_adv >= 0.0 && p_adv <= 1.0) {
+    p.p_move_adverse = p_adv;
+  } else {
+    std::fprintf(stderr, "  \033[33mno p_adverse_1.0s in %s: charging every move-fill the "
+                         "full move, which docs/KNOWN-ISSUES.md 2 says is wrong\033[0m\n",
+                 params_path);
+  }
+
+  // The inventory penalty, from Avellaneda-Stoikov's gamma * sigma^2 * q^2.
+  //
+  // SCALE FROM THE PROCESS, PREFERENCE FROM THE USER. sigma is measured -- the
+  // per-epoch standard deviation of the mid, in ticks, which mdp_params
+  // winsorises -- so the penalty is the variance a lot is exposed to per unit
+  // time, and gamma is the only thing left to choose. A flat number instead
+  // makes risk aversion depend on the decision grid: the same --penalty 10 was
+  // 0.5% of the touch edge per epoch at 0.5 ms and 2,200% of it at 100 ms, and
+  // at the second value no policy quotes at all, whatever else is true of the
+  // market.
+  //
+  // gamma = 1 means: charge a lot exactly the variance it carries. It is a
+  // preference and there is no measuring it; what is measured is the scale it
+  // multiplies.
+  const double sd = to_double(json::find_scalar(mid, "winsorised_sd_ticks"), 0.0);
+  const bool derived = !(phi_per_s >= 0.0);
+  if (derived) {
+    if (!(sd > 0.0) || !(p.dt_s > 0.0)) {
+      std::fprintf(stderr, "cannot derive the inventory penalty: no mid volatility in %s. "
+                           "Pass --penalty explicitly.\n", params_path);
+      return 2;
+    }
+    phi_per_s = gamma * sd * sd / p.dt_s;
+  }
+  // The preference is per second; the model charges it per epoch.
+  p.inventory_penalty = phi_per_s * p.dt_s;
 
   // Mid direction conditional on imbalance: the reason imbalance is in the
   // state at all. Falls back to the unconditional rates for a bucket the data
@@ -331,9 +383,12 @@ int main(int argc, char** argv) {
 
   std::printf("\nsolving %s   %u states x %d actions\n"
               "  epoch %.3f ms   horizon %.3g s -> discount %.6f per epoch\n"
-              "  penalty %.4g ticks/lot^2/s = %.4g per epoch\n",
+              "  penalty %.4g ticks/lot^2/s = %.4g per epoch%s\n",
               pair, kNumStates, kNumActions,
-              1e3 * p.dt_s, horizon_s, p.discount, phi_per_s, p.inventory_penalty);
+              1e3 * p.dt_s, horizon_s, p.discount, phi_per_s, p.inventory_penalty,
+              derived ? "  (gamma 1 x measured sigma^2)" : "  (given)");
+  std::printf("  move-fill charged %.0f%% of the move (measured; the rest reverts)\n",
+              100.0 * p.p_move_adverse);
   std::printf("  mid move %.2f ticks   P(up) %.3f..%.3f across imbalance\n",
               p.move_ticks, p.p_up[0], p.p_up[kImbBuckets - 1]);
   std::printf("  queue scale %lld shares, %.3f%% of it drains per epoch\n",

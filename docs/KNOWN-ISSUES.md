@@ -78,7 +78,7 @@ not move, because that one is the channel race and no book change touches it.
 
 ---
 
-## 2. The MDP prices a touch quote as a guaranteed loser on real data
+## 2. The MDP prices a touch quote as a guaranteed loser on real data — FIXED
 
 **Found** 2026-09-09, solving ethusd from the 8-hour capture. The policy quotes
 one tick behind the touch in **81.8% of states and at the touch in none** — the
@@ -127,6 +127,65 @@ tables is evidence about the simulator at least as much as about ethusd.
 **Do not fix by picking one.** Measure `move_ticks` on a book without issue 1's
 holes, and separately measure P(mid move is adverse | our quote was taken), and
 let the two numbers say which it is.
+
+**Fixed 2026-09-09. Both remaining causes were measured, and one of them was
+not on the list above.**
+
+P(the mid has moved against the resting side, one second after a print) is 33%
+on the eight-hour ethusd capture (n=5,032) and 48-63% on the three ten-minute
+samples. It is not 100%. So candidate 2 stands: `expand()` charges the full move
+against every move-fill, where the data says it goes against the maker between a
+third and two thirds of the time. That is still unfixed.
+
+The third cause was the inventory penalty, and it was the larger one. At
+`--penalty 10` on a 100 ms epoch the model charged 1.0 tick per lot per epoch
+against a touch edge of 0.5 — so a fill was a loss before any mid move was
+considered, and the arithmetic in this entry, which omits the penalty term
+entirely, was incomplete. With the penalty derived from measured volatility
+(issue 5) the ethusd table's value at flat inventory goes from negative to
+**+0.0013** and it quotes in every state rather than pulling.
+
+That left the preference for standing one tick behind, which is candidate 2's,
+and it is fixed too. `expand()` now splits the move-fill branch in two: the move
+is still against us at the holding horizon with probability `p_move_adverse`,
+taken from the measurement above, and has reverted otherwise. Both outcomes
+leave the same state and differ only in the reward, so the branch is a split of
+the same probability mass rather than a change to it — which matters, because a
+transition function that creates mass is not a contraction and value iteration
+has diverged here once already.
+
+Only the move-FILL is rescaled, not the mark on inventory we already hold. A
+move marks an existing position in whichever direction it goes and both
+directions are in the expansion, so that charge is symmetric and averages out. A
+move-fill is one-sided by construction — we are only filled on the side the move
+goes through — so over-charging it biases every decision about quoting at the
+touch, always in the same direction.
+
+**The result, on the real instrument this entry is about.**
+
+| ethusd policy | before | after |
+|---|---|---|
+| quotes both sides at the touch | **0%** | **79.7%** |
+| quotes one tick behind | 81.8% | 2.1% |
+| skews one side at the inventory limit | — | 18.2% |
+| value at flat inventory | negative | positive |
+
+The charge applied is 48% of the move on ethusd and 37% on the simulator, both
+measured rather than chosen.
+
+**Deliberately conservative.** The split charges the move with probability
+`p_move_adverse` and nothing otherwise, so it ignores the fills where the mid
+came back the other way and the trade turned out profitable. The true expected
+markout is smaller than what this charges. A proportion is a robust statistic on
+54 prints and a mean over that tail is not, so the maker is under-credited on
+purpose.
+
+**What it did to the acceptance test.** The gap to JoinTouch halved, from
+-3,418 to **-1,703** (95% CI [-2,118, -1,321], 1 of 24 seeds positive), with the
+policy quoting both sides at the touch in 27.3% of simulator states against
+10.7% before, and taking 3,108 passive fills against JoinTouch's 3,362. It still
+fails. See issue 5 for why that is most likely the process rather than the
+solver.
 
 ---
 
@@ -284,15 +343,13 @@ had calibrated.
 
 ---
 
-## 5. Every time constant downstream was fitted to the wrong clock
+## 5. Every time constant downstream was fitted to the wrong clock — FIXED
 
 **Found** 2026-09-09, on trying to point the acceptance test at the calibrated
-process from issue 4.
+process from issue 4. **Fixed** the same day.
 
-**Symptom.** `evaluate` on the calibrated process reports JoinTouch earning
-**8.35 ticks per passive fill against a two-tick spread** -- four times the
-whole spread, which no liquidity provider can earn -- and an informed-share
-sweep that is flat from 0% to 70%:
+**Symptom.** `evaluate` on the calibrated process reported an informed-share
+sweep that was flat from 0% to 70%:
 
 | informed share | 0% | 20% | 40% | 70% |
 |---|---|---|---|---|
@@ -300,10 +357,16 @@ sweep that is flat from 0% to 70%:
 
 By the criterion `evaluate` prints under that table, flat means the generator
 has no compensation structure and nothing solved against it can be interpreted.
-The MDP table, solved on the same process, quotes both sides in **no state at
-all** and earns exactly zero.
+The MDP table, solved on the same process, quoted both sides in **no state at
+all** and earned exactly zero.
 
-**Cause.** `evaluate` diagnosed it without being asked:
+*(An earlier version of this entry also called JoinTouch's 8.35 "per fill"
+impossible against a two-tick spread. It is not. The column is ticks x shares
+and a quote is ten shares, so it is 0.835 ticks a share — below the half-spread
+and entirely ordinary. The claim was wrong and the units were on the table's own
+header the whole time.)*
+
+**Cause.** `evaluate` diagnosed the first part without being asked:
 
 ```
 epoch  3722.861 ms message budget (200 events), 3760.465 ms mean quote life,
@@ -311,30 +374,84 @@ epoch  3722.861 ms message budget (200 events), 3760.465 ms mean quote life,
        Budget and table differ by 37.2x.
 ```
 
-The driver requotes every 200 EVENTS. At 2.5 us an event that is 0.5 ms, and
-every downstream constant was chosen around it: the 100 ms MDP epoch, the 100 ms
-markout horizon, the informed-flow budget in flow.hpp, which is derived from
-`L = 7500 events at ~2 us apart`. At 18.55 ms an event the same 200 events are
-3.7 SECONDS, so a quote outlives its own epoch thirty-seven times over, the
-markout window closes after five events, and adverse selection measures nothing.
+`DriverConfig::quote_every` was 200 EVENTS. At 2.5 us an event that is 0.5 ms;
+at the calibrated 18.55 ms it is 3.7 SECONDS. One constant, two completely
+different traders, and every cadence downstream had been chosen against the
+first reading.
 
-Matching the epoch to the quote life does not fix it -- it moves the mismatch.
-Re-solving at 3,722 ms makes a fill near-certain every epoch (P 0.82 at the
-front of the queue, 0.47 at the back) so queue position, the state variable the
-whole model is built on, stops mattering.
+**Three constants were wrong, in the same way, for the same reason.**
 
-**What it means for the numbers already recorded.** Every Phase 5 acceptance
-result in this repository was measured on a process whose touch essentially
-never moved, and its three time constants agreed with each other only because
-all three were derived from the same uncalibrated clock. They are internally
-consistent and they are not measurements of a market.
+*The message budget.* Now `DriverConfig::quote_every_ns`, a time, defaulting to
+the 100 ms MDP epoch — the one cadence it must agree with, since every
+probability in the table is per epoch.
 
-**Not fixed, and deliberately not half-fixed.** `backtest`, `evaluate` and
-`sim_demo` still run the stress process. Switching one of them alone would
-replace a wrong number with a number that looks right and is not.
+*The informed-flow impact.* `informed_impact_prob` was 0.01, derived from a
+quotability bound written as `L = 7500 events at ~2 us apart`. Both inputs were
+the bad clock, and a bound is the wrong shape for choosing a value anyway: it is
+a ceiling, and every value below it satisfies it, including zero. It is fitted
+now, to the one thing the captures state directly — P(the mid has moved against
+the resting side one second after a print), which `tools/mdp_params.py` reports
+as `p_adverse_1.0s`:
 
-**What a fix has to do.** Make the requote interval a TIME, not an event count,
-so it survives a change of clock; re-derive the informed-flow bound in
-flow.hpp, whose algebra is written in events at 2 us; then re-run
-`evaluate --sweep-informed` and require the curve to fall before any acceptance
-number is quoted again.
+| | p_adverse |
+|---|---|
+| ethusd, 8-hour capture, n=5,032 | 33% |
+| ethusd, 10-min sample, n=54 | 48% |
+| xrpusd, 10-min sample, n=153 | 52% |
+| btcusd, 10-min sample, n=220 | 63% |
+| generator at 0.01 (the old value) | **13.6%** |
+| generator at 0.85 (fitted) | **33.4%** |
+
+*The inventory penalty.* `solve --penalty` defaulted to a bare 10 ticks/lot²/s.
+That is 0.005 per epoch on a 0.5 ms grid and **1.0 per epoch on a 100 ms one** —
+twenty-two times the entire per-epoch edge of a touch quote, so no policy quotes
+at all whatever else is true of the market. It is now derived, at
+Avellaneda-Stoikov's `gamma * sigma^2 * q^2`, from the mid volatility the params
+measured: scale from the process, preference (`--risk-aversion`, default 1) from
+the user. On these processes that gives 0.35 (simulator) and 0.12 (ethusd)
+rather than 10.
+
+**What the fix produced.** The sweep falls, which is what the diagnostic is
+for:
+
+| informed share | 0% | 20% | 50% | 70% |
+|---|---|---|---|---|
+| JoinTouch session P&L | 21,653 | 17,401 | 10,494 | 7,985 |
+
+The budget and the table's epoch now agree exactly (100 ms, 5.4 market events)
+and the warning no longer fires. The policy quotes both sides at the touch at
+flat inventory, skews one side at the inventory limit, and pulls both in no
+state. Its modelled fill hazard is within 1.6x of what its own orders realise,
+against 20x historically.
+
+**And the acceptance test now fails, interpretably.**
+
+```
+TabulatedMDP minus JoinTouch, paired by seed:
+  mean -1703.4   95% CI [-2117.7, -1321.3]   over 24 seeds, 1 of them positive
+```
+
+(-3,418 when this was written; issue 2's move-fill fix, landed after, halved it.)
+
+This is a real result rather than an abstention: the policy trades (3,108
+passive fills against JoinTouch's 3,362) and earns less. It skews for inventory
+— peak position 40.5 against JoinTouch's 59.0 — and pays for it in P&L on a
+process where carrying inventory is not punished enough to be worth avoiding.
+Sweeping risk aversion on the tune seed family (never the acceptance family)
+says there is no value of it that wins:
+
+| gamma | 0.1 | 0.25 | 1.0 | 4.0 |
+|---|---|---|---|---|
+| MDP minus JoinTouch | +0.0 | +5.6 | -1,645 | -1,854 |
+
+At 0.1 the policy has become JoinTouch exactly and the comparison is degenerate;
+at 0.25 it ties; above that it loses. The default stays at 1 because it is the
+principled value, not the flattering one.
+
+**What that leaves.** The acceptance test is answerable and the answer is no.
+The likely reason is in the process rather than the solver: the calibrated
+generator's imbalance signal runs 6.1 / 4.9 / 4.8 / 6.0 / 9.1 per cent across
+the five buckets — barely monotone — where real ethusd runs 0.7 to 2.7 per cent
+monotonically, and its queue-position gradient is 2.8x against the 60x measured
+on a real book. A policy has little to exploit here. That is Phase 3 work, not
+Phase 5's.

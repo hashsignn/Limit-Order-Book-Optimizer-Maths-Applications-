@@ -468,7 +468,7 @@ int main(int argc, char** argv) {
           q_fabricated += e.qty;
         }
         acc.before_apply(book, e, rel, warmed);
-        if (warmed) qr.on_event(book, e);
+        qr.on_event(book, e, warmed);
         (void)book.apply(e);
         if (warmed) { acc.after_apply(book, e, rel); qr.on_state(book, rel); }
       }
@@ -602,7 +602,7 @@ int main(int argc, char** argv) {
 
       for (int i = 0; i < d.n; ++i) {
         acc.before_apply(book, d.ev[i], rel, warmed);
-        if (warmed) qr.on_event(book, d.ev[i]);
+        qr.on_event(book, d.ev[i], warmed);
         book.apply(d.ev[i]);
         if (warmed) { acc.after_apply(book, d.ev[i], rel); qr.on_state(book, rel); }
       }
