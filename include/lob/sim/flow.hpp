@@ -549,11 +549,12 @@ struct FlowConfig {
     // arXiv:1901.08938, which couples exactly this to the queue-reactive rates
     // -- in its simplest single-kernel form.
     //
-    // Both constants are fitted to the lift, below, and the base cancel rate is
-    // re-divided so the MARGINAL cancel rate stays where Model I put it: an
-    // excitation that also raises the average is two changes wearing one name.
-    // FITTED TO THE UNCONDITIONAL MOVE RATE, NOT TO THE LIFT, and the sweep
-    // says why that is the honest choice:
+    // The base cancel rate is re-divided so the MARGINAL cancel rate stays
+    // where Model I put it: an excitation that also raises the average is two
+    // changes wearing one name.
+    //
+    // THE GAIN IS FITTED TO THE UNCONDITIONAL MOVE RATE, NOT TO THE LIFT, and
+    // the sweep says why that is the honest choice:
     //
     //     gain   P(mv|print)  P(mv|random)   lift   adverse
     //        0      28.5%        28.6%       1.00    18.5%
