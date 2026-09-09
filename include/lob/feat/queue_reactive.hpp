@@ -71,7 +71,28 @@ class QueueReactive {
   // somewhere rather than dropped.
   static constexpr int kBuckets = 48;
   static constexpr int kOrders  = 8;    // log2 of the order count, so up to 255
+  // The OPPOSITE best queue, in the paper's four regimes. Model II-b makes the
+  // intensities at Q_1 functions of the target queue AND of S_{m,l}(q_-1):
+  //
+  //     empty   q = 0        usual   m < q <= l
+  //     small   0 < q <= m   large   q > l
+  //
+  // with m and l the 33% and 67% quantiles of the touch queue size conditional
+  // on being positive. Measured on the committed captures those are 2 and 6
+  // (ethusd), 2 and 4 (btcusd), 1 and 3 (xrpusd); 2 and 5 is the middle and is
+  // what these default to. France Telecom's were 4 and 9.
+  //
+  // The paper notes this is one parameterisation among equivalents -- "one can
+  // consider them as functions of the first level bid/ask imbalance" -- which
+  // matters here because imbalance is already the MDP's state variable, so
+  // whatever this measures is measuring that.
+  static constexpr int kOpp = 4;
+  enum Opp { kOppEmpty = 0, kOppSmall = 1, kOppUsual = 2, kOppLarge = 3 };
   enum Ev { kAdd = 0, kCancel = 1, kTrade = 2, kNumEv = 3 };
+
+  // Thresholds in AES units. Public so a caller measuring a different
+  // instrument can set its own rather than inheriting these.
+  int opp_m = 2, opp_l = 5;
 
   // The event size this queue is measured in, once frozen. Zero means the
   // warmup saw nothing here and the level was never binned.
@@ -107,8 +128,9 @@ class QueueReactive {
     const int lvl = static_cast<int>(d);
     const int q   = qbucket(b.qty_at(e.side, e.price), lvl);
     const int n   = bucket(b.orders_at(e.side, e.price), kOrders);
-    if (ev < 0) { ++counts_[s][lvl][q][n][kCancel]; ++counts_[s][lvl][q][n][kAdd]; }
-    else        { ++counts_[s][lvl][q][n][ev]; }
+    const int o   = opp_bucket(b, s);
+    if (ev < 0) { ++counts_[s][lvl][q][n][o][kCancel]; ++counts_[s][lvl][q][n][o][kAdd]; }
+    else        { ++counts_[s][lvl][q][n][o][ev]; }
   }
 
   // Call AFTER the event is applied, to accrue the time each queue spent at its
@@ -125,9 +147,12 @@ class QueueReactive {
         const Ticks px = (s == 0) ? (t - l) : (t + l);
         const int q = qbucket(b.qty_at(side, px), l);
         const int n = bucket(b.orders_at(side, px), kOrders);
-        if (dt > 0.0 && cur_q_[s][l] >= 0) expo_[s][l][cur_q_[s][l]][cur_n_[s][l]] += dt;
+        const int o = opp_bucket(b, s);
+        if (dt > 0.0 && cur_q_[s][l] >= 0)
+          expo_[s][l][cur_q_[s][l]][cur_n_[s][l]][cur_o_[s][l]] += dt;
         cur_q_[s][l] = q;
         cur_n_[s][l] = n;
+        cur_o_[s][l] = o;
       }
     }
     last_ = now;
@@ -137,21 +162,22 @@ class QueueReactive {
     // aes travels with the rows because q_aes is meaningless without it: two
     // captures of the same instrument have different average event sizes and
     // comparing their bucket 7 is comparing different queue sizes.
-    std::fprintf(f, "side,level,q_aes,log2_orders,adds,cancels,trades,exposure_s,aes\n");
+    std::fprintf(f, "side,level,q_aes,log2_orders,opp,adds,cancels,trades,exposure_s,aes\n");
     for (int s = 0; s < 2; ++s)
       for (int l = 0; l < kLevels; ++l)
         for (int q = 0; q < kBuckets; ++q)
-          for (int n = 0; n < kOrders; ++n) {
-            const std::uint64_t a = counts_[s][l][q][n][kAdd],
-                                c = counts_[s][l][q][n][kCancel],
-                                t = counts_[s][l][q][n][kTrade];
-            if (a == 0 && c == 0 && t == 0 && expo_[s][l][q][n] <= 0.0) continue;
-            std::fprintf(f, "%d,%d,%d,%d,%llu,%llu,%llu,%.6f,%.4f\n", s, l, q, n,
-                         static_cast<unsigned long long>(a),
-                         static_cast<unsigned long long>(c),
-                         static_cast<unsigned long long>(t), expo_[s][l][q][n],
-                         aes_[l]);
-          }
+          for (int n = 0; n < kOrders; ++n)
+            for (int o = 0; o < kOpp; ++o) {
+              const std::uint64_t a = counts_[s][l][q][n][o][kAdd],
+                                  c = counts_[s][l][q][n][o][kCancel],
+                                  t = counts_[s][l][q][n][o][kTrade];
+              if (a == 0 && c == 0 && t == 0 && expo_[s][l][q][n][o] <= 0.0) continue;
+              std::fprintf(f, "%d,%d,%d,%d,%d,%llu,%llu,%llu,%.6f,%.4f\n", s, l, q, n, o,
+                           static_cast<unsigned long long>(a),
+                           static_cast<unsigned long long>(c),
+                           static_cast<unsigned long long>(t), expo_[s][l][q][n][o],
+                           aes_[l]);
+            }
   }
 
  private:
@@ -220,6 +246,20 @@ class QueueReactive {
     return q;
   }
 
+  // Which regime the OPPOSITE best queue is in. Measured at the touch, so it is
+  // well defined without a reference price: the opposite side's best queue is
+  // the opposite side's best queue however the levels behind it are indexed.
+  [[nodiscard]] int opp_bucket(const OrderBook& b, int side) const noexcept {
+    const Side other = (side == 0) ? Side::Ask : Side::Bid;
+    if (side == 0 ? !b.has_ask() : !b.has_bid()) return kOppEmpty;
+    const Ticks px = (side == 0) ? b.best_ask() : b.best_bid();
+    const int q = qbucket(b.qty_at(other, px), 0);
+    if (q <= 0) return kOppEmpty;
+    if (q <= opp_m) return kOppSmall;
+    if (q <= opp_l) return kOppUsual;
+    return kOppLarge;
+  }
+
   // floor(log2(q)), so bucket b covers [2^b, 2^(b+1)). An empty queue is its
   // own bucket 0, because a queue nobody is in is a different state from a
   // queue with one lot in it -- the reference price moves off an empty one.
@@ -236,10 +276,11 @@ class QueueReactive {
     return b;
   }
 
-  std::uint64_t counts_[2][kLevels][kBuckets][kOrders][kNumEv] = {};
-  double        expo_[2][kLevels][kBuckets][kOrders] = {};
+  std::uint64_t counts_[2][kLevels][kBuckets][kOrders][kOpp][kNumEv] = {};
+  double        expo_[2][kLevels][kBuckets][kOrders][kOpp] = {};
   int           cur_q_[2][kLevels] = {{-1, -1, -1, -1, -1}, {-1, -1, -1, -1, -1}};
   int           cur_n_[2][kLevels] = {{-1, -1, -1, -1, -1}, {-1, -1, -1, -1, -1}};
+  int           cur_o_[2][kLevels] = {};
   Nanos         last_ = 0;
   double        warm_sum_[kLevels] = {};
   std::uint64_t warm_n_[kLevels]   = {};

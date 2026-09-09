@@ -373,13 +373,24 @@ struct FlowConfig {
     //     level          0      1      2      3
     //     mean q      4.29   0.49   0.43   0.39
     //     P(q = 0)    0.00   0.79   0.80   0.85
-    //     events/s    2.34   0.474  0.360  0.373
+    //     events/s    1.17   0.237  0.179  0.186
     //
     // and what these constants reproduce through the closed form:
     //
     //     mean q      4.29   0.49   0.43   0.39     exact by construction
-    //     P(q = 0)    ----   0.793  0.803  0.829
-    //     events/s    2.34   0.474  0.360  0.373    exact by construction
+    //     P(q = 0)    ----   0.793  0.803  0.847
+    //     events/s    1.17   0.237  0.179  0.186    exact by construction
+    //
+    // THE RATES WERE ONCE TWICE THESE, and the cause is worth keeping. The
+    // estimator accrues exposure for EVERY (side, level) on every step, so
+    // exposure summed over both sides is twice the wall clock. The aggregation
+    // that produced the targets divided that by two as well, which is the
+    // correct wall clock and the wrong denominator for a per-side rate --
+    // count and exposure must be summed over the same set. Every rate came out
+    // doubled and the fit duly reproduced it. Nothing about the shapes moved:
+    // a birth-and-death queue's law depends only on the ratios, so halving all
+    // four scales at a level halves its event rate and leaves its distribution
+    // untouched, which is why mean q and P(q=0) are unchanged above.
     //
     // P(q=0) is not a target at the touch and cannot be: level 0 here is the
     // BEST queue, so it is empty only when a whole side is, which the closed
@@ -390,12 +401,12 @@ struct FlowConfig {
     // slower refill that would have left the book one-sided.
 
     // lambda^L(q) = q == 0 ? add_empty : add_rate * exp(-add_decay * (q - 1))
-    double add_rate  [kLevels] = {1.3013, 1.0522, 0.7976, 1.2526};  // per second, per side
-    double add_empty [kLevels] = {0.5856, 0.0631, 0.0558, 0.0376};
+    double add_rate  [kLevels] = {0.6507, 0.5261, 0.3988, 0.6263};  // per second, per side
+    double add_empty [kLevels] = {0.2928, 0.0316, 0.0279, 0.0188};
     double add_decay [kLevels] = {0.000,  0.120,  0.140,  0.150};   // flat at the touch
 
     // lambda^C(q) = cancel_rate * q / (q + cancel_half),  zero at q = 0
-    double cancel_rate[kLevels] = {2.3430, 2.2787, 1.8814, 2.3415};
+    double cancel_rate[kLevels] = {1.1715, 1.1394, 0.9407, 1.1708};
     double cancel_half[kLevels] = {2.500,  2.000,  2.000,  2.000};  // in AES
 
     // lambda^M(q) = trade_rate * exp(-trade_decay * (q - 1)),  zero at q = 0
@@ -412,7 +423,7 @@ struct FlowConfig {
     // -0.42 +- 0.06 against btcusd's -0.83 +- 0.11: the sign is right, and the
     // sign was backwards before Model I, while the steepness is not settled by
     // 179 trade events on one instrument.
-    double trade_rate  = 0.1851;
+    double trade_rate  = 0.0926;
     double trade_decay = 0.240;
 
     // MARKET ORDER SIZE, as a multiple of AES, by sixteenth of the distribution.
@@ -448,6 +459,61 @@ struct FlowConfig {
     double trade_size_aes[kSizeBins + 1] = {
         0.0000, 0.0005, 0.0011, 0.0045, 0.0091, 0.0129, 0.0217, 0.0293, 0.0672,
         0.0916, 0.0916, 0.1006, 0.1960, 0.4506, 0.6253, 1.0825, 5.2305};
+
+    // ---- Model II-b: the touch also watches the OPPOSITE queue -------------
+    //
+    // Huang et al. make the intensities at Q_1 functions of the target queue
+    // and of S_{m,l}(q_-1), the opposite best queue in four regimes: empty,
+    // small (<= m), usual (<= l), large (> l), with m and l its 33% and 67%
+    // quantiles conditional on being positive. Measured on the captures those
+    // are 2 and 6 AES (ethusd), 2 and 4 (btcusd), 1 and 3 (xrpusd).
+    //
+    // The paper notes this is one parameterisation among equivalents -- "one
+    // can consider them as functions of the first level bid/ask imbalance" --
+    // which is why this is the piece that matters here: imbalance is the MDP's
+    // own state variable, so this is the mechanism that puts a signal in it.
+    //
+    // MEASURED AT THE TOUCH, per side, and the paper's two findings hold:
+    //
+    //     opposite queue          small    usual    large
+    //     ethusd  adds/s          0.664    0.391    0.256     falling
+    //             cancels/s       0.967    0.526    0.433
+    //             trades/s        0.039    0.067    0.055     rising
+    //     btcusd  adds/s          0.868    0.424    0.371     falling
+    //             cancels/s       3.568    0.717    0.682
+    //             trades/s        0.189    0.175    0.379     rising
+    //     xrpusd  adds/s          0.428    0.335    0.760     RISING
+    //             cancels/s       0.777    0.993    1.916
+    //             trades/s        0.066    0.166    0.308     rising
+    //
+    // Limit insertion falls with the opposite queue on the two large-tick
+    // instruments, which is the paper's finding and its reason: a thick
+    // opposite side puts the efficient price nearer it, so quoting this side is
+    // profitable. Market orders rise with it on all three -- transactions at
+    // the target queue are cheap when its price is temporarily closer to the
+    // efficient price -- which is the same reasoning read from the taker's end.
+    //
+    // xrpusd inverts the add and cancel rows, and it is the small-tick
+    // instrument, the same split Model II-a showed. Dayri and Rosenbaum's tick
+    // regimes again; these numbers are the large-tick ones.
+    //
+    // The multipliers are each regime's rate over the exposure-weighted mean of
+    // the three, so applying them leaves the marginal alone PROVIDED the
+    // simulator spends the same share of time in each regime as the capture did
+    // (ethusd: 40.6 / 20.6 / 38.7 per cent). It does not exactly, so the
+    // marginal drifts a little; that is measured after the fact rather than
+    // assumed away.
+    //
+    // An empty opposite queue is never observed in the captures -- both sides
+    // have a touch throughout -- so it borrows the "small" multiplier. The
+    // paper says market orders are MORE frequent against an empty opposite
+    // queue than a small one, since the target is then two ticks nearer the
+    // reference price than the other side. That is not reproduced here because
+    // nothing measured it.
+    int    opp_m = 2, opp_l = 5;      // regime edges, in AES
+    double opp_add   [3] = {1.478, 0.871, 0.570};   // small, usual, large
+    double opp_cancel[3] = {1.446, 0.787, 0.648};
+    double opp_trade [3] = {0.761, 1.325, 1.080};
 
     // Orders the price has walked away from.
     //
@@ -737,6 +803,21 @@ class FlowGenerator {
     return q < 1 ? 1 : q;
   }
 
+  // Which regime the opposite queue is in, as Model II-b's S_{m,l}. Returns an
+  // index into the three multipliers; an empty opposite queue borrows "small",
+  // for the reason given beside those constants.
+  [[nodiscard]] int opp_regime(const QueueState& st, int side) const noexcept {
+    const int other = 1 - side;
+    int best = -1;
+    for (int l = 0; l < FlowConfig::Qr::kLevels && best < 0; ++l)
+      if (st.n[other][l] > 0) best = l;
+    if (best < 0) return 0;                       // nothing on the other side
+    const int q = q_of(st.qty[other][best]);
+    if (q <= cfg_.qr.opp_m) return 0;             // empty and small together
+    if (q <= cfg_.qr.opp_l) return 1;
+    return 2;
+  }
+
   [[nodiscard]] double lambda_add(int lvl, int q) const noexcept {
     const FlowConfig::Qr& k = cfg_.qr;
     if (q <= 0) return k.add_empty[lvl];
@@ -783,11 +864,18 @@ class FlowGenerator {
       int best = -1;
       for (int l = 0; l < kL && best < 0; ++l)
         if (st.n[s][l] > 0) best = l;
+      // Model II-b applies at the TOUCH only, which is where the paper applies
+      // it: the intensities at Q_1 depend on the opposite queue, those behind
+      // it do not.
+      const int reg = opp_regime(st, s);
+      const double ma = cfg_.qr.opp_add[reg], mc = cfg_.qr.opp_cancel[reg],
+                   mt = cfg_.qr.opp_trade[reg];
       for (int l = 0; l < kL; ++l) {
         const int q = q_of(st.qty[s][l]);
-        rate[s][l][0] = lambda_add(l, q);
-        rate[s][l][1] = st.n[s][l] > 0 ? lambda_cancel(l, q) : 0.0;
-        rate[s][l][2] = st.n[s][l] > 0 ? lambda_trade(l, q, best) : 0.0;
+        const bool touch = (l == 0);
+        rate[s][l][0] = lambda_add(l, q) * (touch ? ma : 1.0);
+        rate[s][l][1] = st.n[s][l] > 0 ? lambda_cancel(l, q) * (touch ? mc : 1.0) : 0.0;
+        rate[s][l][2] = st.n[s][l] > 0 ? lambda_trade(l, q, best) * (touch ? mt : 1.0) : 0.0;
         total += rate[s][l][0] + rate[s][l][1] + rate[s][l][2];
       }
       // Independent per-order cancellation outside the window, so a stray

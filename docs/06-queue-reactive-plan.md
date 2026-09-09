@@ -196,8 +196,8 @@ should end up carrying roughly the share this implies, not more.
    |---|---|---|---|---|
    | mean q, target | 4.29 | 0.49 | 0.43 | 0.39 |
    | P(q=0), target | — | 0.79 | 0.80 | 0.85 |
-   | P(q=0), model | — | 0.793 | 0.803 | 0.829 |
-   | events/s | 2.34 | 0.474 | 0.360 | 0.373 |
+   | P(q=0), model | — | 0.793 | 0.803 | 0.847 |
+   | events/s, per side | 1.17 | 0.237 | 0.179 | 0.186 |
 
    Verified against Model I's **closed-form invariant distribution**, with the
    reference price pinned because that is the regime the closed form describes:
@@ -227,12 +227,44 @@ should end up carrying roughly the share this implies, not more.
    the paper's on the paper's authority and the eight-hour captures are what
    would test them.
 
-4. **No dependence on the opposite queue.** Model II-b, still to do. Note the
-   imbalance signal has **already appeared** without it, out of the reference
-   price following whichever best queue empties: P(next mid move is up) now runs
-   1.9 / 2.6 / 3.9 / 5.6 / 9.5 per cent across the five buckets, monotone, where
-   the fixed-weight generator gave 6.1 / 4.9 / 4.8 / 6.0 / 9.1 and no signal at
-   all. Model II-b should sharpen it rather than create it.
+4. ~~**No dependence on the opposite queue.**~~ **Done.** `QueueReactive` now
+   carries the paper's four-regime axis `S_{m,l}(q_-1)` — empty, small, usual,
+   large, with `m` and `l` the 33% and 67% quantiles of the touch queue
+   conditional on positive, measured at 2 and 6 AES on ethusd, 2 and 4 on
+   btcusd, 1 and 3 on xrpusd. Both of the paper's findings hold, per side:
+
+   | opposite queue | | small | usual | large |
+   |---|---|---|---|---|
+   | ethusd | adds/s | 0.664 | 0.391 | 0.256 |
+   | | trades/s | 0.039 | 0.067 | 0.055 |
+   | btcusd | adds/s | 0.868 | 0.424 | 0.371 |
+   | | trades/s | 0.189 | 0.175 | 0.379 |
+   | xrpusd | adds/s | 0.428 | 0.335 | **0.760** |
+   | | trades/s | 0.066 | 0.166 | 0.308 |
+
+   Limit insertion falls with the opposite queue on the two large-tick
+   instruments, for the paper's reason: a thick opposite side puts the efficient
+   price nearer it, so quoting this side is profitable. Market orders rise with
+   it on all three, which is the same reasoning from the taker's end, and it is
+   the mechanism that puts a signal in imbalance — more selling into the bid
+   exactly when the ask is thick.
+
+   xrpusd inverts the add row, and it is the small-tick instrument. Same split
+   Model II-a showed, and the constants here are the large-tick ones.
+
+   Applied at the touch only, as multipliers normalised to the exposure-weighted
+   mean, so they leave the marginal alone provided the simulator's regime
+   occupancy matches the capture's. Measured after the fact it barely moves:
+   touch adds go 0.546 to 0.562 per second with the multipliers off and on.
+
+   P(next mid move is up) across the five imbalance buckets:
+
+   | | 1 | 2 | 3 | 4 | 5 | range |
+   |---|---|---|---|---|---|---|
+   | fixed weights | 6.1 | 4.9 | 4.8 | 6.0 | 9.1 | U-shaped |
+   | Model I | 1.9 | 2.6 | 3.9 | 5.6 | 9.5 | 4.2× |
+   | + Model II-b | 0.7 | 1.5 | 3.0 | 4.0 | 5.1 | **7.3×** |
+   | ethusd | 0.3 | 0.4 | 0.8 | 0.6 | 3.0 | 10× |
 
 5. **Reference price: partly done, and it was not optional.** Levels are
    anchored to `p_ref` now, not to the moving touch, and `theta` moves `p_ref`
@@ -258,11 +290,17 @@ Estimator first (1), Model I next (2, 3) against the closed form. **Both done.**
 Model II-a's market order routing and the measured market order size followed,
 and between them they unblocked `level_ratio`. **All done.**
 
-Next: the `Q_2` regime switch, which needs the estimator to carry the regime
-first; then Model II-b (4) to sharpen the imbalance signal; then the rest of
-Model III (5), calibrating `theta` and `theta_reinit` against the ten-minute
-volatility and the mean-reversion ratio. Limit order sizes (6) last — market
-order sizes are done.
+Model II-b followed, and the estimator now carries the opposite-queue regime.
+
+Next: the `Q_2` regime switch from Model II-a, which the estimator can now be
+extended to measure the same way; then the rest of Model III (5), calibrating
+`theta` and `theta_reinit` against the ten-minute volatility and the
+mean-reversion ratio. Limit order sizes (6) last — market order sizes are done.
+
+Also open: adverse selection on the queue-reactive process reads 19% against a
+measured 33%, having been 34% before the rate correction. The informed-flow
+parameters were fitted against the fixed-weight process and have not been
+re-fitted against this one.
 
 ## Model II-a: what was implemented, and what level_ratio actually needed
 
@@ -325,6 +363,35 @@ refit with the regime split. Worse, this probe and `QueueReactive` disagree by
 the estimator's level 1 is always touch-relative — so fitting from the probe
 alone would be fitting two different definitions together. The estimator has to
 carry the regime before this can be calibrated.
+
+## A fourth defect, found while checking Model II-b's marginals
+
+Every fitted rate was **twice** what it should have been, from the Model I fit
+onward, and Model II-b only exposed it.
+
+`QueueReactive::on_state` accrues exposure for *every* `(side, level)` on every
+step, so exposure summed over both sides is twice the wall clock. The
+aggregation that produced the targets divided that by two — which is the correct
+wall clock, and the wrong denominator for a per-side rate. Count and exposure
+have to be summed over the same set. Every target rate came out doubled and the
+fit faithfully reproduced it.
+
+The corrected ethusd targets, per side:
+
+| level | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| adds/s | 0.449 | 0.121 | 0.095 | 0.095 |
+| cancels/s | 0.669 | 0.116 | 0.084 | 0.091 |
+| trades/s | 0.051 | — | — | — |
+
+Nothing about the shapes moved. A birth-and-death queue's law depends only on
+the arrival/departure ratios, so halving all four scales at a level halves its
+event rate and leaves its distribution exactly where it was — mean q, P(q=0) and
+the closed-form check are all unchanged. Only the clock was wrong.
+
+Worth noting what did *not* catch it: the invariant-distribution test passes
+either way, because it tests the shape. A rate is only wrong against something
+outside the model, and the thing outside was the capture.
 
 ## Three defects found by auditing the Model I work, and what they cost
 
