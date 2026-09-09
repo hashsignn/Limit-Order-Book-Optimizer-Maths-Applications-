@@ -146,11 +146,25 @@ should end up carrying roughly the share this implies, not more.
 
 ## Gap list, against what is in the repository now
 
-1. **`QueueReactive` bins on `log2` of raw quantity.** The paper bins on
-   `q / AES` in linear integer steps and its figures run 0 to 40. Log2 puts that
-   entire range into six buckets and destroys exactly the shape being measured.
-   Needs AES per (side, level) and linear bins. This is the prerequisite for
-   everything below.
+1. ~~**`QueueReactive` bins on `log2` of raw quantity.**~~ **Done.** The axis is
+   `ceil(volume / AES)` in linear steps now, with AES measured per level during
+   the warmup the caller already discards and pooled across sides the way the
+   paper pools the intensities. The touch went from about six occupied buckets
+   to seventeen (ethusd), twenty-one (btcusd) and eighteen (xrpusd), and
+   `tests/test_queue_reactive.py` fails if that collapses again.
+
+   With the axis fixed, the slopes at the touch are:
+
+   | slope vs queue size | btcusd | generator | paper |
+   |---|---|---|---|
+   | adds | +0.10 ± 0.24 | +0.10 ± 0.01 | flat — **agrees** |
+   | cancels | −1.03 ± 0.39 | +0.71 ± 0.04 | rising, concave |
+   | trades | −0.83 ± 0.11 | +0.07 ± 0.01 | falling, near-exponential |
+
+   Adds already match. Trades have the **wrong sign** and that is the paper's
+   central shape. Cancels have the wrong sign too, and note our own captures
+   also disagree with the paper's rising cancel rate — on a ten-minute sample,
+   so this needs the eight-hour captures before anything is fitted to it.
 
 2. **`FlowGenerator` intensities do not depend on the book at all.** Weights are
    fixed and a removal picks a uniformly random resting order, which is why

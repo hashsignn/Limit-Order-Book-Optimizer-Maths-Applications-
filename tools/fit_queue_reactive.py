@@ -75,20 +75,34 @@ def fit(df, pair):
         lv = {"exposure_s": float(g.exposure_s.sum())}
         print(f"  level {lvl}   ({g.exposure_s.sum():,.0f} queue-seconds observed)")
 
-        for axis, label in (("log2_orders", "orders resting"), ("log2_qty", "shares queued")):
+        for axis, label in (("log2_orders", "orders resting"),
+                            ("q_aes", "queue size, in average event sizes")):
             agg = g.groupby(axis).agg(
                 adds=("adds", "sum"), cancels=("cancels", "sum"),
                 trades=("trades", "sum"), expo=("exposure_s", "sum")).reset_index()
             agg = agg[agg.expo > 0]
             if agg.empty:
                 continue
-            # Bucket b covers [2^b, 2^(b+1)); its geometric centre is 2^(b+0.5).
-            agg["x"] = 2.0 ** (agg[axis] + 0.5)
+            if axis == "q_aes":
+                # Already a queue size, in units of the average event at this
+                # level. Bucket q is ceil(volume / AES) = q, so q IS the x
+                # value; there is nothing to un-log. Bucket 0 is an empty queue
+                # and log(0) is not a number, so it is dropped from the SLOPE
+                # and reported separately -- an empty queue is a different
+                # state, not a small one, and the paper's own intensities jump
+                # at zero rather than continuing the curve.
+                agg = agg[agg[axis] > 0]
+                if agg.empty:
+                    continue
+                agg["x"] = agg[axis].astype(float)
+            else:
+                # Bucket b covers [2^b, 2^(b+1)); its geometric centre is 2^(b+0.5).
+                agg["x"] = 2.0 ** (agg[axis] + 0.5)
 
             print(f"    vs {label}:")
             for ev in EVENTS:
                 sel = agg[agg[ev] >= MIN_N]
-                key = f"{ev}_vs_{'orders' if axis == 'log2_orders' else 'qty'}"
+                key = f"{ev}_vs_{'orders' if axis == 'log2_orders' else 'qaes'}"
                 if len(sel) < 3:
                     lv[key] = {"beta": None,
                                "note": f"{MIN_N}+ events in only {len(sel)} bucket(s)"}
@@ -140,10 +154,17 @@ def main() -> int:
     (outdir / "queue_reactive.json").write_text(json.dumps(all_out, indent=2))
     print(f"\nwrote {outdir}/queue_reactive.json")
     print("\nRead the two axes together. A cancel slope near 1 against ORDERS RESTING is")
-    print("independent per-order cancellation. Near 0 against SHARES QUEUED at the same")
-    print("time says the shares were never the mechanism -- only how many orders hold")
-    print("them. Flat on both axes is a process whose rates ignore the book entirely,")
-    print("which is what --synthetic should show; run it there and compare.")
+    print("independent per-order cancellation. Near 0 against QUEUE SIZE at the same time")
+    print("says the shares were never the mechanism -- only how many orders hold them.")
+    print("Flat on both is a process whose rates ignore the book entirely.")
+    print()
+    print("What Huang et al. find at the touch, and what to compare against (docs/06):")
+    print("  adds     flat in queue size, and markedly lower at an empty queue")
+    print("  cancels  rising and concave to about 25 AES, then flat")
+    print("  trades   falling, close to exponential -- takers rush for scarce liquidity")
+    print("Measured here on btcusd: adds +0.10 +- 0.24, cancels -1.03 +- 0.39,")
+    print("trades -0.83 +- 0.11. The generator gives +0.10, +0.71, +0.07, so it has")
+    print("the SIGN wrong on both cancels and trades.")
     return 0
 
 
