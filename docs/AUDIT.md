@@ -1919,17 +1919,29 @@ project.
 position, and every test pins that position to zero so nothing catches it. Two
 smaller points.
 
-- **`Attribution::total` omits `inventory_mtm`.** Line 153 computes
-  `inventory_mtm = final_inventory * final_mid`; line 154 computes
-  `total = spread_capture - adverse_sel - fees` and never uses it. The file's own
-  header lists four lines in the decomposition and names "inventory cost" as one
-  of them. `apps/backtest/main.cpp:62` prints `r.attr.total` as the P&L column,
-  and `include/lob/strat/driver.hpp:253` passes the real
-  `sim.stats().inventory` in — so the number a run is judged on ignores whatever
-  position it ended holding. Both `attribute` calls in `tests/test_pnl.cpp`
-  (lines 55, 89-90) pass `final_inventory = 0`, which is why no test fails.
-  This matters concretely here: two of the baselines end runs with large
-  positions, so their reported `total` is not their result.
+- **`apps/backtest` settles its comparison on a number the repository says it
+  must not.** `Attribution::total` (line 154) is
+  `spread_capture - adverse_sel - fees` and deliberately excludes the closing
+  position. That exclusion is correct and documented —
+  `include/lob/strat/driver.hpp:106-115` states it outright: "Attribution::total
+  is NOT this. It is spread capture minus adverse selection at one markout
+  horizon — a decomposition of trading edge, which deliberately says nothing
+  about a position still open at the end. Comparing strategies on it credits
+  nothing to one that made its money by holding... this is the number the
+  comparison is settled on", where "this" is `RunResult::pnl()`.
+  `apps/evaluate` follows that rule and calls `pnl()` at every site.
+  **`apps/backtest/main.cpp:62` is the only consumer of `attr.total` in the
+  repository**, prints it under the column heading `net`, and never prints
+  `pnl()`. So the Phase 4 comparison is settled on the diagnostic rather than on
+  the result, in direct contradiction of the comment two files away.
+- **`inventory_mtm` is computed and never read.** Line 153 fills it in and
+  nothing in the repository consumes it — grep returns only the definition and
+  that assignment. Whatever it was for, it is dead.
+- **This file's header cites `docs/03-metrics-and-estimators.md` §10**, which
+  specifies Total P&L as five lines *including* "Inventory / hedging cost
+  (mark-to-market of held inventory)". `Attribution` implements four of the five
+  and calls itself that decomposition. The code is right and the citation is
+  loose — but a reader who follows the reference will expect the fifth line.
 - **`MarkoutTracker::advance` returns early when `mid_now <= 0.0`** (line 87).
   A horizon that elapses while the mid is unavailable is not recorded then; it
   is recorded at the next call with a valid mid. So the realised horizon is
@@ -4419,6 +4431,877 @@ order the way UTC stamps do, and one snapshot beside the first only.
 
 ---
 
+### `include/lob/policy/state.hpp`
+
+**Status:** Checked — [x] Reviewed (178 lines, read in full)
+
+**Issues Found:** None. Two notes on constants that must stay in step with a
+file outside this one.
+
+- **`kImbEdges` must match `tools/mdp_params.py`** (lines 63-65). The comment
+  says so and nothing enforces it. If they drift, "the policy is solved against
+  one book and applied to another", and the table header's discretisation check
+  would not catch it because the bucket *count* is unchanged.
+- **`queue_typical(kQueueBuckets - 1)` returns 1.0**, a full queue, for a bucket
+  that is unbounded above (lines 169-176). The comment defends it — a full queue
+  is what joining the back of a level actually puts in front of you — and it is
+  the right representative, but it means the deepest bucket's transition rate is
+  optimistic for an order that joined an unusually thick level.
+
+**Severity:** Minor (both)
+
+**Why it matters:** The `kImbEdges` coupling is the one that could go wrong
+silently. Everything else here is protected by the table header check in
+`src/policy_table.cpp`, which validates the whole shape.
+
+**Fix Recommendation:** Emit the edges into the params JSON from this header and
+have `tools/mdp_params.py` read them, rather than both writing them out:
+```python
+# mdp_params.py
+edges = json.load(open(args.state_constants))["imb_edges"]
+```
+or, cheaper, add the edges to `MdpParams::hash()` so a mismatch changes the hash
+and `apps/solve` refuses the table.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** A test that the edges in this header equal the edges in
+`policy/mdp.json`. `tests/test_policy.cpp` covers `imb_bucket` against this
+header's own constants, so a drift between the two files passes.
+
+**Performance Notes:** Everything is `constexpr` and the encode/decode pair is
+three multiplies and three adds. `kNumStates` is 11 x 16 x 16 x 5 = 14,080
+states, so the whole table is 14 KB of policy plus 113 KB of value — the policy
+fits in L1.
+
+**Security Notes:** `quoting()` (lines 83-85) checks `> 0 && < kSideStates`
+rather than `!= 0`, and the comment says why: a side state is an array index, so
+`!= 0` would let a negative value through into `(side_state - 1) / kQueueBuckets`
+and produce a negative subscript. That is a bounds check written for the right
+reason.
+
+**Market-Logic Notes:** This is the file where the project's central empirical
+claim is encoded, and each constant carries the measurement that set it.
+- **Queue position is in the state because measurement put it there** (lines
+  16-22): the realised fill hazard runs 1,019/s with nothing ahead and 16/s with
+  50,000 ahead, a factor of sixty, while `tools/calibrate.py` could not identify
+  an Avellaneda-Stoikov `k` on two of three instruments because these books sit
+  at a one-tick spread and delta has nowhere to vary. "Distance is the
+  small-tick state variable; this is the large-tick one."
+- **Bucketing by absolute volume ahead, not by quartile** (lines 37-48), with
+  the defect that forced it: quartiles rank against the *wrong population*,
+  because a market maker re-quotes the moment a level clears and so sits at
+  small absolute queues far more often than the book's own orders do. Measured
+  against a touch-joining strategy's real placements, the hazard at the front
+  was 1,019/s while the quartile model said 52/s — "and the policy duly
+  concluded that quoting behind the touch was better than being in front of it."
+- **Three quote levels, not two** (lines 50-53): with two, a quote pushed
+  further out vanished from the state and the model treated that as free, so it
+  priced the cost of never quoting but not the cost of being left behind.
+- **`kBackOfQueue`** (lines 96-100): a new order joins the back, and in a book
+  where 99% of removals are cancels that is "the single most consequential line
+  in the model: moving a quote one tick surrenders every second already spent
+  waiting."
+
+---
+
+### `include/lob/policy/table.hpp`
+
+**Status:** Checked — [x] Reviewed (83 lines, read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a
+
+**Why it matters:** This is the seam between the offline solve and the
+execution path, and it is the strongest interface in the repository.
+
+**Fix Recommendation:** None. The one defect in this component is in the
+implementation, not the interface, and is recorded under `src/policy_table.cpp`
+(a failed `load` leaves `value_` and `header_` stale).
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** Nothing asserts that the committed `policy/ethusd.bin` still
+loads under the current build — recorded under `policy/ethusd.bin`.
+
+**Performance Notes:** `action_for` (lines 68-70) is a compare and an array
+index, marked `noexcept` and inline in the header. There is no branch on the
+table's *contents*, only on the index bound, so lookup time cannot vary with the
+state being asked about — which is what the file's opening paragraph promises
+and what a latency budget needs. `tests/test_policy.cpp:367-394` measures it at
+random states across the whole table so the number is cache-miss-inclusive.
+
+**Security Notes:** `action_for` and `value_of` both bounds-check and return a
+safe default rather than reading past the end, and the comment states the
+principle: "a policy that cannot answer must decline, never guess."
+`static_assert(sizeof(TableHeader) == 88)` pins the on-disk layout so a padding
+change cannot silently reinterpret a file.
+
+**Market-Logic Notes:** Three fields in the header exist because getting them
+wrong would be undetectable downstream, and each says so in place.
+- **The header carries the discretisation, not just a version number** (lines
+  9-14). A bare version only catches the case where someone remembers to bump
+  it; storing the shape means a table solved before `kMaxInventory` changed is
+  rejected by a build that changed it — "the failure that would otherwise be
+  silent and total."
+- **`queue_scale`** (lines 41-44) travels with the table so the executor cannot
+  bucket on a different reference depth than the solver did, "which would put
+  every lookup in the wrong row while looking fine."
+- **`dt_s`** (lines 45-50): every probability in the model is per epoch, so "a
+  policy consulted twice as often as it was solved for is answering a question
+  about twice as much time as has actually passed."
+- The value function ships alongside the policy (lines 56-58) because the
+  roadmap requires a decision to be explainable, and pointing at a state and
+  saying why it quotes what it quotes needs the numbers that were compared.
+
+---
+
+### `include/lob/policy/mdp.hpp`
+
+**Status:** Checked — [x] Reviewed (163 lines, read in full; the implementation
+is audited under `src/mdp.cpp`)
+
+**Issues Found:** None in the interface. One default that is a deliberate
+compatibility choice and worth knowing about.
+
+- **`p_move_adverse` defaults to 1.0** (line 74), which reproduces the old,
+  wrong behaviour exactly. The comment says why — "a params file with no
+  measurement in it changes nothing" — which is the right call for
+  reproducibility, but it means a params file that simply omits the field gets
+  the biased model with no warning. `MdpParams::validate` does not require it.
+
+**Severity:** Minor
+
+**Why it matters:** The measured value is 0.33 on the eight-hour ethusd capture
+against a default of 1.0. A silently omitted field is a 3x over-charge on every
+move-fill, which biases every decision about quoting at the touch in the same
+direction.
+
+**Fix Recommendation:** Have `apps/solve` warn when the field is absent from the
+params file, or make `validate()` reject `p_move_adverse == 1.0` unless an
+explicit `"p_move_adverse": 1.0` was supplied. A warning is enough:
+```cpp
+if (!params_json.contains("p_adverse_1.0s"))
+  std::fprintf(stderr, "warning: no p_move_adverse in params; charging every "
+                       "move-fill in full, which measurement says is 3x too high\n");
+```
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** `tests/test_policy.cpp:156-212` tests that the move-fill
+branch is a probability-preserving **split**, which is the property that
+matters. Nothing tests that a params file omitting `p_move_adverse` is flagged.
+
+**Performance Notes:** `expand()` appends to a caller-supplied buffer and never
+clears it (lines 130-133), so one buffer serves a whole sweep and the solve does
+no allocation in its inner loop.
+
+**Security Notes:** None — offline code, no external input beyond a params file
+that `validate()` checks.
+
+**Market-Logic Notes:** The modelling here is the most carefully reasoned in the
+project.
+- **Adverse selection is not a parameter, it falls out** (lines 22-26). A fill
+  caused by the mid moving through us is booked *before* the move is applied to
+  the resulting inventory, "so selling into a rising market costs exactly what
+  it should. A model that needed a hand-set adverse-selection term would be a
+  model whose fills and price moves were independent, which is the one thing
+  they are not."
+- **Why the move-fill branch and not the mark on existing inventory** (lines
+  56-63): a move marks a position we already hold in whichever direction it
+  goes, and both directions are in the expansion, so that charge is symmetric
+  and averages out. A move-*fill* is one-sided by construction, "so an
+  over-charge there does not cancel against anything."
+- **The correction is conservative on purpose** (lines 65-70): it charges the
+  move with probability `p_move_adverse` and nothing otherwise, ignoring the
+  cases where the fill turned out profitable, because "a mean over that tail is
+  not a robust statistic on n=54 prints while a proportion is."
+- **`inventory_penalty` is per epoch and must not be set directly** (lines
+  100-107). "Per epoch is not a unit anybody holds a preference in": halving the
+  epoch halves the ticks per second a lot costs while leaving the constant
+  alone, so the same 0.01 meant 10 ticks/lot²/s at 1 ms and 20 at 0.5 ms. It
+  made the policy twice as afraid of inventory and pulled a side in a third of
+  all states. `apps/solve` takes the preference per second and multiplies.
+- **`max_sweeps` counts backups, not outer iterations** (lines 155-160), and the
+  old cap of 20,000 "was not a safety limit, it was a silent ceiling the solve
+  ran into and stopped at 2e-6."
+- **`stochastic()`** (lines 147-151) checks the process before any value
+  iteration, turning "twenty thousand sweeps ending in a residual of 2e+57" into
+  a sentence naming the offending state.
+
+---
+
+### `repo_tree.txt`
+
+**Status:** Checked — [x] Reviewed (117 lines, generated and read in full)
+
+**Issues Found:** The file did not exist when the audit began. It is a derived
+artefact, so it can go stale against the tree it describes.
+
+- **Generated during this audit**, because the brief names it as a top-level
+  file in scope. `tree` is not installed in this environment, so it was produced
+  with `git ls-files | sort`, which lists exactly the 116 tracked files plus
+  itself and omits ignored directories by construction.
+- **A committed tree listing drifts.** The moment a file is added or renamed,
+  this file is wrong, and nothing regenerates it.
+
+**Severity:** Minor
+
+**Why it matters:** A stale tree listing is worse than none, because a reader
+takes it for the current shape of the repository.
+
+**Fix Recommendation:** Either regenerate it in CI and fail on a diff:
+```yaml
+- name: Repo tree is current
+  run: git ls-files | sort > /tmp/t && diff -u repo_tree.txt /tmp/t
+```
+or stop tracking it and add `repo_tree.txt` to `.gitignore`, treating it as
+audit scaffolding rather than a repository artefact. The second is simpler and
+is what I would recommend once this audit is accepted.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** The CI check above is the test.
+
+**Performance Notes:** n/a.
+
+**Security Notes:** Contains only tracked paths — no ignored directories, so no
+build output, no `simcsv/` calibration dumps, and nothing from a `.env` that
+does not exist. Reviewed line by line for anything that should not be public;
+there is nothing.
+
+**Market-Logic Notes:** Not applicable.
+
+---
+
+### `include/lob/strat/driver.hpp`
+
+**Status:** Checked — [x] Reviewed (261 lines, read in full)
+
+**Issues Found:** A duplicated include. One structural observation about where
+the run is measured from.
+
+- **`#include <vector>` appears twice** (lines 16-17).
+- **`peak_inventory` is sampled inside the agent callback**, which runs once per
+  market event (line 195). Between two callbacks an in-flight order can land and
+  move the position, so the recorded peak is a sample of the path rather than
+  its true maximum. The comment at lines 86-89 argues correctly that "a limit
+  that is only checked when the strategy is consulted is not a limit"; the
+  measurement of the breach has the same sampling property.
+- **`last_mid` is only updated when the true book is two-sided** (lines 152-157),
+  so `final_mid` — which multiplies the closing position in `pnl()` — can be a
+  stale mid if the run ends one-sided.
+
+**Severity:** Minor (all three)
+
+**Why it matters:** The peak-inventory sampling is the one that could mislead: it
+is used to compare risk appetites across strategies, and it under-reports by an
+unknown amount that differs per strategy.
+
+**Fix Recommendation:** Delete the duplicate include. For the peak, sample it in
+`Simulator::book_fill` where the position actually changes, and expose it on
+`SimStats`:
+```cpp
+stats_.inventory += signed_qty;
+if (std::llabs(stats_.inventory) > stats_.peak_inventory)
+  stats_.peak_inventory = std::llabs(stats_.inventory);
+```
+
+**Refactor Suggestion:** None. Extracting this from `apps/backtest` so Phase 5
+could reuse it rather than grow a second copy (lines 9-10) was the right call
+and is the reason `apps/backtest` and `apps/evaluate` are comparable at all.
+
+**Tests Missing:** That two strategies driven through `run_strategy` on the same
+seed see the same market events. Nothing asserts the driver is strategy-neutral,
+which is its entire purpose.
+
+**Performance Notes:** `for (; seen < s.fills().size(); ++seen)` (line 161)
+walks the simulator's ever-growing fill vector from a saved index, so it is O(new
+fills) per event rather than O(all fills) — correct given H4, and another place
+that has to work around the unbounded log.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Three comments here record defects found the hard way,
+and all three are the kind that produce *better* numbers when broken.
+- **The message budget is a time, not an event count** (lines 26-41). At 200
+  events it was 0.5 ms under the old generator and 3.7 **seconds** under the
+  calibrated one — "the same code described a maker requoting twice a
+  millisecond and a maker requoting twice a minute." It now defaults to the
+  MDP's 100 ms epoch, "the one cadence it must agree with."
+- **Tracking cancellations rather than executions** (lines 173-188) left the
+  driver believing a filled quote was still resting. The comment then explains
+  why the obvious repair is worse: an order in flight is not in the book either,
+  so clearing the id when the order leaves the book "forgot" every quote the
+  moment it was sent, orphans rested forever, "position limits stopped binding
+  entirely (peak inventory 3,740 against a limit of 50), and fill counts looked
+  wonderful." Executions are the only sound signal and are what a venue reports.
+- **Hysteresis** (lines 211-215): a requote costs queue position, so a quote
+  moves only when the target has, "without this the strategy churns its own
+  priority away."
+- **Markouts use the TRUE mid, not the agent's lagged view** (lines 151-152),
+  because a markout is an economic measurement of what happened rather than of
+  what the agent knew.
+- **`Placement` records what our own orders experienced** (lines 92-104) — how
+  much was queued ahead, how long it rested, whether it traded — because "the
+  MDP is calibrated on the hazard the market's own orders see, and that is only
+  the hazard OURS see if the two populations look alike. Recording it is how you
+  find out instead of assuming." That instrument is what `apps/evaluate --probe`
+  reads.
+- **`pnl()` versus `Attribution::total`** (lines 106-118) is the distinction
+  `apps/backtest` fails to honour; see the H1 finding under
+  `include/lob/strat/pnl.hpp`.
+
+---
+
+### `include/lob/feat/queue_reactive.hpp`
+
+**Status:** Checked — [x] Reviewed (291 lines, read in full)
+
+**Issues Found:** The whole class is public. One comment left behind by the axis
+change. A large object held by value.
+
+- **There is no `private:`.** `class QueueReactive` opens `public:` at line 67
+  and never closes it, so `counts_`, `expo_`, `cur_q_`, `aes_` and `frozen_` are
+  all public despite the trailing-underscore naming that says otherwise.
+- **`bucket()`'s comment still describes the queue axis** (lines 264-270): "An
+  empty queue is its own bucket 0, because a queue nobody is in is a different
+  state from a queue with one lot in it." True, and it is `qbucket()` that
+  implements it now. `bucket()` is used only for the **order-count** axis since
+  the queue axis moved to linear AES units.
+- **The object is roughly 490 KB** — `counts_[2][5][48][8][4][kNumEv]` of
+  `uint64` plus `expo_[2][5][48][8][4]` of `double`. It is held by value in
+  `apps/stats`, which is fine, but it will not fit on a stack and must not be
+  copied casually.
+
+**Severity:** Minor (all three)
+
+**Why it matters:** None is a defect. The missing `private:` is the one that
+matters for the next edit, because the class's invariant — that `freeze()` runs
+exactly once, before any intensity is accumulated — is enforced only by
+`frozen_`, and anything can now write it.
+
+**Fix Recommendation:** Add `private:` before `qbucket`'s helpers and the data
+members; expose `aes()` and the CSV writer, which is all any caller needs.
+Retitle `bucket()`'s comment to say "order count".
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** `tests/test_queue_reactive.py` checks the exposure identity.
+Nothing tests `freeze()`'s fallback paths — a level with fewer than
+`kMinForOwn` events falling back to the pooled mean, and a warmup that saw
+nothing at all falling back to a scale of 1.
+
+**Performance Notes:** `on_state` is called per event and does one array index
+into a six-dimensional array; the indices are computed from small integers, so
+it is arithmetic rather than search. The array is sparse in practice — most of
+the 48 x 8 x 4 cells never fill — which is the cost of a dense layout and is the
+right trade at this size.
+
+**Security Notes:** None; it consumes `BookEvent`, not bytes.
+
+**Market-Logic Notes:** The header is the clearest statement in the repository of
+why a measurement class must not fit anything, and three of its decisions were
+forced by measurement.
+- **The queue axis is the paper's, `ceil(volume / AES)` in linear steps** (lines
+  23-34). The previous log2 grid "cannot be wrong about a scale and cannot see
+  the answer either": every shape Huang, Lehalle and Rosenbaum report lives
+  between 0 and 40 AES units, and a log2 grid puts that whole range into six
+  buckets, "so the thing being measured is gone before anything can be fitted to
+  it."
+- **The order count is a separate axis** (lines 41-53), because the mechanism
+  being tested is independent per-order cancellation: "a queue of six million
+  shares may be three large orders or three hundred small ones, and keyed on
+  quantity alone the two are the same bucket." Measured on quantity alone,
+  ethusd returned a cancel slope of −0.03 ± 0.08 and "would have been reported
+  as 'real books do not cancel independently'."
+- **AES is pooled over sides** (lines 205-211) because the model already assumes
+  `lambda_i(n) = lambda_{-i}(n)`, and per side a sixty-second warmup put level
+  4's average event at 100,536 on the bid against 745,181 on the ask — "seven
+  times apart on a quantity that is the same by construction."
+- **`qbucket` is a ceiling, not a rounding** (lines 236-240): bucket 0 is an
+  empty queue and nothing else, "because the reference price moves off an empty
+  queue and not off a thin one."
+- **No fitting, no smoothing, no parametric form** (lines 16-21). This writes
+  counts and seconds; `tools/fit_queue_reactive.py` decides what `lambda(q)`
+  looks like, because "measurement and modelling in one file is how a modelling
+  assumption ends up looking like an observation."
+
+---
+
+### `include/lob/feed/bitstamp.hpp` and `src/bitstamp.cpp`
+
+**Status:** Checked — [x] Reviewed (273 + 409 lines, both read in full)
+
+**Issues Found:** One open defect, already tracked. No memory-safety or parsing
+defects; the parsing surface is `include/lob/feed/json.hpp`, audited separately
+and clean.
+
+- **ethusd's reconstructed book develops holes near the touch over multi-hour
+  captures.** Open, and described in `docs/KNOWN-ISSUES.md` 1. The cause is that
+  the book is built from the stream alone near the touch, so an order whose
+  `order_created` predates the capture can never be removed correctly, and over
+  hours the residue accumulates where it matters most. The remedy is periodic
+  re-snapshotting during recording; validating it needs a fresh eight-hour
+  capture, which is why it is still open.
+- **The seed guard is load-bearing and correct.** Only snapshot orders more than
+  `seed_guard` ticks from the touch seed the book; everything nearer is
+  reconstructed from the stream. `apps/replay` reports whether the price stayed
+  inside the guard over the session and prints `TOO NARROW` if it did not.
+
+**Severity:** Major (the book holes — it degrades every distribution measured
+near the touch on long ethusd captures)
+
+**Why it matters:** This decoder is the only thing standing between a public
+websocket and every number the project reports. The holes are a fidelity
+problem, not a safety one: they make near-touch depth and spread wrong on one
+instrument over long horizons, and `apps/replay`'s capture-quality section is
+built to surface exactly that.
+
+**Fix Recommendation:** Fire the recorder's existing session-snapshot machinery
+on a timer, write a `_meta` marker at the reseed point, and have the decoder
+reseed at the marker with the guard measured against the *current* touch rather
+than the opening one. Roughly 8 h including a validation capture.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** Covered well — `tests/test_bitstamp.cpp` is 585 lines of
+verbatim capture fixtures plus a real-data replay per sample pair, and
+`fuzz/fuzz_bitstamp.cpp` fuzzes the line decoder and `load_snapshot`. The two
+gaps are recorded there: `detect_decimals` and `snapshot_touch` are not fuzzed.
+
+**Performance Notes:** `decode_line` does one pass of `json::find` per field it
+needs, each of which scans the object's own keys without descending. At the
+2.9 MB capture sizes this project uses, `apps/replay` reports throughput in
+millions of lines per second.
+
+**Security Notes:** All parsing goes through `lob::json`, which is total,
+bounds-checked, allocation-free and fuzzed. The decoder itself performs the
+range checks the book then re-checks: prices outside the window are counted in
+`out_of_window` and their follow-ups suppressed, so an out-of-range price is
+never an out-of-range index. `size_violations` counts the one invariant that
+does hold — no more size may leave an order than it had.
+
+**Market-Logic Notes:** The header records a measurement that overturned the
+project's original design, and this is the best example of it in the repository.
+- **`amount_traded` is per event, not cumulative** (lines 16-24). It was read as
+  cumulative until a real capture disproved it: order 2046841350975488 took six
+  partial fills summing to exactly the 0.12077218 that left the book, and "under
+  a cumulative reading that order's final traded size is zero." Across the
+  capture the per-event sum matched the size consumed for 84.8% of completed
+  orders against 50.5% for the last value.
+- **The consequence is stated rather than papered over** (lines 26-29):
+  `amount + amount_traded == amount_at_create` holds only for an order with one
+  trading event and no amend, "It is not an invariant and is not checked as one."
+- **This replaced a planned join against the trade channel** (lines 36-40),
+  which "would also be WRONG: the two channels are not on the same clock. In one
+  capture the order channel ran ~570ms behind local time while the trade channel
+  ran ~90ms ahead of it. amount_traded needs no clock at all."
+- **The event chain makes a gap detectable rather than suspected** (lines
+  42-46), which is what lets Phase 1's acceptance criterion mean anything.
+- **Timestamp resolution is 1 ms "wearing a microsecond coat"** (lines 50-54),
+  so intra-millisecond order comes from the chain and never from the clock, and
+  any duration measured from these numbers "is quantised to 1ms and must be
+  reported that way."
+
+---
+
+### `src/mdp.cpp`
+
+**Status:** Checked — [x] Reviewed (371 lines, read in full)
+
+**Issues Found:** None outstanding. The one defect this file had was found by
+measurement and fixed during development.
+
+- **The move-fill branch used to charge the full move with certainty.** It is
+  now a two-outcome split:
+  ```cpp
+  if (hit) {
+    emit(pu * pa_adv,         s.inventory - 1, step_away(b0), kNoQuote, p.edge_ticks[0], p.move_ticks);
+    emit(pu * (1.0 - pa_adv), s.inventory - 1, step_away(b0), kNoQuote, p.edge_ticks[0], 0.0);
+  }
+  ```
+  The same probability mass, differing only in reward. `docs/KNOWN-ISSUES.md` 2
+  records the symptom (a touch quote priced as a guaranteed loser on real data)
+  and the measurement that settled it: P(the mid is still against the resting
+  side one second after a print) is 33% on the eight-hour ethusd capture
+  (n=5,032), not 100%.
+
+**Severity:** n/a (fixed)
+
+**Why it matters:** It is worth recording because of *how* it was caught. The
+symptom was a policy that refused to quote at the touch; the cause was one
+branch of the expansion, and the fix had to preserve probability mass or value
+iteration would stop being a contraction. `tests/test_policy.cpp:156-212` now
+asserts the split property rather than the numbers.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** None. `tests/test_policy.cpp` verifies that every admissible
+state-action's successors sum to one, that the move-fill branch is a split, that
+a malformed process is refused, and that the position limit is a constraint on
+the action rather than a clamp on the resulting inventory.
+
+**Performance Notes:** `expand()` appends into a caller-owned buffer so the
+solve allocates nothing in its inner loop. `solve()` is modified policy
+iteration counted in **backups** rather than outer iterations, which is what
+makes the sweep cap meaningful; reaching a 1e-9 residual at a 0.9995 discount
+takes about 35,000.
+
+**Security Notes:** None — offline, and `MdpParams::validate` rejects anything
+that is not a probability before any arithmetic runs.
+
+**Market-Logic Notes:** The reward structure is where the economics live and it
+is right: a fill caused by the mid moving through a quote is booked **before**
+the move is applied to the resulting inventory, so adverse selection emerges
+from the ordering rather than from a hand-set parameter. `admissible()` treats
+the position limit as a constraint on the action rather than a clamp on the
+outcome, which matters because clamping "lets a fill at the boundary collect its
+edge for free."
+
+---
+
+### `include/lob/sim/flow.hpp`
+
+**Status:** Checked — [x] Reviewed (1,497 lines, read in full)
+
+**Issues Found:** One unguarded cast that a degenerate rate could overflow. The
+substantive defects this file had were found by measurement and are fixed; they
+are recorded here because the fixes are load-bearing.
+
+- **`ts_ += static_cast<Nanos>(gap_s * 1e9) + 1;`** (line 1210). `gap_s` is
+  `-log(u) / total` with `u` floored at 1e-18, so `gap_s` is at most
+  `41.4 / total`. `total > 0` is guaranteed by the branch above, but not bounded
+  away from zero — a denormal total would produce a value beyond `INT64_MAX` and
+  the cast would be undefined. Not reachable at any fitted parameterisation.
+- **Fixed during development, and each fix matters more than the bug:**
+  - The book was **200x too thick and the clock 7,400x too fast**. `mean_gap_ns`
+    now makes the clock explicit rather than implicit in `ts_ += 1 + rng_() % 5000`.
+  - **Trade sizes were constant.** Replaced with an empirical 16-bin quantile
+    table, because a lognormal matched the middle and put p99 at 25 AES against
+    an observed 3.1.
+  - **Orders stranded outside the modelled window were never cancelled**, so the
+    book grew 101 → 408 over 2M events. Fixed with independent per-order
+    far-cancellation at `cancel_rate[K-1] / (1 + cancel_half[K-1])`. The same
+    leak had produced a non-monotone fill hazard that read like a model defect.
+  - **Levels were anchored to the moving touch**, so nothing ever arrived inside
+    the spread and the spread could only widen — median 4 ticks against ethusd's
+    1. Now anchored to the reference price.
+
+**Severity:** Minor (the cast); the rest are fixed
+
+**Why it matters:** This file is the process every policy is solved and
+evaluated against, so a defect here is not a bug in a component, it is a wrong
+answer everywhere at once. The four fixed items above are each of that kind.
+
+**Fix Recommendation:**
+```cpp
+const double gap_ns = gap_s * 1e9;
+ts_ += (gap_ns < 9e18 ? static_cast<Nanos>(gap_ns) : Nanos{9'000'000'000LL}) + 1;
+```
+
+**Refactor Suggestion:** `FlowConfig::Qr` holds 20-odd fitted constants as plain
+members with their values in comments. They are traceable to tables in
+`docs/06-queue-reactive-plan.md`, but nothing binds the two. Loading them from
+`policy/queue_reactive.json` — which `tools/fit_queue_reactive.py` already
+writes — would remove the copy.
+
+**Tests Missing:** `tests/test_calibration.cpp` covers the calibrated process
+per event, per second and by count, and pins the message budget as a time
+invariant to the clock. What is untested is the far-cancellation balance: that
+the count of orders outside the modelled window is stationary over a long run,
+which is the property whose absence caused the 101 → 408 leak.
+
+**Performance Notes:** `next_queue_reactive` rebuilds the full rate array
+`[2][5][3]` plus two far rates on every event, then does a linear search through
+it to select. That is 32 multiplies and a 32-step scan per event — fine for a
+simulator, and the alternative (an incrementally maintained total) would be a
+correctness risk for no useful gain. `live_` is a `std::unordered_map`, so the
+generator allocates; again, simulator, not hot path.
+
+**Security Notes:** None; no external input.
+
+**Market-Logic Notes:** This is where the project's microstructure lives, and
+the reasoning behind each piece is recorded in place.
+- **The header is honest about what the file is for** (lines 1-17): drive the
+  book hard enough to prove it correct, and later become the simulator. "It does
+  NOT reproduce the stylized facts in docs/03 §11, and nothing calibrated should
+  be fitted to it."
+- **The add-placement profile was measured, not assumed** (lines 36-56): ethusd
+  puts 47.8% of adds at the best queue against the generator's 32.6%, and the
+  generator put *more* one tick behind the touch than at it. The comment then
+  refuses the obvious inference: dividing the two profiles gives a relative
+  lifetime of 1.46 at the touch against 0.45–0.71 behind it, so "an order at the
+  touch lives LONGER than one behind it, which is the opposite of what was
+  assumed before it was measured."
+- **Model II-b applies at the touch only** (lines 1174-1176), "which is where
+  the paper applies it: the intensities at Q_1 depend on the opposite queue,
+  those behind it do not."
+- **Excitation decays on elapsed time, not event count** (lines 1154-1160),
+  because "this process's clock is exponential and an event count would make the
+  kernel mean something different at every rate." `excite_compensation()`
+  renormalises so adding self-excitation does not change the mean cancel rate.
+- **Far cancellation is proportional to the order count** (lines 1192-1195):
+  "Proportional to the count, which is what bounds the pile: a fixed rate would
+  not."
+- **No crossing guard, deliberately** (lines 1236-1241): bid levels sit at
+  `mid_` and below, ask levels at `mid_ + 1` and above, so the two sides cannot
+  meet by construction, and "a guard here would silently relocate orders the
+  model placed deliberately, which is how the level distribution stopped being
+  the one that was fitted last time."
+
+---
+
+### `tests/test_calibration.cpp`
+
+**Status:** Checked — [x] Reviewed (324 lines, read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a
+
+**Why it matters:** This file exists because of `docs/KNOWN-ISSUES.md` 4 and 5:
+a rate measured per event and a rate measured per second are different
+statements, and the project once had every downstream time constant fitted to
+the wrong one. These assertions are what stop that recurring.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** The far-cancellation stationarity property noted under
+`include/lob/sim/flow.hpp`.
+
+**Performance Notes:** Runs the calibrated and stress processes over long spans;
+one of the slower suites and necessarily so.
+
+**Security Notes:** None.
+
+**Market-Logic Notes:** Four properties, each chosen so that a regression is
+visible rather than plausible.
+- **The calibrated process is asserted per event AND per second AND by count.**
+  Any one of the three alone can be satisfied by a process that is wrong on the
+  other two, which is exactly how the original defect survived.
+- **The stress process stays dense and fast**, so the coverage-driving
+  configuration is not silently slowed by a change aimed at realism.
+- **Model I's invariant distribution matches theory to a total-variation
+  distance under 0.10 with the reference price pinned.** That is the closed-form
+  check the queue-reactive model admits, and pinning `p_ref` is what makes it
+  testable at all.
+- **The message budget is a time invariant to the clock** — the assertion that
+  encodes the fix in `include/lob/strat/driver.hpp`.
+
+---
+
+### `tests/test_queue_reactive.py`
+
+**Status:** Checked — [x] Reviewed (89 lines, read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a
+
+**Why it matters:** Both properties it checks are invisible in the output they
+guard, which is the docstring's own argument for asserting them.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** Nothing at this level.
+
+**Performance Notes:** Runs `stats` once per sample capture. Registered in
+`CMakeLists.txt:135` as `queue_reactive_exposure`.
+
+**Security Notes:** `subprocess.run` with a list argument and no `shell=True`;
+every path comes from `sys.argv` or `tempfile`.
+
+**Market-Logic Notes:** The two properties are exactly right.
+- **Exposure must account for all of the capture's time.** "An intensity is
+  events over exposure. If a queue's exposure does not add up to the capture's
+  duration, some of the time it spent at some size went unrecorded — and the
+  rates for those sizes come out too high, by exactly the fraction lost." That
+  is a conservation check, and it is the only kind that catches a silent
+  under-count.
+- **The queue axis must resolve a shape.** The axis used to be log2 of raw
+  quantity, which put the whole range Huang et al. measure into six buckets:
+  "The table still had plausible numbers in it; there was simply no curve left
+  to fit."
+
+---
+
+### `tools/fit_queue_reactive.py`
+
+**Status:** Checked — [x] Reviewed (172 lines, read in full)
+
+**Issues Found:** None.
+
+**Severity:** n/a
+
+**Why it matters:** This is the file that decides what `lambda(q)` looks like,
+kept deliberately separate from the C++ that measures it, so that "a modelling
+assumption ends up looking like an observation" cannot happen.
+
+**Fix Recommendation:** None.
+
+**Refactor Suggestion:** It writes `policy/queue_reactive.json`, and
+`FlowConfig::Qr` carries the same constants hand-transcribed. Having the
+generator read the JSON would close that loop; see the refactor note under
+`include/lob/sim/flow.hpp`.
+
+**Tests Missing:** Nothing regenerates the fit and compares it against the
+constants in `flow.hpp`, so a re-fit that changed a number would not fail
+anything until someone noticed.
+
+**Performance Notes:** numpy and pandas over a CSV; not a bottleneck.
+
+**Security Notes:** No network, no credentials, no `eval`.
+
+**Market-Logic Notes:** The estimator is a log-log slope with a stated null, and
+the docstring says what each value would mean: `beta ~ 1` is proportional, so
+"every resting order behaves independently and a queue with twice as many ORDERS
+produces twice the events — this is what cancels should look like"; `beta ~ 0`
+is flat, "which is what a Poisson generator with fixed rates produces, at every
+size, by construction." Fitting against **two** axes is the substance: keyed on
+quantity alone, ethusd returned a cancel slope of −0.03 ± 0.08, rejecting
+proportionality at twelve standard errors, "which would have been reported as
+'real books do not cancel independently' when the measurement was simply keyed
+on the wrong variable." Running it on the real book and on the simulator and
+putting the two side by side is what makes it a fidelity test rather than a
+description.
+
+---
+
+### `tools/mdp_params.py`
+
+**Status:** Checked — [x] Reviewed (405 lines, read in full)
+
+**Issues Found:** One coupling to a C++ header that nothing enforces.
+
+- **The imbalance bucket edges are written here and in
+  `include/lob/policy/state.hpp:65`**, and that header says outright: "If these
+  two ever disagree the policy is solved against one book and applied to
+  another." Neither file reads the other, and the table header's discretisation
+  check would not catch a drift because the bucket *count* would be unchanged.
+  The same applies to the queue-bucket edges.
+
+**Severity:** Major
+
+**Why it matters:** This is the failure that produces no error and no crash: the
+solver would compute a correct policy over one bucketing and the executor would
+index it with another, so every lookup returns a real action for a different
+state. It is the exact failure `PolicyTable`'s header check exists to prevent,
+arriving through the one door that check does not cover.
+
+**Fix Recommendation:** Fold the edges into `MdpParams::hash()` so a mismatch
+changes the hash and `apps/solve` refuses to ship, or emit them from the C++
+side into the params JSON and have this file read them rather than declare them:
+```python
+edges = params["imb_edges"]          # written by apps/solve from state.hpp
+```
+
+**Refactor Suggestion:** None.
+
+**Tests Missing:** A test asserting the edges in `state.hpp` equal the edges in
+`policy/mdp.json`. `tests/test_policy.cpp` checks `imb_bucket` against the
+header's own constants, so a drift between the two files passes silently.
+
+**Performance Notes:** numpy and pandas over the CSVs `apps/stats` writes; runs
+in seconds.
+
+**Security Notes:** No network, no credentials, no `eval`.
+
+**Market-Logic Notes:** The docstring states the modelling decisions and the
+measurements behind them.
+- **Distance from the mid is deliberately not in the state** (lines 20-24):
+  these books sit at a one-tick spread 70–99% of the time, "so there is nowhere
+  to put a quote except the touch or a tick or two behind it, and
+  tools/calibrate.py could not identify an Avellaneda-Stoikov k on two of the
+  three instruments for exactly that reason."
+- **Queue position is bucketed by absolute volume ahead** (lines 26-34), with
+  the measured consequence of getting it wrong: against a touch-joining
+  strategy's real placements the hazard at the front ran 1,019/s while the
+  quartile-calibrated model said 52/s, "and the policy duly concluded that
+  quoting behind the touch was the better idea."
+- **Where a quantity is not measurable from ten minutes of data, it says so in
+  the output rather than quietly using a default** (lines 9-11). That is the
+  property that makes `apps/solve`'s refusal to run on an unidentified process
+  possible.
+- One defect fixed during development is worth recording: the **level ratio was
+  measured from placement rather than from prints**, and was wrong by 200x.
+
+---
+
+### `tools/record_bitstamp.py`
+
+**Status:** Checked — [x] Reviewed (343 lines, read in full)
+
+**Issues Found:** An unvalidated REST response. A docstring superseded by a
+later finding in the decoder it feeds.
+
+- **Line 207: `snap = requests.get(REST_BOOK.format(pair=self.pair), timeout=30).json()`**
+  — no `raise_for_status()`, no shape check. A non-JSON error page raises inside
+  the recording loop. There is a timeout and no `verify=False`, so TLS is
+  intact; the response is simply trusted.
+- **The docstring's rationale for capturing both channels is stale** (lines
+  21-30): "order_deleted does not say WHY the order left... The only way to tell
+  them apart is to join against live_trades on the order id."
+  `include/lob/feed/bitstamp.hpp:16-40` records that this is no longer true and
+  that the join would in fact be **wrong**, because the two channels are not on
+  the same clock — in one capture the order channel ran ~570 ms behind local
+  time while the trade channel ran ~90 ms ahead. `amount_traded` is per event
+  and needs no clock. Both channels are still worth recording, but for a
+  different reason than the one stated here.
+- **`websockets.connect(..., max_size=None)`** removes the default 1 MiB frame
+  limit. Necessary for full-book frames; the consequence is that a
+  malfunctioning endpoint can drive unbounded buffering.
+
+**Severity:** Major (the unvalidated response, because it aborts a capture that
+cannot be re-run), Minor (the stale docstring)
+
+**Why it matters:** A capture is hours of wall time against a market that will
+not repeat. An exception thrown from an unchecked `.json()` during a scheduled
+reconnect ends it.
+
+**Fix Recommendation:**
+```python
+r = requests.get(REST_BOOK.format(pair=self.pair), timeout=30)
+r.raise_for_status()
+snap = r.json()
+if not isinstance(snap.get("bids"), list) or not snap.get("asks"):
+    raise RuntimeError(f"unexpected snapshot shape: {sorted(snap)[:6]}")
+```
+and update lines 21-36 to point at the decoder's finding.
+
+**Refactor Suggestion:** The reconnect loop here is the one the other two
+recorders lack. Lifting it into a shared base class is the fix recorded under
+`tools/record_bitfinex.py`.
+
+**Tests Missing:** None practical — this needs a live endpoint.
+
+**Performance Notes:** Rotates output hourly and writes through `gzip.open`,
+which is buffered; a trapped `SIGINT` flushes, a `SIGKILL` truncates, and the
+reader handles a truncated final line.
+
+**Security Notes:** **Clean.** `wss://` and `https://` with default certificate
+verification, no `verify=False`, no API key, no token, no signing, no account.
+The header's first line states it: "the full book, order by order, no account."
+
+**Market-Logic Notes:** Two things here are right and were not obvious.
+- **Reconnect handling exists and costs a fresh REST snapshot each time** (lines
+  91-149): "Bitstamp asks clients to reconnect periodically
+  (bts:request_reconnect), and any reconnect means messages were missed." The
+  backoff exists because the snapshot endpoint is rate-limited.
+- **The known caveat is disclosed with a citation** (lines 32-36): an
+  `order_changed` with an unchanged amount can be reported where no trade
+  occurred, so "treat the cancel/fill split as high quality but not exact, and
+  say so in any result that depends on it."
+
+---
+
 ## 3. Consolidated summary
 
 **Scope:** all 116 tracked files, 22,088 lines, every one read in full. Binary
@@ -4438,7 +5321,7 @@ and are unaffected. `apps/evaluate`'s `base_params()` sets only `size` and
 ### High
 | # | Item | File | Owner |
 |---|---|---|---|
-| H1 | `Attribution::total` omits `inventory_mtm`, so the backtest's headline P&L ignores the closing position. `docs/03-metrics-and-estimators.md` §10 — which this file's header cites by name — lists inventory mark-to-market as one of the five lines. `apps/sim_demo` and `RunResult::pnl()` both compute it correctly; the attribution path lost it. Every `attribute` call in `tests/test_pnl.cpp` passes `final_inventory = 0`. | `include/lob/strat/pnl.hpp`, `apps/backtest/main.cpp` | research |
+| H1 | `apps/backtest` prints `Attribution::total` as its `net` column and never prints `RunResult::pnl()`. Excluding the closing position from the decomposition is deliberate and `include/lob/strat/driver.hpp:106-115` says so — and says `pnl()` "is the number the comparison is settled on". `apps/evaluate` follows that; `apps/backtest` does not, so the Phase 4 table ranks strategies on a diagnostic that credits nothing to one that made its money by holding. `inventory_mtm` is computed and read by nothing. | `apps/backtest/main.cpp`, `include/lob/strat/pnl.hpp` | research |
 | H2 | The simulator never publishes fills caused by the agent's own orders unless a market `Aggress` event happens to follow, and then stamps them with that event's timestamp. Until then `view_book_` still shows resting orders the agent's own order consumed. The two-book design exists to make the view *lag*; this makes it *wrong*. | `include/lob/sim/simulator.hpp` | simulator |
 | H3 | `JournalWriter` discards every `fwrite` and `fclose` return value, in the one class whose stated contract is byte-for-byte reproducibility. `written()` has never returned anything but zero. `batch_records = 0` is a heap buffer overflow on the first `append`. | `include/lob/measure/journal.hpp` | measure |
 | H4 | `MatchingEngine::fills_` grows without bound for the life of a run. `fuzz/fuzz_matching.cpp` calls `clear_fills()` every 32 ops to work around it. | `include/lob/sim/matching.hpp` | simulator |
@@ -4501,11 +5384,12 @@ are for a person who knows this codebase.
   the solved policy is constant, or the lookup is not differentiating states.
   Until this is answered the Phase 5 criterion has no signal. Closes the rest
   of **C1**.
-- **PR: "Total P&L includes the closing position"** — 1 h. Split
-  `Attribution::total` into `realised` and `total`, print both in
-  `apps/backtest`, and change one case in `tests/test_pnl.cpp` to pass a
-  non-zero `final_inventory`. `RunResult::pnl()` already does it correctly;
-  this makes the two agree. Closes **H1**.
+- **PR: "Backtest reports session P&L, not the decomposition"** — 1 h. Add a
+  `pnl` column to `apps/backtest`'s table from `RunResult::pnl()` and keep
+  `attr.total` beside it labelled as trading edge, matching what `apps/evaluate`
+  already does and what `include/lob/strat/driver.hpp:106-115` says the
+  comparison must use. Delete the unread `Attribution::inventory_mtm` or start
+  using it. Closes **H1**.
 
 ### This week
 - **PR: "Publish agent fills to the view book"** — 4 h. One
