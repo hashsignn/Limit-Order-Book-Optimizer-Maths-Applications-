@@ -49,14 +49,28 @@ of the snapshot touch, so that band starts empty and must fill from the stream.
 Neither is measured. Do not repeat the mistake above and act on this before
 testing it.
 
-**What it costs.** One measurement, and only one: `level_ratio` in
-`tools/mdp_params.py`, the share of traded volume that reaches one tick past the
-touch. Nothing else reads `trades.dist_ticks`. The fill hazard by queue
-position, mid dynamics, queue depth, imbalance and markouts all come from other
-columns and are unaffected — ethusd's 1.62 M orders are usable.
+**What it costs.** More than the one measurement first claimed here. That
+claim was made by reading which column `trades.dist_ticks` feeds, and it missed
+that a book with holes reports a wider spread than the market has:
 
-**Workaround in force.** Take the level ratio from btcusd, which reports 4.2%
-and carries 11,993 trades to ethusd's 5,032.
+| | clean 10-min capture | 8-hour capture |
+|---|---|---|
+| spread at one tick | 92% | **60%** |
+| mid steps kept by the `max_spread` filter | 85% | **61%** |
+
+So the spread distribution is degraded and 39% of mid steps are discarded. What
+survives is sound — the median mid move is 1 tick, P(up) 1.6%, and the imbalance
+signal is the best measured on any instrument, running 0.7% to 2.7% monotonically
+across the five buckets. ethusd still passes both usability checks. But it is
+not true that only `level_ratio` was affected.
+
+**No workaround for the level ratio.** Taking it from btcusd was the first plan
+and it does not work: btcusd's own touch teleports, so its levels are just as
+unreliable, and it reports 30.8% / 29.2% / 29.1% across three levels — flat,
+when penetration must fall with depth. ethusd reports 62.1% / 61.4% / 61.0%.
+`tools/mdp_params.py` now rejects a ratio that is flat across levels or above
+0.5 for exactly this reason. Neither eight-hour capture measures it; it must be
+given to `solve` explicitly with `--level-ratio` and defended.
 
 **How to check a fix.** `stats --capture-dir <dir>` prints the share and the
 histogram. A fix moves the 5–16 and 17+ rows toward zero; the 1-tick row should
