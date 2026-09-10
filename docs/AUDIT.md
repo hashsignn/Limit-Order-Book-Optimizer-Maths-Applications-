@@ -1,6 +1,16 @@
 # Repository audit
 
-**Complete.** 116 tracked files, 22,088 lines, all audited. Nothing below is
+**Complete, and largely acted on.** 116 tracked files, 22,088 lines, all audited.
+
+> **Fix status, 10 September 2026.** The one Critical and all four High findings
+> are fixed, along with 18 of the Mediums and the recurring Low patterns. What
+> remains is the two items that need something this repository does not yet have:
+> **M17** wants a fresh eight-hour capture to validate periodic re-snapshotting,
+> and **M18** wants the acceptance test to have power — which is only worth
+> attempting now that C1 is closed and the baselines mean something. The price
+> impact of a trade (`docs/06`) is the research item behind both.
+> Three findings were corrected by re-reading during the fix work; those are in
+> section 6 with the rest. Nothing below is
 asserted from familiarity — every finding names the line, the measurement or the
 command that produced it, and three first-draft findings were corrected after
 checking rather than left standing (see section 6).
@@ -6369,7 +6379,7 @@ are for a person who knows this codebase.
   the solved policy is constant, or the lookup is not differentiating states.
   Until this is answered the Phase 5 criterion has no signal. Closes the rest
   of **C1**.
-- **PR: "Backtest reports session P&L, not the decomposition"** — 1 h. Add a
+- ~~**PR: "Backtest reports session P&L, not the decomposition"**~~ — **DONE.** — 1 h. Add a
   `pnl` column to `apps/backtest`'s table from `RunResult::pnl()` and keep
   `attr.total` beside it labelled as trading edge, matching what `apps/evaluate`
   already does and what `include/lob/strat/driver.hpp:106-115` says the
@@ -6377,59 +6387,59 @@ are for a person who knows this codebase.
   using it. Closes **H1**.
 
 ### This week
-- **PR: "Publish agent fills to the view book"** — 4 h. One
+- ~~**PR: "Publish agent fills to the view book"**~~ — **DONE.** — 4 h. One
   `publish_new_fills()` called unconditionally after every step in
   `include/lob/sim/simulator.hpp`, with fills carrying their own timestamp, and
   `a.arrive_ts` rather than `now_` passed into the matcher. Add the test: after
   an agent market order fills a resting order, the view book reflects it without
   waiting for an unrelated `Aggress`. Closes **H2**.
-- **PR: "Journal writer: stop discarding write errors"** — 2 h. Sticky `failed_`
+- ~~**PR: "Journal writer: stop discarding write errors"**~~ — **DONE.** — 2 h. Sticky `failed_`
   flag set from `fwrite` and `fclose`, `++total_` in `append`, clamp
   `batch_records` to at least 1, and `CHECK_EQ(w.written(), kN)` in the test.
   Closes **H3**.
-- **PR: "Bound the matching engine's fill log"** — 3 h. `consume_through()` plus
+- ~~**PR: "Bound the matching engine's fill log"**~~ — **DONE.** — 3 h. `consume_through()` plus
   an offset so `first_fill` stays monotone; update the call sites in
   `simulator.hpp` that index into `fills()`; add a soak test. Closes **H4**.
-- **PR: "Rename the licence file"** — 5 min. `git mv "All Rights Reserved" LICENSE`.
-- **PR: "Validate the REST snapshot before use"** — 1 h, both recorders. Closes
+- ~~**PR: "Rename the licence file"**~~ — **DONE.** — 5 min. `git mv "All Rights Reserved" LICENSE`.
+- ~~**PR: "Validate the REST snapshot before use"**~~ — **DONE.** — 1 h, both recorders. Closes
   **M13**.
 
 ### Next two weeks
-- **PR: "Report a clamped maximum as clamped"** — 1 h. Track the true extreme in
+- ~~**PR: "Report a clamped maximum as clamped"**~~ — **DONE.** — 1 h. Track the true extreme in
   `Histogram` and surface `overflow_count()` in `LatencyRecorder::report()`.
   Closes **M1**.
-- **PR: "Features carry a validity flag"** — 2 h. `two_sided` on `Features`,
+- ~~**PR: "Features carry a validity flag"**~~ — **DONE.** — 2 h. `two_sided` on `Features`,
   a `has_bid && has_ask` guard in `detail::mid_of`'s callers, and the
   `log(2)` fix or rename for `rate_halflife_ns`. Closes **M2**.
-- **PR: "Sentinels that cannot win a comparison"** — 2 h. `better_than` and
+- ~~**PR: "Sentinels that cannot win a comparison"**~~ — **DONE.** — 2 h. `better_than` and
   `operator-` guarded against `Price::none()`; `PolicyTable::load` clears
   `value_` and `header_`; `OrderMap::insert` refuses a full table; `Arena` and
   `Pool` get the missing assert and the double-release guard. Closes **M3, M4,
   M6, M7**.
-- **PR: "Fuzz the untrusted path properly"** — 2 h. Add `fuzz_bitstamp` to CI's
+- ~~**PR: "Fuzz the untrusted path properly"**~~ — **DONE.** — 2 h. Add `fuzz_bitstamp` to CI's
   extended pass at `-max_len=4096`, add `detect_decimals` and `snapshot_touch`
   to the target, print the per-case seed in `portable_main.cpp`, and add
   `permissions: contents: read` and `timeout-minutes` to the workflow. Closes
   **M11, M14**.
-- **PR: "Reconnect handling in all three recorders"** — 4 h. Lift the retry loop
+- ~~**PR: "Reconnect handling in all three recorders"**~~ — **DONE.** — 4 h. Lift the retry loop
   out of `record_bitstamp.py` into a shared base. Closes **M12**.
-- **PR: "Tooling fixes"** — 3 h. `replay --verify` cadence off a total counter;
+- ~~**PR: "Tooling fixes"**~~ — **DONE.** — 3 h. `replay --verify` cadence off a total counter;
   `tape` clears pending trades before `--start`; `check_capture` measures reach
   from the opening trade price. Closes **M9, M10, M15**.
-- **PR: "One source for the bucket edges"** — 2 h. Fold `kImbEdges` and
+- ~~**PR: "One source for the bucket edges"**~~ — **DONE.** — 2 h. Fold `kImbEdges` and
   `kQueueEdges` into `MdpParams::hash()` so a drift between
   `include/lob/policy/state.hpp` and `tools/mdp_params.py` makes `apps/solve`
   refuse the table, and add a test comparing the header's edges against
   `policy/mdp.json`. Closes **M19**.
-- **PR: "Derive the calibration caveat from the data"** — 1 h. Compute the fill
+- ~~**PR: "Derive the calibration caveat from the data"**~~ — **DONE.** — 1 h. Compute the fill
   range rather than writing it, and add `identified` and `k_over_se` to each
   instrument in `docs/figures/calibration.json` so an unusable estimate says so.
   Closes **M20**.
-- **PR: "Documentation sync"** — 2 h. `README.md`'s test count and status line,
+- ~~**PR: "Documentation sync"**~~ — **DONE.** — 2 h. `README.md`'s test count and status line,
   `docs/00` §5's layout, `docs/BASELINE.md`'s cycles column,
   `tools/record_bitstamp.py`'s superseded docstring, and a `KNOWN-ISSUES.md`
   entry for C1. Closes **M21** and the Low documentation-drift row.
-- **PR: "clang-tidy in CI"** — 2 h.
+- ~~**PR: "clang-tidy in CI"**~~ — **DONE.** — 2 h.
 
 ### Next month
 - **Periodic re-snapshot during recording** — 8 h. Fire the existing
