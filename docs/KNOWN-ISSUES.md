@@ -542,3 +542,79 @@ rather than price — or an artefact of a state space too coarse to express
 anything else. The 2.2% of states that do differ are the place to look.
 
 ---
+
+## 7. Trade sizes were capped at one resting order, and eta was never comparable
+
+Two findings from building a scorecard for trade price impact
+(`tools/impact.py`), one a real defect and one a correction to this project's
+own reading of its numbers.
+
+### The trade-size tail was drawn and discarded
+
+`qr_add` gave every resting order exactly `aes` lots -- the queue-reactive
+paper's constant-size assumption, and the reason its queue axis is in average
+event sizes at all. A trade can consume at most one resting order per execution,
+so with every order identical **no trade could ever exceed 1.0 AES**.
+
+Measured over 6,708 simulated trades:
+
+```
+fraction at exactly one full order (240 lots): 12.4%
+fraction above one full order:                  0.0%
+```
+
+`trade_size_aes` fits a tail out to 5.23 AES from the capture, `qr_trade` draws
+from it faithfully, and the book then chopped every draw into 240-lot pieces.
+The fitted tail never reached the output.
+
+**Fix.** Resting order sizes are drawn from a distribution measured over 13,458
+orders in the ethusd capture, at sixteenth quantiles, normalised so the mean
+draw is exactly 1.0 AES. The normalisation is the load-bearing part: the raw
+distribution has a mean of 2.86 AES, and using it directly would have tripled
+every queue's volume and broken the depth calibration Model I's rates were
+fitted against. The shape is measured; the scale is the one already in the
+model. `reinitialise()` draws too, or a redraw would reset the book to constant
+sizes.
+
+Measured effect, 300,000 events against the ethusd capture:
+
+| statistic | before | after | ethusd |
+|---|---|---|---|
+| P(mid moves within 1 s of a print) | 10.6% | 13.8% | 55.6% |
+| of those moves, went WITH the trade | 74.9% | 80.9% | 86.7% |
+| mean signed impact, bp | 0.055 | 0.084 | 0.676 |
+| trade sizes above one order | 0.0% | present | present |
+
+### eta was comparing two different statistics
+
+`docs/06` records the simulator's Robert-Rosenbaum ratio at 0.49 against
+ethusd's 0.84 and reads it as "the simulator's price is a random walk where the
+market's trends". That reading does not survive measuring the tick grid:
+
+| | mid level | one tick | ticks/s traversed | bp/s |
+|---|---|---|---|---|
+| ethusd | 245,340 | 0.041 bp | 2.41 | 0.098 |
+| simulator | 10,048 | 0.995 bp | 0.06 | 0.059 |
+
+eta is the sign of consecutive grid changes, so what it measures depends on how
+many ticks the price crosses between samples. ethusd crosses 2.41 a second on a
+tick worth 0.04 bp, and the sign tracks drift. The simulator crosses 0.06 a
+second on a tick worth 1 bp, so it usually does not move at all and the sign
+tracks the touch flickering by half a tick. **In basis points per second the two
+volatilities are 0.098 and 0.059 -- within a factor of 1.7.**
+
+So the gap eta reports is tick resolution, not a missing mechanism. I swept
+`--reinit`, `--excite` and their combinations and eta never crossed 0.5 under
+any of them, while `adv|mv` moved from 65.4% to 91.2% -- the excitation is
+creating directional impact, and eta simply cannot see it at this tick size.
+
+`tools/impact.py` now prints `tick_bp`, `ticks/s` and `bp/s` beside eta so the
+comparison cannot be read the old way again.
+
+**Still open.** Mean signed impact is 0.084 bp against 0.676, a factor of 8. That
+is a volatility-scale question -- how far the reference price should walk per
+unit of signed flow -- and not the "trades carry no information" question it was
+being read as: conditional on the mid moving at all, 80.9% of moves already go
+with the trade, against 86.7% on the capture.
+
+---

@@ -460,6 +460,37 @@ struct FlowConfig {
         0.0000, 0.0005, 0.0011, 0.0045, 0.0091, 0.0129, 0.0217, 0.0293, 0.0672,
         0.0916, 0.0916, 0.1006, 0.1960, 0.4506, 0.6253, 1.0825, 5.2305};
 
+    // ---- resting order size --------------------------------------------
+    //
+    // A DISTRIBUTION, not a constant, and the whole trade tail depends on it.
+    //
+    // qr_add used to give every resting order exactly `aes` lots -- the paper's
+    // assumption, and the reason its queue axis is in average event sizes at
+    // all. The consequence was invisible until the trade sizes were measured:
+    // a trade can consume at most ONE resting order per execution, so with
+    // every order the same size no trade could ever exceed 1.0 AES. Measured
+    // over 6,708 simulated trades, 12.4% were exactly 240 lots -- one full
+    // order -- and 0.0% were larger. The trade_size_aes table above fits a tail
+    // out to 5.23 AES, qr_trade draws from it faithfully, and the book then
+    // chopped every draw into 240-lot pieces. The fitted tail was drawn and
+    // discarded on every trade.
+    //
+    // That is what left the reference price a pure random walk: p_ref moves
+    // when a best queue empties, no single trade could empty one, so the only
+    // thing moving the price was symmetric cancellation. Robert-Rosenbaum eta
+    // came out at 0.50 against 0.84 on the ethusd capture -- not near a random
+    // walk, exactly one.
+    //
+    // Measured from 13,458 resting orders in the ethusd capture, at sixteenth
+    // quantiles, then NORMALISED so the mean draw is exactly 1.0 AES. The
+    // normalisation matters: the raw distribution has a mean of 2.86 AES, and
+    // using it directly would have tripled every queue's volume and broken the
+    // depth calibration that Model I's rates were fitted against. The shape is
+    // measured; the scale is the one already in the model.
+    double order_size_aes[kSizeBins + 1] = {
+        0.0015, 0.0157, 0.0167, 0.0250, 0.0303, 0.0418, 0.0736, 0.1488, 0.1627,
+        0.3652, 0.7226, 0.7445, 1.4602, 1.8260, 2.9771, 3.6521, 7.4742};
+
     // ---- Model II-b: the touch also watches the OPPOSITE queue -------------
     //
     // Huang et al. make the intensities at Q_1 functions of the target queue
@@ -1056,7 +1087,7 @@ class FlowGenerator {
           a.type = EventType::Add;
           a.side = (s == 0) ? Side::Bid : Side::Ask;
           a.price = queue_price(s, l);
-          a.qty = static_cast<Qty>(cfg_.qr.aes > 1.0 ? cfg_.qr.aes : 1.0);
+          a.qty = draw_size(cfg_.qr.order_size_aes, uniform());
           a.order_id = next_id_++;
           pending_.push_back(a);
         }
@@ -1226,12 +1257,16 @@ class FlowGenerator {
     return qr_add(e, Side::Bid, 0);   // unreachable barring a rounding edge
   }
 
-  // A constant order size at each limit, which is the paper's assumption and
-  // the reason its queue axis is in average event sizes at all.
+  // The size is DRAWN, with a mean of one average event size.
+  //
+  // The paper assumes a constant order size, which is what makes its queue axis
+  // meaningful in AES units. Keeping that literally here capped every trade at
+  // one order -- see order_size_aes for the measurement -- so the queue axis is
+  // preserved by fixing the MEAN at one AES rather than by fixing every draw.
   BookEvent qr_add(BookEvent e, Side side, int lvl) noexcept {
     e.type     = EventType::Add;
     e.side     = side;
-    e.qty      = static_cast<Qty>(cfg_.qr.aes > 1.0 ? cfg_.qr.aes : 1.0);
+    e.qty      = draw_size(cfg_.qr.order_size_aes, uniform());
     e.order_id = next_id_++;
     // No crossing guard is needed and none is wanted. Bid levels sit at mid_
     // and below, ask levels at mid_ + 1 and above, so the two sides cannot
@@ -1300,17 +1335,23 @@ class FlowGenerator {
   // A market order's size, in lots, from the measured distribution: pick a
   // sixteenth uniformly and interpolate inside it. At least one lot, because a
   // market order for nothing is not an event and the book would reject it.
-  [[nodiscard]] Qty size_at(double u01) const noexcept {
-    const FlowConfig::Qr& k = cfg_.qr;
+  // Inverse-CDF draw from a 16-bin quantile table, linearly interpolated.
+  // Shared by the trade-size and resting-order-size tables, which have the same
+  // shape and the same units.
+  [[nodiscard]] Qty draw_size(const double (&table)[FlowConfig::Qr::kSizeBins + 1],
+                              double u01) const noexcept {
     const double u = u01 * FlowConfig::Qr::kSizeBins;
     int i = static_cast<int>(u);
     double f = u - static_cast<double>(i);
     if (i >= FlowConfig::Qr::kSizeBins) { i = FlowConfig::Qr::kSizeBins - 1; f = 1.0; }
     if (i < 0) { i = 0; f = 0.0; }
-    const double aes_mult = k.trade_size_aes[i]
-                          + f * (k.trade_size_aes[i + 1] - k.trade_size_aes[i]);
-    const double lots = aes_mult * (k.aes > 0.0 ? k.aes : 1.0);
+    const double aes_mult = table[i] + f * (table[i + 1] - table[i]);
+    const double lots = aes_mult * (cfg_.qr.aes > 0.0 ? cfg_.qr.aes : 1.0);
     return lots < 1.0 ? Qty{1} : static_cast<Qty>(lots);
+  }
+
+  [[nodiscard]] Qty size_at(double u01) const noexcept {
+    return draw_size(cfg_.qr.trade_size_aes, u01);
   }
 
   // A market order into the named side's best queue. It goes through the
