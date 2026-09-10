@@ -618,3 +618,76 @@ being read as: conditional on the mid moving at all, 80.9% of moves already go
 with the trade, against 86.7% on the capture.
 
 ---
+
+## 8. The acceptance test was ranking on a coin flip — FIXED
+
+`docs/AUDIT.md` M18 recorded the Phase 5 acceptance test as noise-dominated:
+mean −1,136 with a 95% interval of [−3,872, +1,516], 6 of 16 seeds positive. The
+proposed remedy was to raise the seed count until the interval excluded zero.
+
+That remedy would not have worked, and the reason is worth recording.
+
+### What it looks like now
+
+With the baselines fixed (issue 6 above, which is what gave the test any power
+at all), 16 seeds at 120,000 events:
+
+```
+  TabulatedMDP minus ConstantSpread, paired by seed:
+    mean -3794.8   95% CI [-5224.5, -2391.2]   over 16 seeds, 2 of them positive
+    FAILS: significantly WORSE than the best baseline
+    per-seed sd 3043.8  =  trading edge sd 337.8  +  closing-mark sd 3003.3
+    to resolve an effect this size at 95%/80%: 6 seeds (have 16)
+    the closing position, not the trading, is what this interval is mostly measuring
+    on TRADING EDGE alone (inventory-neutral): mean +1753.3  95% CI [+1591.8, +1907.2]  (excludes zero, positive)
+```
+
+### The two things that says
+
+**The test is not underpowered.** Six seeds would resolve an effect of that size
+and it has sixteen. It resolves its number precisely. The number is the wrong
+one.
+
+**98.7% of the variance is the closing position.** Of a per-seed standard
+deviation of 3,043.8, the trading edge contributes 337.8 and the mark on the
+leftover position contributes 3,003.3. Session P&L is trading edge plus that
+mark, and the mark is a large zero-mean term: a strategy holding 59 shares at
+the end of a 2,200-second run is exposed to a price walk whose sign is a coin
+flip and whose scale dwarfs a run's worth of spread capture.
+
+So on the statistic being ranked, `TabulatedMDP` loses decisively. On trading
+edge, it beats `ConstantSpread` by +1,753 with an interval of [+1,592, +1,907]
+that excludes zero on the *positive* side. Both are true. The first is dominated
+by how much inventory a strategy happened to be carrying when the clock stopped;
+the second is what it did while trading.
+
+More seeds shrink the interval around a mean that is itself mostly the average
+of coin flips. They do not separate skill from position risk, because that is not
+a sampling problem.
+
+### What changed
+
+`apps/evaluate` now prints, under every paired comparison:
+
+- the per-seed standard deviation, **split** into its trading-edge and
+  closing-mark parts, so it is visible which one the interval is resolving;
+- the number of seeds needed to resolve the observed effect at 95%/80%, or a
+  note that the effect is indistinguishable from zero and more seeds will not
+  help;
+- a warning when the closing mark dominates;
+- the same paired comparison computed on **trading edge alone**.
+
+Session P&L stays the headline. It is the right number to report -- a position
+carried to the end is a real cost and `include/lob/strat/driver.hpp` is right
+that a decomposition credits nothing to a strategy that made its money by
+holding. It is the wrong number to *rank* on at this seed count, and the tool now
+says so rather than leaving a reader to conclude the policy is bad at trading.
+
+**Still open.** Ranking on trading edge alone would credit a strategy that
+accumulates inventory and never closes it. The honest fix is a comparison that
+charges the closing position at the price of flattening it rather than marking it
+at the mid -- that is a real cost with a much smaller variance than a coin flip
+on the mid. That needs the impact model in issue 7, which is why the two are the
+same piece of work.
+
+---

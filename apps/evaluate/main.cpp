@@ -22,10 +22,12 @@
 // baseline is measured pairwise per seed and the interval is taken over seeds.
 // That controls for the drift; a single run cannot.
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "lob/policy/state.hpp"
@@ -83,7 +85,9 @@ QuoteParams base_params() {
 
 struct Row {
   std::string         name;
-  std::vector<double> net;        // one per seed
+  std::vector<double> net;        // one per seed: session P&L
+  std::vector<double> edge;       // one per seed: trading edge, inventory-neutral
+  std::vector<double> mark;       // one per seed: the closing position's mark
   std::vector<double> spread;
   std::vector<double> adverse;
   std::vector<double> end_inv;
@@ -99,6 +103,11 @@ struct Row {
 
 void record(Row& r, const RunResult& x) {
   r.net.push_back(x.pnl());
+  // Session P&L is trading edge plus the closing position marked to market.
+  // Keeping the two apart is what lets the power report below say which of them
+  // the comparison is actually resolving.
+  r.edge.push_back(x.attr.total);
+  r.mark.push_back(x.pnl() - x.attr.total);
   r.spread.push_back(x.attr.spread_capture);
   r.adverse.push_back(x.attr.adverse_sel);
   r.end_inv.push_back(static_cast<double>(x.stats.inventory));
@@ -472,6 +481,66 @@ int main(int argc, char** argv) {
                 "  criterion is degenerate here; read the second comparison.\033[0m\n",
                 rows[best].requotes / seeds);
 
+  // Standard deviation of a paired series, and what it implies.
+  auto power_report = [](const std::vector<double>& d) {
+    const std::size_t n = d.size();
+    if (n < 2) return std::pair<double, double>{0.0, 0.0};
+    double m = 0.0; for (double v : d) m += v; m /= static_cast<double>(n);
+    double s = 0.0; for (double v : d) s += (v - m) * (v - m);
+    s = std::sqrt(s / static_cast<double>(n - 1));
+    return std::pair<double, double>{m, s};
+  };
+
+  auto paired_power = [&](const Row& challenger, const Row& against,
+                          const std::vector<double>& diff) {
+    const auto [m, sd] = power_report(diff);
+    if (sd <= 0.0) return;
+
+    // Where the variance lives. Session P&L is trading edge plus the closing
+    // mark, and the two are paired the same way, so their spreads are directly
+    // comparable.
+    std::vector<double> de, dm;
+    for (std::size_t i = 0; i < diff.size(); ++i) {
+      if (i < challenger.edge.size() && i < against.edge.size())
+        de.push_back(challenger.edge[i] - against.edge[i]);
+      if (i < challenger.mark.size() && i < against.mark.size())
+        dm.push_back(challenger.mark[i] - against.mark[i]);
+    }
+    const auto [me, sde] = power_report(de);
+    const auto [mm, sdm] = power_report(dm);
+
+    std::printf("    per-seed sd %.1f", sd);
+    if (sde > 0.0 || sdm > 0.0)
+      std::printf("  =  trading edge sd %.1f  +  closing-mark sd %.1f", sde, sdm);
+    std::printf("\n");
+
+    // Seeds needed to resolve the OBSERVED effect at 95% two-sided with 80%
+    // power: n = (1.96 + 0.84)^2 * (sd/effect)^2. If the effect is a hair from
+    // zero this number is enormous, and that is the answer -- more seeds will
+    // not help, because there is nothing there to find.
+    if (std::fabs(m) > 1e-9) {
+      const double need = 7.849 * (sd / m) * (sd / m);
+      if (need <= 100000.0)
+        std::printf("    to resolve an effect this size at 95%%/80%%: %.0f seeds"
+                    " (have %zu)\n", std::ceil(need), diff.size());
+      else
+        std::printf("    the effect is indistinguishable from zero at this sd;"
+                    " more seeds will not help\n");
+    }
+    if (sdm > sde * 1.5 && sde > 0.0)
+      std::printf("    \033[33mthe closing position, not the trading, is what this"
+                  " interval is mostly measuring\033[0m\n");
+    if (!de.empty()) {
+      const BootstrapCI ce = block_bootstrap(de, 1, 8000);
+      std::printf("    on TRADING EDGE alone (inventory-neutral): mean %+.1f"
+                  "  95%% CI [%+.1f, %+.1f]%s\n", ce.mean, ce.lo, ce.hi,
+                  ce.usable() && ce.excludes_zero()
+                      ? (ce.mean > 0.0 ? "  \033[32m(excludes zero, positive)\033[0m"
+                                       : "  \033[31m(excludes zero, negative)\033[0m")
+                      : "  (spans zero)");
+    }
+  };
+
   auto test = [&](const Row& challenger, const Row& against) {
     std::vector<double> diff;
     diff.reserve(challenger.net.size());
@@ -495,6 +564,15 @@ int main(int argc, char** argv) {
     } else {
       std::printf("    \033[33mNOT PROVEN: the interval spans zero\033[0m\n");
     }
+
+    // WHAT THE INTERVAL IS RESOLVING, AND HOW MANY SEEDS IT WOULD TAKE.
+    //
+    // "Not proven" is not a result, it is a request for more information, and
+    // the two things worth knowing are how much of the spread comes from the
+    // closing position rather than from trading, and how many seeds the
+    // observed effect would need. Reporting neither leaves the reader to guess
+    // whether to run more seeds or to change the measurement.
+    paired_power(challenger, against, diff);
     return ci;
   };
 
