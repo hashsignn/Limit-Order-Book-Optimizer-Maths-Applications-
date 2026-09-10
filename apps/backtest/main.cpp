@@ -53,18 +53,26 @@ Result run(Strat strat, int n, bool latency) {
 }
 
 void print_table(const std::vector<Result>& rs) {
-  std::printf("%-20s %7s %7s %7s %11s %11s %11s %9s\n",
-              "strategy", "fills", "pasv", "aggr", "spread-cap", "adv-select", "net", "inv");
-  std::printf("%s\n", std::string(96, '-').c_str());
+  std::printf("%-20s %7s %7s %7s %11s %11s %11s %11s %9s\n",
+              "strategy", "fills", "pasv", "aggr", "spread-cap", "adv-select",
+              "edge", "session P&L", "inv");
+  std::printf("%s\n", std::string(108, '-').c_str());
   for (const auto& r : rs) {
-    std::printf("%-20s %7zu %7zu %7zu %11.1f %11.1f %11.1f %9lld\n",
+    std::printf("%-20s %7zu %7zu %7zu %11.1f %11.1f %11.1f %11.1f %9lld\n",
                 r.name.c_str(), r.attr.n_fills, r.attr.n_passive, r.attr.n_aggressive,
-                r.attr.spread_capture, r.attr.adverse_sel, r.attr.total,
+                r.attr.spread_capture, r.attr.adverse_sel, r.attr.total, r.pnl(),
                 static_cast<long long>(r.stats.inventory));
   }
-  std::printf("\n  spread-cap  what we earned at the moment of each fill\n");
-  std::printf("  adv-select  what the price then did to us, over 100 ms (positive = it cost us)\n");
-  std::printf("  net         spread-cap - adv-select - fees, in ticks*shares\n");
+  std::printf("\n  spread-cap   what we earned at the moment of each fill\n");
+  std::printf("  adv-select   what the price then did to us, over 100 ms (positive = it cost us)\n");
+  std::printf("  edge         spread-cap - adv-select - fees. A decomposition of TRADING edge,\n");
+  std::printf("               which deliberately says nothing about a position still open at the\n");
+  std::printf("               end -- so it credits nothing to a strategy that made its money by\n");
+  std::printf("               holding. Read it as a diagnostic, not a result.\n");
+  std::printf("  session P&L  cash exchanged plus the closing position at the closing mid. This\n");
+  std::printf("               is the number the comparison is settled on, and it is what\n");
+  std::printf("               apps/evaluate has always used. Look at 'inv' beside it: a large\n");
+  std::printf("               closing position means part of that P&L is a directional bet.\n");
 }
 
 void print_markouts(const std::vector<Result>& rs) {

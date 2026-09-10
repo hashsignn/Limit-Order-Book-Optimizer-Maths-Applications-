@@ -7,7 +7,10 @@
 #include "lob/sim/simulator.hpp"
 #include "test_util.hpp"
 
+#include <cmath>
+#include <cstring>
 #include <string>
+#include <vector>
 
 using namespace lob;
 
@@ -106,6 +109,59 @@ int main() {
     ::lobtest::report(slow.late_cancels > zero.late_cancels, "latency causes late cancels",
                       __FILE__, __LINE__,
                       std::to_string(zero.late_cancels) + " -> " + std::to_string(slow.late_cancels));
+  }
+
+  // ---- the agent's OWN fills reach its view of the book ----
+  // The view is meant to lag the truth by the inbound latency. It used to be
+  // wrong instead: fills caused by the agent's own order were published only
+  // inside the market-Aggress branch, so until an unrelated aggressive order
+  // happened along, view_book_ still showed resting orders the agent had
+  // already consumed -- and then the backlog arrived stamped with that later
+  // event's time. With zero latency the two books must agree exactly.
+  {
+    SimConfig c = config(false);          // no latency: view == truth or it is a bug
+    Simulator sim{c};
+    // An agent that crosses the spread on purpose, so every fill it causes is
+    // one the market never asked for.
+    OrderId next = 800'000'000ULL;
+    std::uint64_t seen = 0;
+    int taken = 0;
+    auto taker = [&](const AgentView& v, Simulator& s) {
+      if (!v.book.has_bid() || !v.book.has_ask()) return;
+      if (++seen % 5000 != 0 || taken >= 20) return;
+      ++taken;
+      s.send_market(next++, (taken & 1) ? Side::Bid : Side::Ask, 5);
+    };
+    sim.run(taker, 200'000);
+
+    ::lobtest::report(taken > 0, "the taker actually traded", __FILE__, __LINE__,
+                      std::to_string(taken) + " market orders sent");
+    ::lobtest::report(sim.stats().aggressive_fills > 0, "aggressive fills happened",
+                      __FILE__, __LINE__, std::to_string(sim.stats().aggressive_fills));
+    // Zero latency, so the agent's picture must be the exchange's picture.
+    ::lobtest::report(std::fabs(sim.view_staleness_ticks()) < 1e-9,
+                      "view book matches the true book with no latency", __FILE__, __LINE__,
+                      std::to_string(sim.view_staleness_ticks()) + " ticks apart");
+  }
+
+  // ---- determinism is byte-for-byte, not merely equal in aggregate ----
+  // The header claims a run reproduces "byte for byte". Comparing nine SimStats
+  // scalars is a weaker property: two runs could produce different fill
+  // orderings with identical totals and pass. Fill is a POD, so compare it.
+  {
+    auto fills_of = [](int n) {
+      Simulator sim{config(true)};
+      PassiveMaker agent;
+      sim.run(agent, n);
+      return sim.fills();
+    };
+    const std::vector<Fill> a = fills_of(60'000), b = fills_of(60'000);
+    CHECK_EQ(a.size(), b.size());
+    bool same = a.size() == b.size();
+    for (std::size_t i = 0; same && i < a.size(); ++i)
+      same = std::memcmp(&a[i], &b[i], sizeof(Fill)) == 0;
+    ::lobtest::report(same, "two runs produce byte-identical fills", __FILE__, __LINE__,
+                      std::to_string(a.size()) + " fills compared");
   }
 
   // ---- an agent that does nothing must leave no trace ----
