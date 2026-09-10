@@ -768,7 +768,7 @@ before the limit was hit.
 
 ---
 
-## 9. The simulator's volatility is right only because its tick is 24x too fat
+## 9. The simulator's volatility was right only because its tick is 24x too fat — step size FIXED, rate still open
 
 The standing complaint was that the simulated price barely moves: 0.06 ticks a
 second against ethusd's 2.41, a factor of 40. Issue 7 answered it by converting
@@ -833,27 +833,30 @@ best queue empties. `queue_price(side, level) = mid -+ level`, so the modelled
 queues sit at consecutive ticks and the level behind the touch is always exactly
 one tick away. The model has no way to express a gap.
 
-The real book is nothing like that. Measured on all three captures -- the touch
-change rate, how far the mid moves when it changes, and how many distinct prices
-within ten ticks of the touch hold anything at all:
+The real book is nothing like that. `apps/stats` now writes a `gap.csv` -- how
+far the touch is from the next price holding anything, read off the same walk
+the depth profile uses -- and it is the number the reference price has never
+had:
 
 ```
-            touch/s   mean jump   median   0-tick   spread med   levels within 10 ticks
-  ethusd      0.391        6.15      4.0     0.5%            1            1.56
-  btcusd      0.589      174.87     60.0     0.0%            1            1.05
-  xrpusd      1.249        3.15      1.0     5.5%            1            2.08
-  simulator   0.078        0.87      1.0     ~0               1            4 by construction
+            gap to next occupied price          occupancy by ticks behind the touch
+            mean  median   p90   P(=1)      1      2      3      4     ...    11
+  ethusd    5.62       4    12   20.4%    20.4%  18.9%  14.7%  13.8%   ...  17.7%
+  xrpusd    4.21       2    10   42.5%    42.5%  15.3%  17.6%  16.4%   ...  16.6%
+  simulator 1.72       2     3   48.7%    24.7%  20.9%  17.1%   0.1%   ...   0.0%
 ```
 
-Every book is one tick wide at the touch and then largely empty behind it: of
-the ten prices nearest the touch, between one and two hold anything. When a best
-queue clears, the next price with something on it is not the next tick.
+The three levels the model has are right. There was nothing behind them, because
+`kLevels` was 4 and the queues sit at consecutive ticks, so the modelled book was
+exactly three ticks deep. A cross-check: the mid moves a mean of 6.15 ticks on
+ethusd when the touch changes, against a measured gap of 5.62 -- the same
+quantity reached two ways.
 
-Ethusd's own reconstruction develops holes near the touch (issue 1), so read its
-occupancy as a lower bound -- but btcusd and xrpusd are not subject to that and
-say the same thing, and btcusd's 60-tick median jump is 0.078 bp on its finer
-grid, in the same place as ethusd's 4 ticks at 0.163 bp. The sparseness is the
-market, not the reconstruction.
+Neither number is an artefact of the reconstruction. `apps/stats` now takes
+`--seed-guard-pct`, and sweeping it from 0 (seed the entire snapshot) to 1.0%
+leaves the volatility, the touch rate, the jump size, the spread and the whole
+occupancy profile **identical to four decimal places**. The snapshot's orders
+never become the touch in these ten minutes; everything here is stream-built.
 
 So the deficit factors cleanly, and neither factor is small:
 
@@ -866,14 +869,17 @@ So the deficit factors cleanly, and neither factor is small:
   sigma at equal tick    0.2918 bp   0.0121 bp  24x
 ```
 
-`FlowConfig::Qr::kLevels = 4` is part of it -- the modelled book stops four
-ticks out -- but raising it alone would make things worse, not better. The model
-already keeps *more* prices occupied near the touch than any of the three
-instruments do (four against one to two), because its four queues sit at
-consecutive ticks and are all populated. Adding levels adds more consecutive
-ticks. What is missing is a **spacing** distribution: the modelled queues have to
-be allowed to sit apart, so that clearing one moves the price by the gap rather
-than by one tick.
+`FlowConfig::Qr::kLevels = 4` is half of it -- the modelled book stopped three
+ticks behind the touch where the real one is still 14% occupied at eleven -- and
+`reference_price_step` moving exactly one tick is the other half.
+
+**An earlier version of this section said raising `kLevels` would make things
+worse, on the grounds that the model already kept more prices occupied near the
+touch than any instrument did.** That was measured with `apps/tape`, over a
+different window and a shallower level cap than the depth profile uses, and it
+disagreed with the depth profile by a factor of two. It was wrong: counting
+occupied prices in the first ten ticks, the model had 1.63 and ethusd 2.38.
+`gap.csv` exists so that this is read off the same book walk as everything else.
 
 ### The number this all comes down to
 
@@ -899,17 +905,72 @@ model is denominated in ticks, so `FlowConfig::mid` scales edge and risk by the
 same factor and cancels out of any paired difference. What it distorts is every
 comparison against the real market -- which is what Phase 6 is for.
 
-### What changed
+### What changed -- the step size, which was two thirds of it
 
-`tools/impact.py` now reports `sig(1s)`, `spr_bp` and `spr/sig` and no longer
+**`kLevels` is 16.** Levels 0 to 3 stay as fitted; levels 4 and beyond repeat
+level 3. That is not an assumption: the estimator records level 4 as well, and
+on ethusd it measures the same as level 3 (0.191 adds/s against 0.191, 0.196
+cancels against 0.182), which is the paper's own K = 3 finding -- Q_4 and Q_5
+behave like Q_3 -- that this file already invokes for `far_cancel_per_order`.
+Sixteen covers the measured gap distribution, whose p90 is 12.
+
+**`reference_price_step` moves the price to the next resting order on the
+emptied side**, not by one tick. Where it lands is read off the book rather than
+drawn from a new distribution: the generator already tracks every order it
+believes is live, so the jump distribution is a *consequence* of the modelled
+depth profile, which is fitted. No new parameter.
+
+**`apps/stats` writes `gap.csv`** and takes `--seed-guard-pct`, so the question
+"how much of the book's shape is the guard's hole rather than the market's" can
+be asked with the tool that is natural for it.
+
+**`tools/impact.py`** reports `sig(1s)`, `spr_bp` and `spr/sig` and no longer
 reports `bp/s`, which was labelled "scale-free volatility -- THIS is comparable"
-and was neither. The docstring records why.
+and was neither.
 
-**Not fixed.** Closing the gap means giving the reference price a jump-size
-distribution fitted to the capture and raising the touch-clearing rate about
-fivefold, which is a recalibration of the whole flow rather than a patch --
-every rate in `FlowConfig::Qr` is fitted against the current one. Raising
-`FlowConfig::mid` on its own would make the tick honest and the volatility 24x
-too small, which is worse than the present state because it would be wrong in a
-direction nothing measures. Leave the fat tick until the jump distribution
-exists, and read `spr/sig` beside any result that claims a strategy makes money.
+What it bought, measured on 2,000,000 events:
+
+```
+                              before    after    ethusd
+  gap to next occupied price    1.72     4.69      5.62   ticks
+  occupied prices in 10 ticks   1.63     2.47      2.38
+  mean touch move               1.76     5.16     11.91   ticks (grid-sampled)
+  sigma(1 s), common tick grid  0.301    1.031     7.162  ticks
+  price impact of a trade       0.084    0.629     0.676  bp
+  P(mid moves | a print)        13.6%    25.1%     55.6%
+  lift                          2.63     5.25      3.29
+  eta                           0.48     0.55      0.84
+  spread / volatility           3.53     1.17      0.26
+```
+
+**The price impact of a trade now matches the market**, which closes the gap
+issue 7 left open: 0.629 bp against 0.676, from 0.084. Volatility on a common
+tick grid is 3.4x what it was, and eta has crossed 0.5 -- the price trends now,
+where every previous attempt to make it trend (Model II-b, the Hawkes kernel,
+long memory in the flow, sweeping theta) moved it not at all. The reason those
+failed is written up in `docs/06`: a persistent flow can only make a persistent
+price if trades move the price, and they did not.
+
+### What is left, and it is now one thing
+
+**The touch clears 0.039 times a second against ethusd's 0.228** -- a factor of
+5.8, and it is the whole of the remaining volatility gap. The step size is
+fixed; the rate is not.
+
+That rate is not a free parameter either. It is `P(the touch queue reaches
+zero)`, which the fitted mean queue size of 4.29 AES and the fitted event rate
+of 1.17/s imply between them. Matching it means the real touch queue is burstier
+than a birth-and-death queue with that mean can be -- it empties far more often
+and refills to larger sizes -- which is Model I's independence assumption
+failing in a way the closed form cannot express. That is a new piece of work,
+now gap 8 in `docs/06`.
+
+It has a second consequence worth stating plainly: **the process still fails
+`tools/mdp_params.py`'s usability gate**, and for this reason. The mid moves in
+0.4% of 100 ms epochs against a 0.5% bar and ethusd's roughly 3.9%. Phase 5
+cannot be re-solved end to end until the clearing rate is addressed -- the
+shipped table in `simpolicy/` was measured on a different process again, at a
+0.5 ms epoch the queue-reactive clock cannot support.
+
+Raising `FlowConfig::mid` remains the wrong fix and is still not done: it would
+make the tick honest and the volatility 24x too small.

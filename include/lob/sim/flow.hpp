@@ -18,6 +18,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <random>
 #include <unordered_map>
@@ -352,7 +353,42 @@ struct FlowConfig {
   // has fitted. The eight-hour captures are what would settle them. Nothing
   // downstream should be read as though these curves were measured here.
   struct Qr {
-    static constexpr int kLevels = 4;    // modelled queues each side
+    // HOW DEEP THE MODELLED BOOK GOES, and why it is no longer four.
+    //
+    // Four was the number the estimator fits, and with the queues at
+    // consecutive ticks it made the modelled book exactly three ticks deep
+    // behind the touch. The real one is not. Measured occupancy by tick
+    // distance from the touch, over the ten-minute captures:
+    //
+    //     ticks behind    1      2      3      4      5     ...    11
+    //     ethusd        20.4%  18.9%  14.7%  13.8%  13.3%   ...  17.7%
+    //     xrpusd        42.5%  15.3%  17.6%  16.4%  12.4%   ...  16.6%
+    //     this model    24.7%  20.9%  17.1%   0.1%   0.0%   ...   0.0%
+    //
+    // The three levels that exist are right and there is nothing behind them,
+    // so the distance from the touch to the next price holding anything came
+    // out at 1.72 ticks against ethusd's 5.62 -- and that distance is exactly
+    // how far the price falls when a best queue clears. See
+    // reference_price_step and docs/KNOWN-ISSUES.md issue 9.
+    //
+    // Sixteen covers the measured gap distribution: ethusd's is mean 5.62,
+    // median 4, p90 12, and nothing at all beyond 64.
+    static constexpr int kLevels = 16;   // modelled queues each side
+    // Levels 0..3 are fitted from the captures. Everything beyond repeats
+    // level 3, which is not an assumption: the estimator records level 4 too
+    // and it measures the same as level 3 on ethusd (0.191 adds/s against
+    // 0.191, 0.196 cancels against 0.182, mean q 0.65 against 0.39), and it is
+    // the paper's own K = 3 finding -- Q_4 and Q_5 behave like Q_3 -- which
+    // this file already invokes for far_cancel_per_order.
+    static constexpr int kFitted = 4;
+    static constexpr std::array<double, kLevels> outward(
+        const std::array<double, kFitted>& fitted) noexcept {
+      std::array<double, kLevels> out{};
+      for (std::size_t i = 0; i < static_cast<std::size_t>(kLevels); ++i)
+        out[i] = fitted[i < static_cast<std::size_t>(kFitted)
+                            ? i : static_cast<std::size_t>(kFitted - 1)];
+      return out;
+    }
     bool   enabled = false;
 
     // The queue axis. `aes` is the average event size the queue is counted in,
@@ -401,13 +437,13 @@ struct FlowConfig {
     // slower refill that would have left the book one-sided.
 
     // lambda^L(q) = q == 0 ? add_empty : add_rate * exp(-add_decay * (q - 1))
-    double add_rate  [kLevels] = {0.6507, 0.5261, 0.3988, 0.6263};  // per second, per side
-    double add_empty [kLevels] = {0.2928, 0.0316, 0.0279, 0.0188};
-    double add_decay [kLevels] = {0.000,  0.120,  0.140,  0.150};   // flat at the touch
+    std::array<double, kLevels> add_rate  = outward({0.6507, 0.5261, 0.3988, 0.6263});
+    std::array<double, kLevels> add_empty = outward({0.2928, 0.0316, 0.0279, 0.0188});
+    std::array<double, kLevels> add_decay = outward({0.000,  0.120,  0.140,  0.150});
 
     // lambda^C(q) = cancel_rate * q / (q + cancel_half),  zero at q = 0
-    double cancel_rate[kLevels] = {1.1715, 1.1394, 0.9407, 1.1708};
-    double cancel_half[kLevels] = {2.500,  2.000,  2.000,  2.000};  // in AES
+    std::array<double, kLevels> cancel_rate = outward({1.1715, 1.1394, 0.9407, 1.1708});
+    std::array<double, kLevels> cancel_half = outward({2.500,  2.000,  2.000,  2.000});
 
     // lambda^M(q) = trade_rate * exp(-trade_decay * (q - 1)),  zero at q = 0
     // and zero behind the touch: a market order takes the best queue.
@@ -683,7 +719,8 @@ struct FlowConfig {
     // paper's own K = 3 finding applied outward -- Q_4 and Q_5 behave like
     // Q_3, so an order past the window is treated as one at the edge of it.
     [[nodiscard]] double far_cancel_per_order() const noexcept {
-      return cancel_rate[kLevels - 1] / (1.0 + cancel_half[kLevels - 1]);
+      return cancel_rate[static_cast<std::size_t>(kLevels - 1)]
+           / (1.0 + cancel_half[static_cast<std::size_t>(kLevels - 1)]);
     }
 
     // Model III: the chance the reference price follows an emptied best queue.
@@ -1062,8 +1099,57 @@ class FlowGenerator {
     const bool bid_empty = st.n[0][0] == 0, ask_empty = st.n[1][0] == 0;
     if (bid_empty == ask_empty) return;             // both, or neither
     if (uniform() >= cfg_.qr.theta) return;
-    mid_ += bid_empty ? -1 : 1;                     // the price follows the gap
+    // THE PRICE FALLS INTO THE GAP, not one tick.
+    //
+    // This used to be `mid_ += bid_empty ? -1 : 1`, which is the paper's step
+    // and is right on the large-tick book the paper models, where the level
+    // behind the touch is always the next tick. On these books it is not:
+    // measured, the distance from the touch to the next price holding anything
+    // is a mean of 5.62 ticks on ethusd and 4.21 on xrpusd, and the mid moves
+    // by very close to that when the touch changes (6.15 ticks on ethusd) --
+    // the two are the same quantity and measuring both was the check.
+    //
+    // A one-tick step turns that into a one-tick move, and volatility is rate
+    // times step SQUARED, so it cost a factor of thirty in variance. See
+    // docs/KNOWN-ISSUES.md issue 9.
+    //
+    // Where the price lands is read off the book rather than drawn: the next
+    // resting order on the emptied side is where the touch actually goes, and
+    // the generator already tracks every order it believes is live. That makes
+    // the jump distribution a CONSEQUENCE of the modelled depth profile, which
+    // is fitted, rather than a new distribution with new parameters.
+    const Ticks target = best_live_price(bid_empty ? Side::Bid : Side::Ask);
+    if (target == kNoPrice) {
+      mid_ += bid_empty ? -1 : 1;                   // nothing resting: one tick
+    } else {
+      // Bid level 0 sits at p_ref, ask level 0 at p_ref + 1, so landing the
+      // emptied side's level 0 on that order fixes p_ref.
+      const Ticks want = bid_empty ? target : target - 1;
+      // Only ever in the direction the empty side pulls. A resting order on the
+      // wrong side of p_ref -- which happens, the book is not always tidy --
+      // must not send the price backwards.
+      if (bid_empty ? (want < mid_) : (want > mid_)) mid_ = want;
+      else mid_ += bid_empty ? -1 : 1;
+    }
     if (cfg_.qr.theta_reinit > 0.0 && uniform() < cfg_.qr.theta_reinit) reinitialise();
+  }
+
+  // The best price on one side among the orders the generator believes are
+  // resting. kNoPrice when that side is empty. O(live_), like QueueState, and
+  // for the same reason: the book this path runs at holds tens of orders, and
+  // an incrementally maintained index would be one more thing to get wrong.
+  [[nodiscard]] Ticks best_live_price(Side side) const noexcept {
+    Ticks best = kNoPrice;
+    for (const Live& l : live_) {
+      if (l.side != side || l.qty <= 0) continue;
+      // Better is higher for a bid and lower for an ask. Spelled out rather
+      // than routed through Price::better_than because everything on this path
+      // is a raw Ticks and wrapping it would be the only reason to.
+      const bool better = (best == kNoPrice)
+                        || (side == Side::Bid ? l.price > best : l.price < best);
+      if (better) best = l.price;
+    }
+    return best;
   }
 
   // Redraw the book around the new reference price. Everything resting is
@@ -1144,16 +1230,22 @@ class FlowGenerator {
     return 2;
   }
 
+  // The rate tables are std::array, whose operator[] takes an unsigned index,
+  // and every level in this file is a signed int. One cast, named once.
+  [[nodiscard]] static std::size_t lv(int lvl) noexcept {
+    return static_cast<std::size_t>(lvl < 0 ? 0 : lvl);
+  }
+
   [[nodiscard]] double lambda_add(int lvl, int q) const noexcept {
     const FlowConfig::Qr& k = cfg_.qr;
-    if (q <= 0) return k.add_empty[lvl];
-    return k.add_rate[lvl] * std::exp(-k.add_decay[lvl] * static_cast<double>(q - 1));
+    if (q <= 0) return k.add_empty[lv(lvl)];
+    return k.add_rate[lv(lvl)] * std::exp(-k.add_decay[lv(lvl)] * static_cast<double>(q - 1));
   }
   [[nodiscard]] double lambda_cancel(int lvl, int q) const noexcept {
     const FlowConfig::Qr& k = cfg_.qr;
     if (q <= 0) return 0.0;
     const double x = static_cast<double>(q);
-    return k.cancel_rate[lvl] * x / (x + k.cancel_half[lvl]);
+    return k.cancel_rate[lv(lvl)] * x / (x + k.cancel_half[lv(lvl)]);
   }
   // Model II-a's market order routing. A market order takes the BEST OFFER,
   // which is the first non-empty queue on that side and is not always Q_1: the

@@ -20,12 +20,16 @@ removed exactly, so the leftover position is not what is costing it. See
 [`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md) 6 and 8 and
 [`docs/05-roadmap.md`](docs/05-roadmap.md).
 
-Read any of that beside issue 9. The simulator's volatility matches the captures
-in basis points, but only because it runs on a tick worth 1.0 bp where ethusd's
-is worth 0.041: on the market's own grid the process produces a twenty-fourth of
-the market's volatility, and a maker in it is paid 13.6x more spread per unit of
-price risk than a maker on ethusd. Every Phase 4 and Phase 5 number sits on top
-of that.
+Read any of that beside issue 9. The simulator's volatility matched the captures
+in basis points only because it ran on a tick worth 1.0 bp where ethusd's is
+worth 0.041; on the market's own grid it produced a twenty-fourth of the
+market's volatility. The modelled book now reaches sixteen ticks behind the
+touch instead of three, and the reference price falls into the gap when a best
+queue clears instead of stepping one tick. That closed the price impact of a
+trade — 0.629 bp against ethusd's 0.676, from 0.084 — and made the price trend
+for the first time. What is left is one thing: the touch clears 5.8x too rarely,
+which is `docs/06`'s gap 8 and is why the Phase 5 table cannot yet be re-solved
+on this process.
 
 ## Build and run
 
