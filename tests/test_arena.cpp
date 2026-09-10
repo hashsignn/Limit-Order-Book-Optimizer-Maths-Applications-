@@ -2,6 +2,7 @@
 #include "test_util.hpp"
 
 #include <cstdint>
+#include <cstddef>
 
 using namespace lob;
 
@@ -82,6 +83,32 @@ int main() {
     // Full cycle again, to prove release() rebuilt a usable free list.
     for (int i = 0; i < 3; ++i) CHECK(pool.acquire() != nullptr);
     CHECK(pool.acquire() == nullptr);
+  }
+
+  // ---- a release with no matching acquire does not underflow the counter ----
+  // It used to take in_use_ to SIZE_MAX and available() with it. The debug
+  // builds assert; the release build must at least stay consistent.
+  {
+    Pool<Node> pool{2};
+    Node* a = pool.acquire(Node{1, 1});
+    CHECK(a != nullptr);
+    pool.release(a);
+    CHECK_EQ(pool.in_use(), 0U);
+    CHECK_EQ(pool.available(), 2U);
+    // Two full cycles still work afterwards, so the free list is intact.
+    Node* b = pool.acquire(Node{2, 2});
+    Node* c = pool.acquire(Node{3, 3});
+    CHECK(b != nullptr && c != nullptr && b != c);
+    CHECK_EQ(pool.in_use(), 2U);
+  }
+
+  // ---- exhaustion cannot be reached by an overflowing size ----
+  {
+    Arena a{1024};
+    CHECK(a.allocate(SIZE_MAX, 8) == nullptr);          // used to wrap and succeed
+    CHECK(a.allocate(SIZE_MAX - 16, 8) == nullptr);
+    CHECK(a.allocate(1024, 1) != nullptr);              // and the real one still fits
+    CHECK(a.allocate(1, 1) == nullptr);
   }
 
   return lobtest::summary("arena");

@@ -15,7 +15,12 @@ using OrderId = std::uint64_t;
 using SeqNum  = std::uint64_t;
 using Nanos   = std::int64_t;   // duration or epoch offset, nanoseconds
 
-inline constexpr Ticks kNoPrice = std::numeric_limits<Ticks>::min();
+// Half the minimum, not the minimum. `real - none()` is a signed subtraction,
+// and at INT64_MIN that is undefined behaviour rather than a large number.
+// Halving it leaves the sentinel far below any conceivable price while keeping
+// a difference against it representable, so a caller that forgets to check
+// validity gets an absurd answer instead of UB.
+inline constexpr Ticks kNoPrice = std::numeric_limits<Ticks>::min() / 2;
 
 enum class Side : std::uint8_t { Bid = 0, Ask = 1 };
 
@@ -53,7 +58,16 @@ class Price {
   friend constexpr Ticks operator-(Price a, Price b) noexcept { return a.ticks_ - b.ticks_; }
 
   // "Better" means higher for a bid, lower for an ask.
+  //
+  // The validity guards are not defensive padding. kNoPrice is INT64_MIN, and
+  // "lower is better" made an INVALID ask beat every real one:
+  // Price::none().better_than(any_real_ask, Side::Ask) returned true. The bid
+  // side was safe only by accident, because INT64_MIN loses every bid
+  // comparison. A default-constructed Price is none(), so an ask that had not
+  // been set yet silently won.
   [[nodiscard]] constexpr bool better_than(Price other, Side s) const noexcept {
+    if (!valid()) return false;          // nothing invalid is better than anything
+    if (!other.valid()) return true;     // ...and anything real beats nothing
     return s == Side::Bid ? ticks_ > other.ticks_ : ticks_ < other.ticks_;
   }
 

@@ -27,6 +27,16 @@ int main() {
   CHECK(!b.better_than(a, Side::Ask));
   CHECK(!a.better_than(a, Side::Bid));   // strict
 
+  // An INVALID price must never win a comparison. It used to win every ask
+  // comparison, because kNoPrice was INT64_MIN and lower is better for an ask.
+  CHECK(!Price::none().better_than(a, Side::Ask));
+  CHECK(!Price::none().better_than(a, Side::Bid));
+  CHECK(!Price{}.better_than(a, Side::Ask));        // default-constructed is none()
+  CHECK(a.better_than(Price::none(), Side::Ask));   // and a real price beats it
+  CHECK(a.better_than(Price::none(), Side::Bid));
+  // A difference against the sentinel is representable, not undefined.
+  CHECK((a - Price::none()) > 0);
+
   CHECK(opposite(Side::Bid) == Side::Ask);
   CHECK(opposite(Side::Ask) == Side::Bid);
   CHECK_EQ(sign_of(Side::Bid), 1);

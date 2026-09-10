@@ -13,6 +13,7 @@
 #include "lob/book/order_map.hpp"
 #include "test_util.hpp"
 
+#include <cstdint>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -147,6 +148,42 @@ int main() {
       ::lobtest::report(m.insert(k, 1), "refill after drain", __FILE__, __LINE__,
                         "k=" + std::to_string(k));
     CHECK_EQ(m.size(), n);
+  }
+
+  // ---- a full table is refused, not spun on ----
+  // find(), insert() and erase_at() are unbounded probe loops. On a full table
+  // an absent key never terminates -- a hang, not a crash. OrderBook prevents it
+  // by sizing its order pool to half the map, but the map said so nowhere and
+  // could not be used safely on its own.
+  {
+    OrderMap m{8};                       // capacity rounds to 16
+    const std::size_t cap = m.capacity();
+    for (OrderId k = 1; k <= cap; ++k)
+      ::lobtest::report(m.insert(k, static_cast<std::uint32_t>(k)), "fills to capacity",
+                        __FILE__, __LINE__, "k=" + std::to_string(k));
+    CHECK_EQ(m.size(), cap);
+    CHECK(!m.insert(99'999, 1));         // refused, and this call RETURNS
+    CHECK_EQ(m.size(), cap);
+    // Every key that went in is still findable on a completely full table.
+    for (OrderId k = 1; k <= cap; ++k) CHECK_EQ(m.find(k), static_cast<std::uint32_t>(k));
+    CHECK(m.erase(1));                   // and erasing frees a slot again
+    CHECK(m.insert(99'999, 7));
+    CHECK_EQ(m.find(99'999), 7U);
+  }
+
+  // ---- capacity is at least twice what was asked for, without overflowing ----
+  // Tested through capacity_for() rather than by constructing, because the
+  // overflow case describes a table nobody can allocate.
+  {
+    CHECK_EQ(OrderMap::capacity_for(0), 32U);
+    CHECK_EQ(OrderMap::capacity_for(16), 32U);
+    CHECK(OrderMap::capacity_for(1000) >= 2000U);
+    CHECK(OrderMap::capacity_for(1 << 20) >= (2U << 20));
+    // `expected_orders * 2` used to overflow here and leave the capacity at 16.
+    CHECK(OrderMap::capacity_for((std::size_t{1} << 62) + 1) > 16U);
+    CHECK(OrderMap::capacity_for(SIZE_MAX) > 16U);
+    // And the constructed table agrees with the function.
+    CHECK_EQ(OrderMap{1000}.capacity(), OrderMap::capacity_for(1000));
   }
 
   // ---- clear ----

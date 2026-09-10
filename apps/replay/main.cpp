@@ -160,8 +160,8 @@ int replay_synthetic(int n, bool verify) {
     const Features& f = fe.get();
     std::printf("\n  final features: imb %+.3f  deep_imb %+.3f  wmid %.2f (mid %.2f)\n",
                 f.imbalance, f.deep_imbalance, f.weighted_mid, f.mid);
-    std::printf("                  ofi_ewma %+.1f  vol_ewma %.4f ticks^2  rate %.0f evt/s\n",
-                f.ofi_ewma, f.vol_ewma, f.event_rate);
+    std::printf("                  ofi_decayed %+.1f  vol_ewma %.4f ticks^2  rate %.0f evt/s\n",
+                f.ofi_decayed, f.vol_ewma, f.event_rate);
   }
 
   if (verify) {

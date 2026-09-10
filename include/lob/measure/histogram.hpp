@@ -44,6 +44,12 @@ class Histogram {
 
   [[nodiscard]] std::int64_t min() const noexcept { return count_ ? min_ : 0; }
   [[nodiscard]] std::int64_t max() const noexcept { return max_; }
+  // The largest value ever RECORDED, before the ceiling clamp. max() is the
+  // largest value the histogram can represent, so on overflow it saturates --
+  // deliberately, and tests/test_histogram.cpp asserts it. This is the number a
+  // human needs when overflow_count() is non-zero, because a p99.9 that is
+  // honest about its ceiling and a max that quietly is not defeat the point.
+  [[nodiscard]] std::int64_t true_max() const noexcept { return true_max_; }
   [[nodiscard]] std::int64_t count() const noexcept { return count_; }
   [[nodiscard]] std::int64_t overflow_count() const noexcept { return overflow_; }
   [[nodiscard]] bool         empty() const noexcept { return count_ == 0; }
@@ -83,6 +89,7 @@ class Histogram {
   std::int64_t count_    = 0;
   std::int64_t min_      = INT64_MAX;
   std::int64_t max_      = 0;
+  std::int64_t true_max_ = 0;
   std::int64_t overflow_ = 0;
 };
 

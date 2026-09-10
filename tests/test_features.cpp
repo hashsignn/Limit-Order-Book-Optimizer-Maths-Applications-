@@ -156,8 +156,36 @@ int main() {
     put(b, 1, Side::Bid, 9'990, 100);       // bid only
     fe.update(b, 2000);
     CHECK(!std::isnan(fe.get().imbalance));
-    CHECK(!std::isnan(fe.get().ofi_ewma));
+    CHECK(!std::isnan(fe.get().ofi_decayed));
     CHECK(!std::isnan(fe.get().vol_ewma));
+  }
+
+  // ---- a one-sided book is FLAGGED, not silently stale ----
+  // This block used to assert only the absence of NaN, which a stale value
+  // satisfies perfectly. bid, ask, mid, spread, imbalance and weighted_mid all
+  // hold their last two-sided values on a one-sided book -- there is nothing
+  // meaningful to replace them with -- and `updates` still increments, so a
+  // consumer had no way to tell. A one-sided book is exactly the state a market
+  // maker must not quote into.
+  {
+    OrderBook b = make_book();
+    FeatureEngine fe;
+    fe.update(b, 1000);                                  // empty
+    CHECK(!fe.get().two_sided);
+
+    put(b, 1, Side::Bid, 9'990, 100);
+    put(b, 2, Side::Ask, 9'992, 100);
+    fe.update(b, 2000);                                  // two-sided
+    CHECK(fe.get().two_sided);
+    CHECK_NEAR(fe.get().mid, 9'991.0, 1e-9);
+    const double good_mid = fe.get().mid;
+
+    CHECK(b.remove(2) == BookError::Ok);                 // ask side empties
+    fe.update(b, 3000);
+    CHECK(!fe.get().two_sided);
+    // The value is stale, and that is now visible rather than merely true.
+    CHECK_NEAR(fe.get().mid, good_mid, 1e-12);
+    CHECK(fe.get().updates == 3U);                       // still counting
   }
 
   // ---- differential: incremental engine vs recomputation from scratch ----
@@ -213,7 +241,7 @@ int main() {
       // Nothing may ever become non-finite.
       const Features& f = fe.get();
       if (!std::isfinite(f.imbalance) || !std::isfinite(f.weighted_mid) ||
-          !std::isfinite(f.ofi_ewma)  || !std::isfinite(f.vol_ewma)     ||
+          !std::isfinite(f.ofi_decayed)  || !std::isfinite(f.vol_ewma)     ||
           !std::isfinite(f.event_rate)) {
         ::lobtest::report(false, "feature became non-finite", __FILE__, __LINE__,
                           "event " + std::to_string(i));
@@ -235,7 +263,7 @@ int main() {
     CHECK(fe.get().updates == 50U);
     fe.reset();
     CHECK_EQ(fe.get().updates, 0U);
-    CHECK_NEAR(fe.get().ofi_ewma, 0.0, 1e-12);
+    CHECK_NEAR(fe.get().ofi_decayed, 0.0, 1e-12);
     CHECK_NEAR(fe.get().vol_ewma, 0.0, 1e-12);
   }
 

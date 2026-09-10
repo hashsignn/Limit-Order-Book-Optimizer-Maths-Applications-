@@ -3,11 +3,13 @@
 // the precision guarantee: a value read back at a percentile must be within
 // 10^-significant_digits of a value actually recorded.
 #include "lob/measure/histogram.hpp"
+#include "lob/measure/recorder.hpp"
 #include "test_util.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <string>
 #include <vector>
 
 using namespace lob;
@@ -119,6 +121,24 @@ int main() {
     CHECK_EQ(h.count(), 3);
     CHECK_EQ(h.overflow_count(), 2);
     CHECK_EQ(h.max(), 1000);   // clamped, and visibly so
+    // ...and the real number is still available, which is what a reader needs
+    // once overflow_count() is non-zero.
+    CHECK_EQ(h.true_max(), 1'000'000);
+    CHECK(h.summary().find("true max") != std::string::npos);
+  }
+
+  // ---- a clamped maximum is visible in the per-stage report ----
+  // Histogram has always said so in summary(); LatencyRecorder::report printed
+  // h.max() and never read overflow_count(), so the one number that must never
+  // be optimistic could be, silently, in the table humans actually read.
+  {
+    LatencyRecorder rec{1000, 3};              // a 1 us ceiling, to force it
+    rec.record_nanos(Stage::Decode, 500);
+    rec.record_nanos(Stage::Decode, 2'000'000);
+    const std::string r = rec.report();
+    CHECK(r.find("OVER THE") != std::string::npos);
+    CHECK(r.find("2000000") != std::string::npos);
+    CHECK_EQ(rec[Stage::Decode].true_max(), 2'000'000);
   }
 
   // ---- coordinated-omission correction ----

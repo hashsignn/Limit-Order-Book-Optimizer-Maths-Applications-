@@ -94,11 +94,16 @@ bool run(std::uint64_t seed, int n, bool with_own, std::string* why) {
     gen.on_applied(e, ref.qty_of(e.order_id));
     gen.observe(fast.has_bid(), fast.best_bid(), fast.has_ask(), fast.best_ask());
 
-    if (with_own && (i % 500 == 0) && fast.has_bid()) {
+    // Both sides, alternately. Own orders used to be placed on the bid only, so
+    // the ask side's queue-position bookkeeping was never differentially tested.
+    const bool use_bid = (i / 500) % 2 == 0;
+    if (with_own && (i % 500 == 0) && (use_bid ? fast.has_bid() : fast.has_ask())) {
       // Place one of ours at the touch, and retire an old one.
-      const OrderId id = our_next++;
-      if (fast.add(id, Side::Bid, fast.best_bid(), 7, /*mine=*/true) == BookError::Ok) {
-        (void)ref.add(id, Side::Bid, fast.best_bid(), 7, true);
+      const OrderId id   = our_next++;
+      const Side    side = use_bid ? Side::Bid : Side::Ask;
+      const Ticks   px   = use_bid ? fast.best_bid() : fast.best_ask();
+      if (fast.add(id, side, px, 7, /*mine=*/true) == BookError::Ok) {
+        (void)ref.add(id, side, px, 7, true);
         ours.push_back(id);
       }
       if (ours.size() > 4) {
@@ -113,7 +118,12 @@ bool run(std::uint64_t seed, int n, bool with_own, std::string* why) {
       for (const OrderId id : ours) {
         const Qty a = fast.queue_ahead(id);
         const Qty b = ref.queue_ahead(id);
-        if (a >= 0 && b >= 0 && a != b) {
+        // The -1 sentinel means "not one of ours". This used to read
+        // `a >= 0 && b >= 0 && a != b`, which SKIPS the comparison whenever
+        // either book returns it -- so the fast book losing track of one of our
+        // orders, while the reference still had it, passed silently. That is
+        // the exact divergence this check exists to catch.
+        if ((a < 0) != (b < 0) || (a >= 0 && a != b)) {
           *why = "event " + std::to_string(i) + ": queue_ahead(" + std::to_string(id) +
                  ") fast=" + std::to_string(a) + " ref=" + std::to_string(b);
           return false;

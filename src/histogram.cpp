@@ -107,6 +107,7 @@ std::int64_t Histogram::highest_equivalent(std::int64_t value) const noexcept {
 
 void Histogram::record_n(std::int64_t value, std::int64_t n) noexcept {
   if (value < 0) value = 0;
+  if (value > true_max_) true_max_ = value;   // before the clamp, or it is lost
   if (value > highest_) { value = highest_; overflow_ += n; }
   counts_[static_cast<std::size_t>(counts_index_for(value))] += n;
   count_ += n;
@@ -179,7 +180,7 @@ double Histogram::stddev() const noexcept {
 
 void Histogram::reset() noexcept {
   std::fill(counts_.begin(), counts_.end(), 0);
-  count_ = 0; max_ = 0; overflow_ = 0; min_ = INT64_MAX;
+  count_ = 0; max_ = 0; true_max_ = 0; overflow_ = 0; min_ = INT64_MAX;
 }
 
 void Histogram::merge(const Histogram& other) noexcept {
@@ -192,6 +193,7 @@ void Histogram::merge(const Histogram& other) noexcept {
   // merged min/max to bucket boundaries. Both are tracked exactly, so take the
   // true extremes from the source instead.
   if (other.max_ > max_) max_ = other.max_;
+  if (other.true_max_ > true_max_) true_max_ = other.true_max_;
   if (other.min_ < min_) min_ = other.min_;
   overflow_ += other.overflow_;
 }
@@ -210,7 +212,9 @@ std::string Histogram::summary(const char* unit) const {
                 static_cast<long long>(value_at_percentile(99.99)),
                 static_cast<long long>(max()), unit);
   std::string s = buf;
-  if (overflow_ > 0) s += "  [" + std::to_string(overflow_) + " clamped at ceiling]";
+  if (overflow_ > 0)
+    s += "  [" + std::to_string(overflow_) + " clamped at ceiling, true max "
+       + std::to_string(true_max_) + "]";
   return s;
 }
 
