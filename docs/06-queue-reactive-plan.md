@@ -274,14 +274,41 @@ should end up carrying roughly the share this implies, not more.
    `mdp_params` refused the process outright. With the anchor fixed: median
    spread 1 tick, 54% at one tick, and the process is usable.
 
-   What remains is the calibration. `theta` is 1.0, the paper's "purely order
-   book driven" setting, and is **not** fitted to the ten-minute volatility and
-   mean-reversion ratio the paper uses. `theta_reinit` and the redraw from the
-   invariant measure are not implemented at all.
+   **Now done.** `theta_reinit` is implemented at 0.3 and the redraw from the
+   invariant measure is `reinitialise()`, sampling Model I's closed-form
+   stationary law per level by inverse CDF. `theta` was swept against the
+   volatility and the mean-reversion ratio and stays at 1.0 for a measured
+   reason: it governs how *often* the price moves, not whether successive moves
+   are correlated, and lowering it makes eta monotonically worse. See the theta
+   section below.
 
-6. **Order sizes are uniform on a range.** The paper assumes one constant size
-   per limit (the AES); arXiv:2405.18594 extends it to state-dependent size
-   distributions and reports it matters.
+6. ~~**Order sizes are uniform on a range.**~~ **Done.** `FlowConfig::Qr` carries
+   a seventeen-bin `order_size_aes` table normalised to a mean of one AES, drawn
+   by `draw_size` for resting orders and for the market orders that consume
+   them, and `reinitialise()` draws from it too. `qr_add` used to give every
+   order exactly one AES, which capped every trade at one resting order: 12.4%
+   of trades took exactly one order and 0.0% took more. See
+   `docs/KNOWN-ISSUES.md` issue 7.
+
+7. **The modelled queues sit at consecutive ticks, so the price can only move
+   one tick at a time.** `queue_price(side, level) = p_ref -+ level` and
+   `reference_price_step` moves `p_ref` by exactly one tick when a best queue
+   empties. The real book is not shaped like that: of the ten prices nearest the
+   touch, between one and two hold anything on any of the three captures, and
+   when the touch changes the mid jumps a mean of 6.15 ticks (ethusd), 174.87
+   (btcusd) or 3.15 (xrpusd).
+
+   The consequence is quantified in `docs/KNOWN-ISSUES.md` issue 9: run this
+   process on ethusd's own tick grid and it produces one twenty-fourth of
+   ethusd's volatility, which the simulator's 1.0 bp tick has been concealing.
+   Raising `kLevels` is not the fix and would make it worse -- the model already
+   keeps more prices occupied near the touch than any instrument does. What is
+   needed is a **spacing** distribution: the modelled queues have to be allowed
+   to sit apart, so that clearing one moves the price by the gap.
+
+   This is the largest remaining gap and it is a recalibration rather than a
+   patch, because every rate in `FlowConfig::Qr` is fitted against the current
+   one-tick spacing.
 
 ## Order of work
 
@@ -292,10 +319,13 @@ and between them they unblocked `level_ratio`. **All done.**
 
 Model II-b followed, and the estimator now carries the opposite-queue regime.
 
-Next: the `Q_2` regime switch from Model II-a, which the estimator can now be
-extended to measure the same way; then the rest of Model III (5), calibrating
-`theta` and `theta_reinit` against the ten-minute volatility and the
-mean-reversion ratio. Limit order sizes (6) last — market order sizes are done.
+Model II-b followed, then Model III's `theta`/`theta_reinit` (5) and the order
+size distribution (6). **All done.**
+
+Next, in order: the **spacing distribution** (7), which is what the volatility
+scale turns on and what everything downstream of it is currently mis-stated by;
+then the `Q_2` regime switch from Model II-a, which the estimator can be
+extended to measure the same way.
 
 ## Refitting the informed parameters, and what that turned up
 
