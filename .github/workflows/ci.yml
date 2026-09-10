@@ -66,8 +66,25 @@ jobs:
 
       # Sanitizer builds run the fast differential pass; the optimised jobs run
       # the thorough one, which is the same code over many more events.
+      # tsan skips `policy` and the long differential pass. Measured locally, the
+      # full suite under tsan takes 60 minutes and `policy` alone is 48 of them
+      # -- it is a value-iteration solve doing 23.8 million assertions, and
+      # every one of them is single-threaded. ThreadSanitizer finds data races;
+      # on a program with one thread it can only prove there are none to find,
+      # which this already knows. Its value here is as a TRIPWIRE for the day a
+      # recorder or a feed handler grows a thread, and that tripwire costs six
+      # minutes on everything else rather than an hour.
+      #
+      # src/tsc.cpp's lazy calibration is the specific thing waiting to be
+      # caught: non-atomic globals behind a first-call check, harmless today and
+      # a race the moment anything is threaded.
       - name: Test
-        run: ctest --preset ${{ matrix.preset }} -E "_long"
+        run: |
+          if [ "${{ matrix.preset }}" = "tsan" ]; then
+            ctest --preset ${{ matrix.preset }} -E "_long|^policy$"
+          else
+            ctest --preset ${{ matrix.preset }} -E "_long"
+          fi
 
       - name: Thorough differential book test
         if: matrix.preset == 'release'
