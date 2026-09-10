@@ -3,6 +3,7 @@
 #include "test_util.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 using namespace lob;
@@ -44,6 +45,42 @@ int main() {
                         10'000 + i, 10'002 + i, 5, 5, i % 11 - 5});
     }
   }  // destructor flushes and closes
+
+  // written() counts what append() was handed. It returned 0 for the life of
+  // this class -- total_ was declared, read by written(), and incremented
+  // nowhere -- and nothing asserted it, which is why.
+  {
+    const std::string p2 = "test_journal_count.tmp";
+    JournalWriter<Decision> w{p2, "Decision", 64};
+    for (int i = 0; i < 500; ++i) w.append(Decision{static_cast<SeqNum>(i), 1, 2, 3, 4, 5, 6, 7});
+    CHECK_EQ(w.written(), 500U);
+    w.close();
+    CHECK(!w.failed());
+    CHECK_EQ(journal_read_all<Decision>(p2, "Decision").size(), 500U);
+    std::remove(p2.c_str());
+  }
+
+  // A batch size of zero used to make `buf_[n_++] = r` a heap write past the
+  // end of an empty vector, on the first record, in a noexcept function.
+  {
+    const std::string p3 = "test_journal_zerobatch.tmp";
+    JournalWriter<Decision> w{p3, "Decision", 0};
+    for (int i = 0; i < 10; ++i) w.append(Decision{static_cast<SeqNum>(i), 1, 2, 3, 4, 5, 6, 7});
+    w.close();
+    CHECK(!w.failed());
+    CHECK_EQ(journal_read_all<Decision>(p3, "Decision").size(), 10U);
+    std::remove(p3.c_str());
+  }
+
+  // A write that cannot land must be reported, not swallowed. /dev/full accepts
+  // an open and fails every write, which is exactly the full-disk case.
+  {
+    JournalWriter<Decision> w{"/dev/full", "Decision", 4};
+    for (int i = 0; i < 64; ++i) w.append(Decision{static_cast<SeqNum>(i), 1, 2, 3, 4, 5, 6, 7});
+    w.close();
+    ::lobtest::report(w.failed(), "a failed write is reported", __FILE__, __LINE__,
+                      "wrote " + std::to_string(w.written()) + " records to /dev/full");
+  }
 
   const auto back = journal_read_all<Decision>(path, "Decision");
   CHECK_EQ(back.size(), static_cast<std::size_t>(kN));

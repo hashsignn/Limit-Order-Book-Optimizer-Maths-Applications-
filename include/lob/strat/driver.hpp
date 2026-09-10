@@ -129,7 +129,8 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
   Simulator      sim{cfg};
   MarkoutTracker mk;
 
-  std::size_t   seen     = 0, requotes = 0;
+  std::uint64_t seen     = 0;
+  std::size_t   requotes = 0;
   OrderId       next_id  = dc.first_id;
   OrderId       bid_id   = 0, ask_id = 0;
   Ticks         cur_bid  = 0, cur_ask = 0;
@@ -157,8 +158,9 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
       mk.advance(v.now, true_mid);
     }
 
-    for (; seen < s.fills().size(); ++seen) {
-      const Fill& f = s.fills()[seen];
+    // Global fill indices, so the simulator can trim the log behind us.
+    for (; seen < s.fills_end(); ++seen) {
+      const Fill& f = s.fill_at(seen);
       if (!f.resting_mine && !f.aggressor_mine) continue;
       const Side our = f.resting_mine ? f.resting_side : opposite(f.resting_side);
       mk.on_fill(f.ts, f.price, f.qty, sign_of(our), f.resting_mine,
@@ -191,6 +193,8 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
     if (ask_id != 0 && ask_left <= 0) {
       ask_p.rest_ns = v.now - ask_at; places.push_back(ask_p); ask_id = 0;
     }
+
+    s.note_fills_read(seen);   // everything above is consumed; the log may slide
 
     if (std::llabs(s.stats().inventory) > peak) peak = std::llabs(s.stats().inventory);
 
