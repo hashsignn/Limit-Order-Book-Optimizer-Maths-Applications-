@@ -136,12 +136,48 @@ The buckets are now fractions of a reference depth that travels in the table hea
 realised and modelled hazard agree within 3× across the whole range.
 
 ```bash
-./build/release/stats --synthetic 4000000 --grid-ms 0.5 --warmup 1 --label simcal --outdir simcsv
-py tools/mdp_params.py --csv simcsv --out simpolicy --dt-ms 0.5 --only simcal --order-size 10
+# 1. measure the simulator's own process, at the epoch the executor runs at
+./build/release/stats --synthetic 4000000 --queue-reactive \
+    --grid-ms 100 --warmup 1 --label simcal --outdir simcsv
+# 2. estimate the MDP's parameters from those CSVs, at the SAME epoch
+py tools/mdp_params.py --csv simcsv --out simpolicy --dt-ms 100 --only simcal --order-size 10
+# 3. solve
 ./build/release/solve --params simpolicy/mdp.json --pair simcal --out simpolicy/simcal.bin
+# 4. evaluate
 ./build/release/evaluate --table simpolicy/simcal.bin --tune   # choose preferences here
 ./build/release/evaluate --table simpolicy/simcal.bin          # the acceptance test
 ```
+
+**Two things about that block that were wrong here until the September work, and
+are worth knowing before running it.**
+
+`--queue-reactive` is not optional. Without it `stats` measures the *stress*
+process, while `backtest` and `evaluate` run the queue-reactive one — so the
+table would be solved for a market the policy never sees. The shipped
+`simpolicy/simcal.bin` was built that way: its measured touch queue is 29,160
+against the queue-reactive process's 1,531.
+
+`--grid-ms` and `--dt-ms` must match each other **and** the executor's message
+budget, which is 100 ms. At 0.5 ms the queue-reactive clock has no events to
+fill the grid — the mid CSV's rows come 130 ms apart, the estimator's `gaps <=
+3 * dt` filter throws away 99.98% of them, and the whole transition model is
+built on 753 samples. `evaluate` prints a warning when the budget and the table
+disagree; it is not decoration.
+
+**Step 3 refuses today, and that is the tool working.**
+
+```
+simcal is marked unusable for the MDP:
+  - the mid essentially never moves in the reconstruction
+Refusing to solve. A table built on a process this poorly measured is
+indistinguishable from a calibrated one once it is a file on disk.
+```
+
+The mid moves in 0.4% of 100 ms epochs against a 0.5% bar and ethusd's roughly
+3.9%, because the touch clears 5.8x too rarely. That is
+[`docs/06`](docs/06-queue-reactive-plan.md)'s gap 8, and until it is closed the
+Phase 5 loop stops here. `--force` builds the table anyway, for a test; do not
+read a number off it.
 
 `evaluate` runs every strategy through the identical driver on identical flow, on seeds
 the policy was **not** calibrated on, and settles the comparison on session P&L with a
