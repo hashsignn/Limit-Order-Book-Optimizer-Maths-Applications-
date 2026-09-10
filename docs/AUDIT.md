@@ -6446,10 +6446,18 @@ are for a person who knows this codebase.
   session-snapshot machinery on a timer, reseed at the marker with the guard
   relative to the current touch. Needs a fresh 8-hour capture to validate.
   Closes **M17**.
-- **Give the acceptance test power back** — 6 h. Raise the seed count until the
-  interval excludes zero, or compare on an inventory-neutral statistic. This is
-  only worth doing *after* C1 is closed, because the current baselines make the
-  comparison meaningless regardless of its width. Closes **M18**.
+- ~~**Give the acceptance test power back**~~ — **DONE, and the diagnosis was
+  wrong.** The test is not underpowered: at 16 seeds it resolves its effect
+  precisely, and 3 to 8 seeds would do. Neither remedy proposed here was the
+  answer. More seeds shrink an interval that is already tight enough; the
+  "inventory-neutral statistic" reached for was `Attribution::total`, which is a
+  per-fill markout at 100 ms and not a decomposition of session P&L at all --
+  differencing it against P&L produced a residual that was called the closing
+  position and was not. The exact split is in `RunResult::flat_pnl()` and
+  `walk_exposure()`, and on it the closing position accounts for 3% of the
+  acceptance interval rather than the 98.7% first claimed, while the policy
+  loses to the baselines at a flat price as well as on session P&L. See
+  `docs/KNOWN-ISSUES.md` issue 8. Closes **M18**.
 - **The price impact of a trade**, which blocks the mean-reversion ratio,
   adverse selection and the lift together (`docs/06-queue-reactive-plan.md`).
 

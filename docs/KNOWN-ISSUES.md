@@ -619,75 +619,297 @@ with the trade, against 86.7% on the capture.
 
 ---
 
-## 8. The acceptance test was ranking on a coin flip — FIXED
+## 8. The acceptance test's "trading edge" was not a decomposition of its P&L
 
-`docs/AUDIT.md` M18 recorded the Phase 5 acceptance test as noise-dominated:
-mean −1,136 with a 95% interval of [−3,872, +1,516], 6 of 16 seeds positive. The
-proposed remedy was to raise the seed count until the interval excluded zero.
+`docs/AUDIT.md` M18 recorded the Phase 5 acceptance test as noise-dominated and
+proposed raising the seed count until the interval excluded zero. That remedy
+would not have worked -- the test resolves its number precisely at 16 seeds --
+and the first attempt to explain *why* got the explanation wrong.
 
-That remedy would not have worked, and the reason is worth recording.
+### What this entry used to say, and why it was wrong
 
-### What it looks like now
-
-With the baselines fixed (issue 6 above, which is what gave the test any power
-at all), 16 seeds at 120,000 events:
+It said 98.7% of the per-seed variance was the closing position, and that on
+trading edge `TabulatedMDP` beat `ConstantSpread` by +1,753 with an interval
+excluding zero on the positive side. Both numbers came from splitting session
+P&L as
 
 ```
-  TabulatedMDP minus ConstantSpread, paired by seed:
-    mean -3794.8   95% CI [-5224.5, -2391.2]   over 16 seeds, 2 of them positive
-    FAILS: significantly WORSE than the best baseline
-    per-seed sd 3043.8  =  trading edge sd 337.8  +  closing-mark sd 3003.3
-    to resolve an effect this size at 95%/80%: 6 seeds (have 16)
-    the closing position, not the trading, is what this interval is mostly measuring
-    on TRADING EDGE alone (inventory-neutral): mean +1753.3  95% CI [+1591.8, +1907.2]  (excludes zero, positive)
+    trading edge  =  Attribution::total
+    closing mark  =  pnl() - Attribution::total
 ```
 
-### The two things that says
+**That is not a split.** `Attribution::total` is spread capture minus adverse
+selection measured on each fill at a **100 ms markout**. Session P&L is cash
+exchanged plus the open position at the closing mid. The difference between them
+is not the closing position -- it is everything the 100 ms window missed, which
+on a run of hours is nearly all of it. The residual was labelled a closing mark
+and it was a horizon error.
 
-**The test is not underpowered.** Six seeds would resolve an effect of that size
-and it has sixteen. It resolves its number precisely. The number is the wrong
-one.
+It shows in the growth law. A bounded position on a random walk has a spread
+that grows as the square root of the run; the residual grew as `n^0.85`. Nothing
+about a closing position can do that.
 
-**98.7% of the variance is the closing position.** Of a per-seed standard
-deviation of 3,043.8, the trading edge contributes 337.8 and the mark on the
-leftover position contributes 3,003.3. Session P&L is trading edge plus that
-mark, and the mark is a large zero-mean term: a strategy holding 59 shares at
-the end of a 2,200-second run is exposed to a price walk whose sign is a coin
-flip and whose scale dwarfs a run's worth of spread capture.
+### The exact split, which is available and was not used
 
-So on the statistic being ranked, `TabulatedMDP` loses decisively. On trading
-edge, it beats `ConstantSpread` by +1,753 with an interval of [+1,592, +1,907]
-that excludes zero on the *positive* side. Both are true. The first is dominated
-by how much inventory a strategy happened to be carrying when the clock stopped;
-the second is what it did while trading.
+Session P&L is cash plus the open position at the closing mid, and only one term
+in it touches the closing mid:
 
-More seeds shrink the interval around a mean that is itself mostly the average
-of coin flips. They do not separate skill from position risk, because that is not
-a sampling problem.
+```
+    pnl  =  cash + I x M_final
+         =  (cash + I x M_open)  +  I x (M_final - M_open)
+            \------ flat P&L ------/   \---- price-walk term ----/
+```
+
+The first term is what the run would have made had the price never moved: it is
+spread capture, valuing whatever is left over at the price it started at. The
+second is a position times a walk. They sum to session P&L identically.
+`RunResult::flat_pnl()` and `RunResult::walk_exposure()` are those two terms.
+
+### What the exact split says
+
+The two halves are strongly **anti-correlated** -- a maker that ends short has
+banked the cash for being short, so a run whose flat P&L is high has a walk term
+that is low -- so comparing their standard deviations proves nothing, and each
+can exceed the sd of their sum. The share of the spread that the closing
+position accounts for is a regression, and it reads:
+
+```
+  16 seeds, TabulatedMDP minus the best baseline
+
+  events/seed   opponent            total sd   walk sd   walk explains   flat-price mean
+     120,000    ConstantSpread         3400      5407          3%        -2029  [-4655, +821]
+     480,000    AvellanedaStoikov      7693     10544         42%       -11709  [-15427, -7878]
+   1,815,598    InventorySkew         23533     13427          2%       -39751  [-51560, -27489]
+```
+
+**The closing position explains 3% of the acceptance interval, not 98.7%.** And
+at a flat price -- with the price walk removed exactly, not approximately --
+`TabulatedMDP` does not beat the best baseline at any run length. At the
+acceptance run length the interval spans zero; at four times it and at fifteen
+times it, the interval excludes zero on the *negative* side.
+
+So the previous entry's conclusion is withdrawn. The policy is not a good trader
+being punished by a coin flip. It loses on the trading.
+
+### Where the +1,753 came from, and what it was telling us
+
+It was real, and it was about a horizon. `TabulatedMDP`'s fills genuinely look
+better than `ConstantSpread`'s 100 ms after they happen: 2,720.7 of spread
+capture against 520.4, and adverse selection that *pays* the maker 476.3 rather
+than 979.2. The money is lost afterwards.
+
+The longest markout this repository measures is **1 second**. The simulator's
+price changes its touch 0.0778 times a second -- once every 12.9 seconds. Every
+markout horizon in `kMarkoutHorizons` is shorter than the process's own
+price-move timescale, the longest by a factor of 13, so what they measure is the
+queue refilling after a trade rather than any information in it. That is also
+why adverse selection comes out as a gain: on this process, a fill at the touch
+is usually followed by the price coming back.
+
+Attribution stays as the diagnostic it is. It is not a decomposition of session
+P&L and must not be differenced against it.
+
+### Does a longer run fix the test?
+
+Only if there is an edge to accumulate, and the flat-price column above says
+there is not. The arithmetic is still worth stating, because it is what would
+apply to a strategy that did have one: flat P&L accumulates linearly in the run
+length and the walk term grows as its square root, so their ratio grows as the
+square root of the run. `apps/evaluate` prints the run length at which the
+challenger's own flat P&L would reach twice its own walk sd -- on the challenger
+alone, deliberately, because the *paired* version is not stable: the best
+baseline is chosen per run and it moves with run length (ConstantSpread at
+120,000 events, AvellanedaStoikov at 480,000, InventorySkew at 1,815,598), and
+the answer swung from 1.8M events to 13.7M as a result. When the challenger's
+flat P&L is negative, as it is here, the tool says so rather than printing a
+number.
+
+That the opponent moves at all is issue 6's degenerate criterion surfacing in a
+second place.
+
+### Flattening the closing position does not fix it either
+
+An earlier proposal was to charge the closing position at the price of
+*flattening* it rather than marking it at the mid, "a real cost with a much
+smaller variance than a coin flip on the mid".
+
+Flattening does not remove the mark. It **realises** it. A strategy holding 37
+shares sells them into the book at the prevailing price, which is the mid the
+mark was taken at, less the cost of crossing:
+
+```
+  mean closing position          37 shares  (of a permitted +-50)
+  crossing cost at 0.5 ticks     ~19 ticks x shares   -- a CONSTANT, given the book
+  sd of the walk term it would realise   5407 ticks x shares
+```
+
+It moves the mean by about 19 and the variance by nothing. The variance was
+never in the choice of exit price; it is in where the price had got to, and
+closing at that price keeps all of it.
 
 ### What changed
 
-`apps/evaluate` now prints, under every paired comparison:
+`include/lob/strat/driver.hpp` gained `start_mid`, `flat_pnl()` and
+`walk_exposure()` -- the exact split, with the algebra written beside it.
 
-- the per-seed standard deviation, **split** into its trading-edge and
-  closing-mark parts, so it is visible which one the interval is resolving;
-- the number of seeds needed to resolve the observed effect at 95%/80%, or a
-  note that the effect is indistinguishable from zero and more seeds will not
-  help;
-- a warning when the closing mark dominates;
-- the same paired comparison computed on **trading edge alone**.
+`apps/evaluate` uses them instead of differencing attribution against P&L, and
+under every paired comparison now prints the per-seed sd with the **share the
+price walk explains by regression**, the paired comparison recomputed at a flat
+price, the run length that would be needed if there were an edge to accumulate,
+and the seeds needed to resolve the observed effect.
 
-Session P&L stays the headline. It is the right number to report -- a position
-carried to the end is a real cost and `include/lob/strat/driver.hpp` is right
-that a decomposition credits nothing to a strategy that made its money by
-holding. It is the wrong number to *rank* on at this seed count, and the tool now
-says so rather than leaving a reader to conclude the policy is bad at trading.
-
-**Still open.** Ranking on trading edge alone would credit a strategy that
-accumulates inventory and never closes it. The honest fix is a comparison that
-charges the closing position at the price of flattening it rather than marking it
-at the mid -- that is a real cost with a much smaller variance than a coin flip
-on the mid. That needs the impact model in issue 7, which is why the two are the
-same piece of work.
+Its results table gained an **`end inv`** column, which the prose above that
+table had been promising since before the column existed: the mean *magnitude*
+of the closing position, because its sign is a coin flip. It reads 10 to 37
+shares of a permitted 50. `peak inv` stays beside it and says something
+different -- every strategy reaches its cap during a run and overshoots it by
+about a fifth (55 to 59 against 50), which is latency filling a quote decided
+before the limit was hit.
 
 ---
+
+## 9. The simulator's volatility is right only because its tick is 24x too fat
+
+The standing complaint was that the simulated price barely moves: 0.06 ticks a
+second against ethusd's 2.41, a factor of 40. Issue 7 answered it by converting
+to basis points -- 0.060 bp/s against 0.098 -- and concluded the gap was tick
+resolution rather than a missing mechanism.
+
+**That conversion was measuring the wrong thing, and the conclusion it supported
+was half right in a way that hid the real number.**
+
+### ticks/s x tick_bp is not volatility
+
+It is *total variation*: the length of the path the price traced. Variance per
+unit time is rate times step **squared**. A coarse tick crossed rarely and a
+fine tick crossed often can have the same path length and wildly different
+variance, and that is exactly the case here.
+
+The volatility is the standard deviation of the log return over a fixed clock.
+On non-overlapping one-second windows:
+
+```
+                    tick_bp   ticks/s   path (bp/s)   sigma(1 s)
+  ethusd             0.0408      2.41         0.098       0.2918
+  btcusd             0.0013    103.03         0.134       0.3891
+  simulator          0.9890      0.06         0.059       0.3007
+```
+
+The simulator lands between the two instruments. On the statistic that actually
+governs an inventory's risk, its volatility is not 40x low, or 1.6x low. It is
+right.
+
+### And that is the problem
+
+It is right because the simulator runs at a mid of 10,000 ticks, where one tick
+is worth 1.0 basis points. Ethusd trades at 245,422 ticks, where one tick is
+worth 0.041. Run **the identical process** at ethusd's price level -- the only
+thing that changes is the denominator converting ticks to bp -- and:
+
+```
+  the same queue-reactive process, two price levels, same seed, 2M events
+
+    mid  10,000 ticks   0.0778 touch changes/s   0.0680 ticks/s   sigma(1s) 0.2885 bp
+    mid 245,422 ticks   0.0778 touch changes/s   0.0680 ticks/s   sigma(1s) 0.0121 bp
+    ethusd, measured    0.3910 touch changes/s   2.4111 ticks/s   sigma(1s) 0.2918 bp
+```
+
+The dynamics are bit-identical, as they must be: this is a tick-lattice process
+and `FlowConfig::mid` is only where it starts. **On the market's own tick grid
+the model produces one twenty-fourth of the market's volatility.** The fat tick
+is what has been hiding that, and it was never a modelling choice -- 10,000 is
+the default from the first stress generator, written long before anything was
+calibrated.
+
+This is the paper's own finding, worse. Huang, Lehalle and Rosenbaum report
+their purely order-book-driven Model III giving 5 bps against an empirical 14,
+a factor of 2.8, and say plainly that mechanical volatility cannot be the whole
+story. Ours is a factor of 24.
+
+### The mechanism, in one line
+
+`reference_price_step` moves the reference price by **exactly one tick** when a
+best queue empties. `queue_price(side, level) = mid -+ level`, so the modelled
+queues sit at consecutive ticks and the level behind the touch is always exactly
+one tick away. The model has no way to express a gap.
+
+The real book is nothing like that. Measured on all three captures -- the touch
+change rate, how far the mid moves when it changes, and how many distinct prices
+within ten ticks of the touch hold anything at all:
+
+```
+            touch/s   mean jump   median   0-tick   spread med   levels within 10 ticks
+  ethusd      0.391        6.15      4.0     0.5%            1            1.56
+  btcusd      0.589      174.87     60.0     0.0%            1            1.05
+  xrpusd      1.249        3.15      1.0     5.5%            1            2.08
+  simulator   0.078        0.87      1.0     ~0               1            4 by construction
+```
+
+Every book is one tick wide at the touch and then largely empty behind it: of
+the ten prices nearest the touch, between one and two hold anything. When a best
+queue clears, the next price with something on it is not the next tick.
+
+Ethusd's own reconstruction develops holes near the touch (issue 1), so read its
+occupancy as a lower bound -- but btcusd and xrpusd are not subject to that and
+say the same thing, and btcusd's 60-tick median jump is 0.078 bp on its finer
+grid, in the same place as ethusd's 4 ticks at 0.163 bp. The sparseness is the
+market, not the reconstruction.
+
+So the deficit factors cleanly, and neither factor is small:
+
+```
+                        ethusd    simulator   short by
+  touch changes /s       0.391       0.0778      5.0x
+  ticks per change       6.15        0.87        7.1x
+  ------------------------------------------------------
+  ticks /s               2.41        0.068      35x
+  sigma at equal tick    0.2918 bp   0.0121 bp  24x
+```
+
+`FlowConfig::Qr::kLevels = 4` is part of it -- the modelled book stops four
+ticks out -- but raising it alone would make things worse, not better. The model
+already keeps *more* prices occupied near the touch than any of the three
+instruments do (four against one to two), because its four queues sit at
+consecutive ticks and are all populated. Adding levels adds more consecutive
+ticks. What is missing is a **spacing** distribution: the modelled queues have to
+be allowed to sit apart, so that clearing one moves the price by the gap rather
+than by one tick.
+
+### The number this all comes down to
+
+Spread and volatility are both in basis points, so their ratio survives any
+choice of tick. It is what says whether making a market on a book is easy:
+
+```
+                mean spread   sigma(1 s)   spread / sigma
+  ethusd           0.0764 bp     0.2918          0.26
+  btcusd           0.0299 bp     0.3891          0.08
+  simulator        1.0621 bp     0.3007          3.53
+```
+
+**A maker in this simulator is paid 13.6x more spread per unit of price risk
+than a maker on ethusd, and 44x more than one on btcusd.** That is the single
+most consequential distortion in the repository, and every Phase 4 and Phase 5
+result sits on top of it. It is also why every strategy in `apps/evaluate` shows
+a trading edge whose interval excludes zero on the positive side: on this book,
+quoting is nearly free money.
+
+It does **not** distort the comparison *between* strategies. Everything in the
+model is denominated in ticks, so `FlowConfig::mid` scales edge and risk by the
+same factor and cancels out of any paired difference. What it distorts is every
+comparison against the real market -- which is what Phase 6 is for.
+
+### What changed
+
+`tools/impact.py` now reports `sig(1s)`, `spr_bp` and `spr/sig` and no longer
+reports `bp/s`, which was labelled "scale-free volatility -- THIS is comparable"
+and was neither. The docstring records why.
+
+**Not fixed.** Closing the gap means giving the reference price a jump-size
+distribution fitted to the capture and raising the touch-clearing rate about
+fivefold, which is a recalibration of the whole flow rather than a patch --
+every rate in `FlowConfig::Qr` is fitted against the current one. Raising
+`FlowConfig::mid` on its own would make the tick honest and the volatility 24x
+too small, which is worse than the present state because it would be wrong in a
+direction nothing measures. Leave the fat tick until the jump distribution
+exists, and read `spr/sig` beside any result that claims a strategy makes money.

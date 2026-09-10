@@ -320,5 +320,44 @@ int main() {
     CHECK_NEAR(RunResult::budget_floor_s(dc.quote_every_ns), 0.1, 1e-12);
   }
 
+  // ---- session P&L splits EXACTLY into a flat-price part and a walk part ----
+  //
+  // apps/evaluate used to split it as Attribution::total and the residual
+  // against it, and call that residual the closing position's mark. It is not
+  // one. Attribution is a per-fill markout at a 100 ms horizon; its residual
+  // against session P&L is everything that window missed. Measured on this
+  // process at 480,000 events, seed 1000: the true walk term was 115.0 ticks x
+  // shares and the residual was -31,125.5, a factor of 270, and across eight
+  // seeds the residual's spread grew as n^0.85 where a bounded position on a
+  // random walk has to grow as the square root.
+  //
+  // The two identities below are what make the real split a split. They are
+  // exact, not approximate: no tolerance is needed and none is given beyond
+  // floating-point.
+  {
+    QuoteParams qp; qp.size = 10; qp.max_inventory = 50; qp.horizon = 1.0;
+    SimConfig c;
+    c.use_latency = false;
+    c.flow        = FlowConfig::ethusd_queue_reactive();
+    c.flow.seed   = 1000;
+    c.flow.mid    = 10'000;
+    const RunResult r = run_strategy(JoinTouch{qp}, c, 120'000);
+
+    CHECK_NEAR(r.start_mid, static_cast<double>(c.flow.mid), 1e-12);
+    // Only the walk term touches the closing mid, and it is exactly a position
+    // times a price difference.
+    CHECK_NEAR(r.walk_exposure(),
+               static_cast<double>(r.stats.inventory) * (r.final_mid - r.start_mid), 1e-9);
+    // The two parts sum to session P&L identically.
+    CHECK_NEAR(r.flat_pnl() + r.walk_exposure(), r.pnl(), 1e-6);
+    // A position times a price move cannot exceed the position reached times
+    // the whole move. The residual this replaced routinely does.
+    ::lobtest::report(std::fabs(r.walk_exposure()) <=
+                          static_cast<double>(r.peak_inventory)
+                              * std::fabs(r.final_mid - r.start_mid) + 1e-6,
+                      "the walk term is bounded by position x price move",
+                      __FILE__, __LINE__, std::to_string(r.walk_exposure()));
+  }
+
   return lobtest::summary("calibration");
 }

@@ -31,9 +31,37 @@ number below then comes out near its null value.
                 Those are different statistics wearing one name, and comparing
                 them directly is what produced the standing claim that the
                 simulator's price is a random walk where the market's trends.
-                In BASIS POINTS PER SECOND the two volatilities are 0.098 and
-                0.060 -- within a factor of 1.6. The gap is tick resolution, not
-                a missing mechanism.
+
+    sig(1s)     Realised volatility: the standard deviation of the log mid
+                return over non-overlapping one-second windows, in bp.
+
+                THIS COLUMN REPLACED A WRONG ONE. It used to read `bp/s`,
+                ticks/s times tick_bp, described here as "scale-free volatility
+                -- THIS is comparable". It is not volatility. It is total
+                variation, the length of the path, and variance per unit time is
+                rate times step SQUARED. A coarse tick crossed rarely and a fine
+                tick crossed often have the same path length and very different
+                variance, which is precisely the case here: ethusd and this
+                simulator agreed at 0.098 and 0.060 bp/s, and that agreement was
+                an artefact. On sig(1s) they read 0.292 and 0.289 -- still
+                agreeing, and still an artefact, because the simulator is
+                running at a mid of 10,000 ticks where one tick is 1.0 bp.
+                Run the identical process at ethusd's own price level and
+                nothing about it changes except the denominator:
+
+                    mid 10,000 ticks   0.0778 touch changes/s   sig 0.2885 bp
+                    mid 245,422 ticks  0.0778 touch changes/s   sig 0.0121 bp
+                    ethusd             0.3910 touch changes/s   sig 0.2918 bp
+
+                So on the market's own tick grid the model produces one
+                twenty-fourth of the market's volatility, and the fat tick is
+                what hides it. See docs/KNOWN-ISSUES.md issue 9.
+
+    spr/sig     Mean quoted spread in bp, over sig(1s). What a maker is paid for
+                one round trip, per one second of price risk. Both halves are in
+                basis points, so this is the one column no choice of tick size
+                can flatter, and it is the number that says whether making a
+                market on a book is easy or hard.
 
     ac1, ac10   Autocorrelation of the trade SIGN at lags 1 and 10. Order
                 splitting (Lillo-Mike-Farmer) makes this positive and slowly
@@ -64,7 +92,7 @@ import random
 
 
 def load_mid(path):
-    ts, mid = [], []
+    ts, mid, spr = [], [], []
     with open(path, newline="") as f:
         r = csv.reader(f)
         next(r, None)
@@ -77,8 +105,33 @@ def load_mid(path):
                 continue
             if b <= 0 or a <= 0:
                 continue
-            ts.append(t); mid.append(0.5 * (b + a))
-    return ts, mid
+            ts.append(t); mid.append(0.5 * (b + a)); spr.append(a - b)
+    return ts, mid, spr
+
+
+def realised_sigma(ts, mid, window_ms):
+    """Standard deviation of the log mid return over NON-OVERLAPPING windows,
+    in basis points.
+
+    This, and not ticks/s, is the volatility. Variance per unit time is
+    rate x step^2, so a coarse tick crossed rarely and a fine tick crossed often
+    can traverse wildly different numbers of ticks at the same variance -- which
+    is exactly the case between this simulator and the captures. Sampling on a
+    fixed clock rather than on events also makes the number independent of how
+    densely the book happened to be written out.
+    """
+    if len(ts) < 3:
+        return float("nan")
+    n = int((ts[-1] - ts[0]) // window_ms)
+    if n < 8:
+        return float("nan")
+    px = []
+    for k in range(n + 1):
+        i = bisect.bisect_right(ts, ts[0] + k * window_ms) - 1
+        px.append(mid[max(i, 0)])
+    r = [math.log(px[k + 1] / px[k]) * 1e4 for k in range(n)]
+    m = sum(r) / n
+    return math.sqrt(sum((x - m) ** 2 for x in r) / (n - 1))
 
 
 def load_trades(path):
@@ -116,7 +169,7 @@ def moved(ts, mid, t0, tau_ms):
 
 def scorecard(csvdir, label, tau_ms, seed=20260904):
     d = pathlib.Path(csvdir)
-    ts, mid = load_mid(d / f"{label}_mid.csv")
+    ts, mid, spr = load_mid(d / f"{label}_mid.csv")
     trades = load_trades(d / f"{label}_trades.csv")
     if len(ts) < 10 or not trades:
         return None
@@ -127,7 +180,12 @@ def scorecard(csvdir, label, tau_ms, seed=20260904):
     tick_bp = 1e4 / level if level else float("nan")
     traversed = sum(abs(mid[i] - mid[i - 1]) for i in range(1, len(mid)))
     ticks_per_s = traversed / span_s if span_s > 0 else float("nan")
-    bp_per_s = ticks_per_s * tick_bp
+    sigma_1s = realised_sigma(ts, mid, 1000.0)
+    spread_bp = (sum(spr) / len(spr)) * tick_bp if spr else float("nan")
+    # What a maker is paid for one round trip, over one second of price risk.
+    # Both numerator and denominator are in basis points, so this survives any
+    # choice of tick size -- which is the whole reason it is here.
+    sp_sigma = spread_bp / sigma_1s if sigma_1s > 0 else float("nan")
 
     # ---- lift, adverse selection, and mean signed impact ----
     n_print = n_move = n_adv = n_adv_given_move = 0
@@ -198,7 +256,8 @@ def scorecard(csvdir, label, tau_ms, seed=20260904):
     return dict(label=label, span_s=span_s, trades=n_print, moves=len(moves),
                 p_print=p_print, p_rand=p_rand, lift=lift, adverse=adverse,
                 impact=impact, adv_given_move=adv_given_move,
-                tick_bp=tick_bp, ticks_per_s=ticks_per_s, bp_per_s=bp_per_s,
+                tick_bp=tick_bp, ticks_per_s=ticks_per_s,
+                sigma_1s=sigma_1s, spread_bp=spread_bp, sp_sigma=sp_sigma,
                 eta=eta, ac1=ac(1), ac10=ac(10),
                 flat=1.0 - p_print)
 
@@ -228,21 +287,29 @@ def main() -> int:
     print(f"\ntrade price impact at tau = {a.tau_ms:.0f} ms\n")
     print(f"{'':<12}{'trades':>8}{'span_s':>9}{'P(mv|prt)':>11}{'P(mv|rnd)':>11}"
           f"{'lift':>7}{'adverse':>9}{'adv|mv':>9}{'impact_bp':>11}"
-          f"{'tick_bp':>9}{'ticks/s':>9}{'bp/s':>8}{'eta':>7}{'ac1':>7}{'ac10':>7}")
-    print("-" * 143)
+          f"{'tick_bp':>9}{'ticks/s':>9}{'sig(1s)':>9}{'spr_bp':>8}{'spr/sig':>9}"
+          f"{'eta':>7}{'ac1':>7}{'ac10':>7}")
+    print("-" * 160)
     for r in rows:
         print(f"{r['label']:<12}{r['trades']:>8}{r['span_s']:>9.0f}"
               f"{100*r['p_print']:>10.1f}%{100*r['p_rand']:>10.1f}%"
               f"{r['lift']:>7.2f}{100*r['adverse']:>8.1f}%{100*r['adv_given_move']:>8.1f}%"
               f"{r['impact']:>11.4f}"
-              f"{r['tick_bp']:>9.4f}{r['ticks_per_s']:>9.2f}{r['bp_per_s']:>8.3f}"
+              f"{r['tick_bp']:>9.4f}{r['ticks_per_s']:>9.2f}"
+              f"{r['sigma_1s']:>9.4f}{r['spread_bp']:>8.4f}{r['sp_sigma']:>9.2f}"
               f"{r['eta']:>7.2f}{r['ac1']:>7.2f}{r['ac10']:>7.2f}")
     print("\n  lift       1.0 = a print says nothing about the next second")
     print("  adverse    50% = a coin flip; a maker's markout is made of this")
     print("  adv|mv     of the times the mid DID move, how often it went with the trade")
     print("  impact_bp  mean signed mid change after a print, in basis points")
     print("  tick_bp    what one tick is worth, in basis points")
-    print("  bp/s       scale-free volatility: ticks/s x tick_bp. THIS is comparable")
+    print("  sig(1s)    realised volatility: sd of the 1-second log return, in bp.")
+    print("             THIS is the comparable number, not ticks/s")
+    print("  spr_bp     mean quoted spread, in basis points")
+    print("  spr/sig    what a maker is paid per round trip, over one second of")
+    print("             price risk. Both in bp, so it survives any tick size --")
+    print("             and it is the single number that says whether making a")
+    print("             market on this book is easy or hard")
     print("  eta        0.5 = random walk -- but only comparable at equal tick_bp")
     print("  ac1/10     trade-sign autocorrelation; order splitting makes it positive")
     return 0

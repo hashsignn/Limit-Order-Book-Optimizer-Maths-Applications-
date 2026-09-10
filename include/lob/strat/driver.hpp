@@ -83,6 +83,27 @@ struct RunResult {
   }
   std::vector<double> per_fill_pnl;   // kept so runs can be differenced pairwise
   double              final_mid = 0.0;
+  // The mid the run OPENED on, so session P&L can be split into the part that
+  // depends on where the price ended and the part that does not. Session P&L is
+  //
+  //     realised cash  +  inventory x final_mid
+  //   = (realised cash + inventory x start_mid)  +  inventory x (final_mid - start_mid)
+  //     \------------- flat_pnl ------------/     \------ walk_exposure -----/
+  //
+  // and only the second term touches the final mid. The first is what the run
+  // would have made had the price never moved; the second is a position times a
+  // random walk, whose sign is a coin flip and whose scale grows as the square
+  // root of the run. Splitting on Attribution::total instead -- which is what
+  // apps/evaluate used to do -- does not decompose anything: attribution is a
+  // per-fill markout at one horizon and its residual against session P&L is not
+  // the closing position, it is everything the markout window missed.
+  double              start_mid = 0.0;
+  [[nodiscard]] double flat_pnl() const noexcept {
+    return stats.realised_pnl + static_cast<double>(stats.inventory) * start_mid;
+  }
+  [[nodiscard]] double walk_exposure() const noexcept {
+    return static_cast<double>(stats.inventory) * (final_mid - start_mid);
+  }
   // Peak absolute position reached during the run. A limit that is only
   // checked when the strategy is consulted is not a limit, and a comparison
   // between strategies that breached it by different amounts is a comparison
@@ -252,6 +273,7 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
   r.requotes = requotes;
   r.span_ns   = last_ts > first_ts ? last_ts - first_ts : 0;
   r.final_mid = last_mid;
+  r.start_mid = static_cast<double>(cfg.flow.mid);
   r.peak_inventory = peak;
   r.placements = std::move(places);
   r.attr     = attribute(mk.fills(), dc.markout_idx, FeeSchedule{}, last_mid, sim.stats().inventory);

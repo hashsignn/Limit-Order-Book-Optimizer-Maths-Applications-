@@ -15,9 +15,17 @@ the offline MDP solve with the table it ships (Phase 5).
 The Phase 5 criterion — "the tabulated policy beats the best Phase 4 baseline out
 of sample" — is **not met**, and the reason is more interesting than a number:
 value iteration on this process converges to *join the touch*. 97.8% of the
-solved table is `JoinTouch`'s rule exactly. See
-[`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md) 6 and
+solved table is `JoinTouch`'s rule exactly. It also loses with the price walk
+removed exactly, so the leftover position is not what is costing it. See
+[`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md) 6 and 8 and
 [`docs/05-roadmap.md`](docs/05-roadmap.md).
+
+Read any of that beside issue 9. The simulator's volatility matches the captures
+in basis points, but only because it runs on a tick worth 1.0 bp where ethusd's
+is worth 0.041: on the market's own grid the process produces a twenty-fourth of
+the market's volatility, and a maker in it is paid 13.6x more spread per unit of
+price risk than a maker on ethusd. Every Phase 4 and Phase 5 number sits on top
+of that.
 
 ## Build and run
 
