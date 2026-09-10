@@ -4,18 +4,38 @@ An industry-grade market-making limit order book optimizer: quote placement, que
 modelling, and a first-class measurement plane for time delays, distributions and
 latency.
 
-**Status: hardening — fuzzing and property tests.** The design documents are in
-`docs/`; the code is the measurement plane (Phase 0), the market-by-order book it
-measures (Phase 1) together with the Bitstamp L3 decoder that feeds it real data, the
-feature engine that reads the book (Phase 2a), and the matching engine,
-latency model and simulator loop (Phase 3), and the baseline strategies with their
-P&L attribution (Phase 4). See [`docs/05-roadmap.md`](docs/05-roadmap.md).
+**Status: Phase 5 built, its acceptance criterion unmet — and that is written down
+rather than glossed.** The design documents are in `docs/`; the code is the
+measurement plane (Phase 0), the market-by-order book it measures (Phase 1)
+together with the Bitstamp L3 decoder that feeds it real data, the feature engine
+that reads the book (Phase 2a), the matching engine, latency model and simulator
+loop (Phase 3), the baseline strategies with their P&L attribution (Phase 4), and
+the offline MDP solve with the table it ships (Phase 5).
+
+The Phase 5 criterion — "the tabulated policy beats the best Phase 4 baseline out
+of sample" — is **not met**, and the reason is more interesting than a number:
+value iteration on this process converges to *join the touch*. 97.8% of the
+solved table is `JoinTouch`'s rule exactly. It also loses with the price walk
+removed exactly, so the leftover position is not what is costing it. See
+[`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md) 6 and 8 and
+[`docs/05-roadmap.md`](docs/05-roadmap.md).
+
+Read any of that beside issue 9. The simulator's volatility matched the captures
+in basis points only because it ran on a tick worth 1.0 bp where ethusd's is
+worth 0.041; on the market's own grid it produced a twenty-fourth of the
+market's volatility. The modelled book now reaches sixteen ticks behind the
+touch instead of three, and the reference price falls into the gap when a best
+queue clears instead of stepping one tick. That closed the price impact of a
+trade — 0.629 bp against ethusd's 0.676, from 0.084 — and made the price trend
+for the first time. What is left is one thing: the touch clears 5.8x too rarely,
+which is `docs/06`'s gap 8 and is why the Phase 5 table cannot yet be re-solved
+on this process.
 
 ## Build and run
 
 ```bash
 cmake --preset release && cmake --build build/release
-ctest --preset release            # 5 suites, ~90 assertions
+ctest --preset release            # 26 tests across 20 files
 
 ./build/release/latency_demo         # per-stage attribution + HDR percentile curve
 ./build/release/jitter_probe 10      # this machine's jitter floor
@@ -26,11 +46,13 @@ ctest --preset release            # 5 suites, ~90 assertions
 ./build/release/backtest            # compare the five baseline strategies
 ./build/release/fuzz_book -runs=200000      # fuzz the book's event path
 ./build/release/fuzz_matching -runs=200000  # fuzz the matching engine
+./build/release/fuzz_bitstamp -runs=200000 -max_len=4096   # fuzz the JSON decoder
 ./tools/jitter_baseline.sh 10        # full machine baseline, for docs/BASELINE.md
 ```
 
 Presets: `release`, `debug`, `asan` (ASan+UBSan), `tsan`. Tests pass under all four,
-on GCC 13 and Clang 18.
+on GCC 13 and Clang 18. Every preset is built and run in CI; `tsan` was defined
+and run by nothing until the September audit.
 
 ## What Phase 0 built
 
@@ -92,7 +114,7 @@ rather than measured. See [`docs/02`](docs/02-data-and-protocols.md) §3.1–3.2
 
 ```bash
 py tools/mdp_params.py --csv csv --out policy       # the process, measured
-./build/solve --pair ethusd --out policy/ethusd.bin # solved offline
+./build/release/solve --pair ethusd --out policy/ethusd.bin # solved offline
 ```
 
 An MDP over `(inventory, bid quote, ask quote, imbalance)` — 14,080 states, 16 actions —
@@ -114,11 +136,11 @@ The buckets are now fractions of a reference depth that travels in the table hea
 realised and modelled hazard agree within 3× across the whole range.
 
 ```bash
-./build/stats --synthetic 4000000 --grid-ms 0.5 --warmup 1 --label simcal --outdir simcsv
+./build/release/stats --synthetic 4000000 --grid-ms 0.5 --warmup 1 --label simcal --outdir simcsv
 py tools/mdp_params.py --csv simcsv --out simpolicy --dt-ms 0.5 --only simcal --order-size 10
-./build/solve --params simpolicy/mdp.json --pair simcal --out simpolicy/simcal.bin
-./build/evaluate --table simpolicy/simcal.bin --tune   # choose preferences here
-./build/evaluate --table simpolicy/simcal.bin          # the acceptance test
+./build/release/solve --params simpolicy/mdp.json --pair simcal --out simpolicy/simcal.bin
+./build/release/evaluate --table simpolicy/simcal.bin --tune   # choose preferences here
+./build/release/evaluate --table simpolicy/simcal.bin          # the acceptance test
 ```
 
 `evaluate` runs every strategy through the identical driver on identical flow, on seeds

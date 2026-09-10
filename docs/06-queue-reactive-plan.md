@@ -274,14 +274,64 @@ should end up carrying roughly the share this implies, not more.
    `mdp_params` refused the process outright. With the anchor fixed: median
    spread 1 tick, 54% at one tick, and the process is usable.
 
-   What remains is the calibration. `theta` is 1.0, the paper's "purely order
-   book driven" setting, and is **not** fitted to the ten-minute volatility and
-   mean-reversion ratio the paper uses. `theta_reinit` and the redraw from the
-   invariant measure are not implemented at all.
+   **Now done.** `theta_reinit` is implemented at 0.3 and the redraw from the
+   invariant measure is `reinitialise()`, sampling Model I's closed-form
+   stationary law per level by inverse CDF. `theta` was swept against the
+   volatility and the mean-reversion ratio and stays at 1.0 for a measured
+   reason: it governs how *often* the price moves, not whether successive moves
+   are correlated, and lowering it makes eta monotonically worse. See the theta
+   section below.
 
-6. **Order sizes are uniform on a range.** The paper assumes one constant size
-   per limit (the AES); arXiv:2405.18594 extends it to state-dependent size
-   distributions and reports it matters.
+6. ~~**Order sizes are uniform on a range.**~~ **Done.** `FlowConfig::Qr` carries
+   a seventeen-bin `order_size_aes` table normalised to a mean of one AES, drawn
+   by `draw_size` for resting orders and for the market orders that consume
+   them, and `reinitialise()` draws from it too. `qr_add` used to give every
+   order exactly one AES, which capped every trade at one resting order: 12.4%
+   of trades took exactly one order and 0.0% took more. See
+   `docs/KNOWN-ISSUES.md` issue 7.
+
+7. ~~**The modelled queues sit at consecutive ticks, so the price can only move
+   one tick at a time.**~~ **Done.** `kLevels` is 16, levels 4 and beyond
+   repeating level 3 -- which the estimator measures directly at level 4 (0.191
+   adds/s against level 3's 0.191, 0.196 cancels against 0.182) and which is the
+   paper's own Q_4/Q_5 finding. And `reference_price_step` now moves the price
+   to the next resting order on the emptied side rather than by one tick,
+   reading the destination off the book instead of drawing it, so the jump
+   distribution is a consequence of the fitted depth profile and not a new
+   parameter.
+
+   `apps/stats` gained a `gap.csv` -- how far the touch is from the next price
+   holding anything -- which is the statistic this turns on, and
+   `--seed-guard-pct`, which shows the whole measurement is guard-independent.
+
+   | | before | after | ethusd |
+   |---|---|---|---|
+   | gap to the next occupied price | 1.72 | **4.69** | 5.62 ticks |
+   | occupied prices within 10 ticks | 1.63 | **2.47** | 2.38 |
+   | sigma(1 s) on a common tick grid | 0.301 | **1.031** | 7.162 ticks |
+   | price impact of a trade | 0.084 | **0.629** | 0.676 bp |
+   | eta | 0.48 | **0.55** | 0.84 |
+   | spread / volatility | 3.53 | **1.17** | 0.26 |
+
+   **The price impact of a trade now matches the market**, and eta has crossed
+   0.5 for the first time -- the price trends, where Model II-b, the Hawkes
+   kernel, long memory in the flow and a sweep of theta each moved it not at
+   all. Those failed for the reason this section predicted: a persistent flow
+   can only make a persistent price if trades move the price.
+
+8. **The touch clears 5.8x too rarely.** 0.039 times a second against ethusd's
+   0.228, and it is the entire remainder of the volatility gap now that the step
+   size is right. It is also why `tools/mdp_params.py` still refuses the
+   process: the mid moves in 0.4% of 100 ms epochs against a 0.5% bar and
+   ethusd's roughly 3.9%.
+
+   The clearing rate is `P(the touch queue reaches zero)`, which the fitted mean
+   queue of 4.29 AES and the fitted event rate of 1.17/s imply between them, so
+   it cannot be turned up without breaking one of them. Matching it means the
+   real touch queue is **burstier** than a birth-and-death queue with that mean
+   can be: it empties far more often and refills to larger sizes. That is Model
+   I's independence assumption failing in a way the closed form cannot express,
+   and arXiv:2405.18594's state-dependent sizes are the obvious place to look.
 
 ## Order of work
 
@@ -292,10 +342,15 @@ and between them they unblocked `level_ratio`. **All done.**
 
 Model II-b followed, and the estimator now carries the opposite-queue regime.
 
-Next: the `Q_2` regime switch from Model II-a, which the estimator can now be
-extended to measure the same way; then the rest of Model III (5), calibrating
-`theta` and `theta_reinit` against the ten-minute volatility and the
-mean-reversion ratio. Limit order sizes (6) last — market order sizes are done.
+Model II-b followed, then Model III's `theta`/`theta_reinit` (5) and the order
+size distribution (6). **All done.**
+
+The spacing distribution (7) followed. **Done.**
+
+Next, in order: the **touch clearing rate** (8), which is the last of the
+volatility gap and the one thing standing between this process and a Phase 5
+loop that can be solved end to end; then the `Q_2` regime switch from Model
+II-a, which the estimator can be extended to measure the same way.
 
 ## Refitting the informed parameters, and what that turned up
 
@@ -689,7 +744,7 @@ never meets this because it simulates K queues with no book behind them. Fixed
 by cancelling strays independently at `cancel_rate[K-1] / (1 + cancel_half[K-1])`
 per order, derived from the fitted constants rather than added as a free one —
 which is the paper's own K = 3 finding applied outward, that Q4 and Q5 behave
-like Q3. The book now sits at 4 to 19 orders and is stable.
+like Q3. The book was stable at 4 to 19 orders with four modelled levels and is stable at a median of 26 with sixteen (p10 10, p90 42, max 79 over two million events) -- more depth, still bounded, which is what the stray cancellation is there to guarantee.
 
 That leak was also producing a **non-monotone fill hazard** — 3.9e-4 alone
 against 5.1e-4 with 240 ahead — which read like a model defect and was a wall of

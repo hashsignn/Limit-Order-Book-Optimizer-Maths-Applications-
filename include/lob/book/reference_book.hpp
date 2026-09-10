@@ -7,10 +7,27 @@
 // including the ones a hand-written unit test would never think to construct.
 //
 // If this file ever gets clever, it has stopped doing its job.
+//
+// It must also never crash or throw. find_entry() can return nullptr when the
+// index and a price queue disagree, and every caller used to dereference it
+// unchecked; the at() lookups would have thrown on the same disagreement. That
+// cannot happen while the class is self-consistent -- but a segfault in the
+// ORACLE looks exactly like a bug in the thing under test, which is the one
+// failure mode a differential test cannot afford.
+//
+// TWO DELIBERATE ASYMMETRIES with the fast book, which bound what a comparison
+// against it proves: this book has no price window and no order limit, so it
+// accepts what OrderBook rejects as PriceOutOfWindow and PoolExhausted. A
+// differential test staying inside the window and under capacity sees no
+// difference; one that strays sees a disagreement that is correct rather than a
+// defect. tests/test_book_differential.cpp compares the returned error codes
+// first, so it reports such a case rather than hiding it.
 #pragma once
 
 #include <cstdint>
 #include <list>
+#include <utility>
+#include <vector>
 #include <map>
 #include <unordered_map>
 
@@ -39,6 +56,7 @@ class ReferenceBook {
     auto it = index_.find(id);
     if (it == index_.end()) return BookError::UnknownOrder;
     Entry* e = find_entry(it->second, id);
+    if (e == nullptr) return BookError::UnknownOrder;   // index and queue disagree
     if (by <= 0 || by > e->qty) return BookError::BadQuantity;
     if (by == e->qty) return remove(id);
     e->qty -= by;
@@ -50,6 +68,7 @@ class ReferenceBook {
     if (it == index_.end()) return BookError::UnknownOrder;
     auto& book = (it->second.side == Side::Bid) ? bids_ : asks_;
     auto lit = book.find(it->second.price);
+    if (lit == book.end()) { index_.erase(it); return BookError::UnknownOrder; }
     auto& q = lit->second;
     for (auto e = q.begin(); e != q.end(); ++e) {
       if (e->id == id) { q.erase(e); break; }
@@ -63,6 +82,7 @@ class ReferenceBook {
     auto it = index_.find(id);
     if (it == index_.end()) return BookError::UnknownOrder;
     Entry* e = find_entry(it->second, id);
+    if (e == nullptr) return BookError::UnknownOrder;
     if (qty <= 0 || qty > e->qty) return BookError::BadQuantity;
     if (qty == e->qty) return remove(id);
     e->qty -= qty;
@@ -73,7 +93,9 @@ class ReferenceBook {
     auto it = index_.find(old_id);
     if (it == index_.end()) return BookError::UnknownOrder;
     const Side side = it->second.side;
-    const bool mine = find_entry(it->second, old_id)->mine;
+    const Entry* old = find_entry(it->second, old_id);
+    if (old == nullptr) return BookError::UnknownOrder;
+    const bool mine = old->mine;
     const BookError r = remove(old_id);
     if (r != BookError::Ok) return r;
     return add(new_id, side, price, qty, mine);

@@ -248,7 +248,7 @@ is specifically about that case.
 
 ---
 
-## 5. Proposed repository layout
+## 5. Repository layout — the plan, and what was built
 
 ```
 ├── CMakeLists.txt
@@ -274,9 +274,25 @@ is specifically about that case.
 │   ├── calib/                   # Hawkes, queue-reactive, fill curves, impact
 │   ├── policy/                  # HJB solver / MDP policy iteration / RL training
 │   └── analysis/                # notebooks, stylized-fact scorecard, latency reports
-├── data/                        # (gitignored) captures, DBN files, calibration output
+├── data/                        # captures, DBN files, calibration output
 └── docs/                        # these documents
 ```
+
+**What was actually built, and where this drifted.** The tree above is the
+original plan and is kept as one. The real layout differs in ways worth naming,
+because a plan read as a description misleads:
+
+- `python/` does not exist. The research code is a handful of scripts in
+  `tools/`, and the C++ is driven from the command line rather than through
+  bindings. `cmake/`, `apps/calibrate/` and `apps/live/` do not exist either.
+- `features/` is `feat/`, and there is a `strat/` the plan does not mention.
+- The feed decoders are `bitstamp.hpp` and `json.hpp`, not `itch.hpp` / `sbe.hpp`
+  / `mold.hpp`: this project reads a free public websocket, not an exchange
+  binary protocol. See `02-data-and-protocols.md` §3.
+- `data/` is **not** wholly gitignored. `.gitignore` excludes `data/*` and then
+  re-includes `data/samples/`, which holds three ten-minute captures the
+  real-data regression tests replay — 5.3 MB, and the reason a test against
+  synthetic data alone only ever proves the decoder agrees with the generator.
 
 ---
 

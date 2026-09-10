@@ -22,10 +22,12 @@
 // baseline is measured pairwise per seed and the interval is taken over seeds.
 // That controls for the drift; a single run cannot.
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "lob/policy/state.hpp"
@@ -83,10 +85,13 @@ QuoteParams base_params() {
 
 struct Row {
   std::string         name;
-  std::vector<double> net;        // one per seed
+  std::vector<double> net;        // one per seed: session P&L
+  std::vector<double> edge;       // one per seed: P&L had the price never moved
+  std::vector<double> mark;       // one per seed: position x how far the price walked
   std::vector<double> spread;
   std::vector<double> adverse;
   std::vector<double> end_inv;
+  std::vector<double> span_s;     // one per seed: the run's market time
   double passive = 0, aggressive = 0, peak = 0;
   std::vector<double> per_fill;   // pooled across seeds
   double fills = 0, requotes = 0;
@@ -99,9 +104,23 @@ struct Row {
 
 void record(Row& r, const RunResult& x) {
   r.net.push_back(x.pnl());
+  // The EXACT split of session P&L into the part that depends on where the
+  // price ended and the part that does not -- see RunResult::flat_pnl. These
+  // two sum to x.pnl() identically, which is what lets the power report below
+  // say which of them the acceptance interval is actually resolving.
+  //
+  // This used to split on Attribution::total, which is not a split at all:
+  // attribution is a per-fill markout at a 100 ms horizon, and the residual
+  // between it and session P&L is everything that window missed, not the
+  // closing position. The two disagreed by a factor of three on how big the
+  // closing exposure was, and the residual grew as n^0.85 where a position on a
+  // random walk has to grow as sqrt(n).
+  r.edge.push_back(x.flat_pnl());
+  r.mark.push_back(x.walk_exposure());
   r.spread.push_back(x.attr.spread_capture);
   r.adverse.push_back(x.attr.adverse_sel);
   r.end_inv.push_back(static_cast<double>(x.stats.inventory));
+  r.span_s.push_back(static_cast<double>(x.span_ns) * 1e-9);
   r.per_fill.insert(r.per_fill.end(), x.per_fill_pnl.begin(), x.per_fill_pnl.end());
   r.fills      += static_cast<double>(x.attr.n_fills);
   r.passive    += static_cast<double>(x.attr.n_passive);
@@ -426,18 +445,52 @@ int main(int argc, char** argv) {
               "  'aggr' is a fill where OUR order crossed on arrival — a quote decided on a\n"
               "  stale book, landing through the market. That is latency turning liquidity\n"
               "  provision into liquidity taking, and it is not market making.\n\n");
-  std::printf("%-22s %12s %12s %12s %9s %7s %7s %8s\n",
+  std::printf("%-22s %12s %12s %12s %9s %9s %7s %7s %8s\n",
               "strategy", "session P&L", "spread-cap", "adv-select", "peak inv",
-              "pasv", "aggr", "requotes");
-  std::printf("%s\n", std::string(92, '-').c_str());
+              "end inv", "pasv", "aggr", "requotes");
+  std::printf("%s\n", std::string(102, '-').c_str());
   auto mean = [](const std::vector<double>& v) {
     double s = 0.0; for (double x : v) s += x;
     return v.empty() ? 0.0 : s / static_cast<double>(v.size());
   };
+  // The end inventory's SIGN is a coin flip -- which side the price happened to
+  // run is what decides it -- so its mean across seeds is near zero and says
+  // nothing. Its MAGNITUDE is the number: it is what the closing mark is
+  // levered on, and the prose above has promised this column since before it
+  // existed.
+  auto mean_abs = [](const std::vector<double>& v) {
+    double s = 0.0; for (double x : v) s += std::fabs(x);
+    return v.empty() ? 0.0 : s / static_cast<double>(v.size());
+  };
   for (const Row& r : rows)
-    std::printf("%-22s %12.1f %12.1f %12.1f %9.1f %7.0f %7.0f %8.0f\n", r.name.c_str(),
+    std::printf("%-22s %12.1f %12.1f %12.1f %9.1f %9.1f %7.0f %7.0f %8.0f\n", r.name.c_str(),
                 r.mean_net(), mean(r.spread), mean(r.adverse), r.peak / seeds,
+                mean_abs(r.end_inv),
                 r.passive / seeds, r.aggressive / seeds, r.requotes / seeds);
+
+  // WHAT THE TWO INVENTORY COLUMNS SAY, AND WHY BOTH ARE HERE.
+  //
+  // `peak inv` reads 55 to 59 for every strategy against a limit of 50 -- so
+  // all of them reach their cap during a run, and all of them overshoot it by
+  // about a fifth. The overshoot is latency: a quote decided before the limit
+  // was reached fills after it was. That column has always been printed and it
+  // is not the one the comparison turns on, because a peak is one moment.
+  //
+  // `end inv` is. The closing mark is the end position times whatever the price
+  // did, and it is what the acceptance interval below is mostly resolving, so
+  // the size of that position belongs in the table beside the P&L it drives.
+  // The mean is taken over MAGNITUDES: which side the price ran decides the
+  // sign, so the signed mean is near zero across seeds and says nothing.
+  {
+    double worst = 0.0;
+    for (const Row& r : rows) worst = std::max(worst, mean_abs(r.end_inv));
+    const double cap = static_cast<double>(base_params().max_inventory);
+    if (cap > 0.0 && worst > 0.0)
+      std::printf("\n  the largest mean closing position is %.0f shares of a"
+                  " permitted +-%.0f. How much of the acceptance\n"
+                  "  interval that accounts for is measured under the test, not"
+                  " assumed from this number.\n", worst, cap);
+  }
 
   // ---- the test ----
   std::size_t best = 0;
@@ -472,6 +525,145 @@ int main(int argc, char** argv) {
                 "  criterion is degenerate here; read the second comparison.\033[0m\n",
                 rows[best].requotes / seeds);
 
+  // Standard deviation of a paired series, and what it implies.
+  auto power_report = [](const std::vector<double>& d) {
+    const std::size_t n = d.size();
+    if (n < 2) return std::pair<double, double>{0.0, 0.0};
+    double m = 0.0; for (double v : d) m += v; m /= static_cast<double>(n);
+    double s = 0.0; for (double v : d) s += (v - m) * (v - m);
+    s = std::sqrt(s / static_cast<double>(n - 1));
+    return std::pair<double, double>{m, s};
+  };
+
+  auto paired_power = [&](const Row& challenger, const Row& against,
+                          const std::vector<double>& diff) {
+    const auto [m, sd] = power_report(diff);
+    if (sd <= 0.0) return;
+
+    // Where the variance lives. Session P&L is trading edge plus the closing
+    // mark, and the two are paired the same way, so their spreads are directly
+    // comparable.
+    std::vector<double> de, dm;
+    for (std::size_t i = 0; i < diff.size(); ++i) {
+      if (i < challenger.edge.size() && i < against.edge.size())
+        de.push_back(challenger.edge[i] - against.edge[i]);
+      if (i < challenger.mark.size() && i < against.mark.size())
+        dm.push_back(challenger.mark[i] - against.mark[i]);
+    }
+    const auto [me, sde] = power_report(de);
+    const auto [mm, sdm] = power_report(dm);
+
+    // HOW MUCH OF THE SPREAD THE CLOSING POSITION EXPLAINS.
+    //
+    // Not by comparing standard deviations: the two halves of the split are
+    // strongly anti-correlated -- a maker that ends short has banked the cash
+    // for it, so a run whose flat P&L is high has a walk term that is low --
+    // and each half's sd can exceed the sd of their sum. Adding them, or
+    // reading one against the other, says nothing. The regression does: r^2 of
+    // the paired difference on its own walk term is the share of the spread
+    // that where the price ended accounts for.
+    double r2 = 0.0;
+    if (dm.size() == diff.size() && sd > 0.0 && sdm > 0.0) {
+      double cov = 0.0;
+      for (std::size_t i = 0; i < diff.size(); ++i) cov += (diff[i] - m) * (dm[i] - mm);
+      cov /= static_cast<double>(diff.size() - 1);
+      const double corr = cov / (sd * sdm);
+      r2 = corr * corr;
+    }
+    std::printf("    per-seed sd %.1f", sd);
+    if (sde > 0.0 || sdm > 0.0)
+      std::printf("  (flat-price sd %.1f, price-walk sd %.1f, walk explains %.0f%%)",
+                  sde, sdm, 100.0 * r2);
+    std::printf("\n");
+
+    // Seeds needed to resolve the OBSERVED effect at 95% two-sided with 80%
+    // power: n = (1.96 + 0.84)^2 * (sd/effect)^2. If the effect is a hair from
+    // zero this number is enormous, and that is the answer -- more seeds will
+    // not help, because there is nothing there to find.
+    if (std::fabs(m) > 1e-9) {
+      const double need = 7.849 * (sd / m) * (sd / m);
+      if (need <= 100000.0)
+        std::printf("    to resolve an effect this size at 95%%/80%%: %.0f seeds"
+                    " (have %zu)\n", std::ceil(need), diff.size());
+      else
+        std::printf("    the effect is indistinguishable from zero at this sd;"
+                    " more seeds will not help\n");
+    }
+    if (r2 > 0.5)
+      std::printf("    \033[33mthe closing position, not the trading, is what this"
+                  " interval is mostly measuring\033[0m\n");
+
+    // HOW LONG A RUN WOULD HAVE TO BE, which is the useful number when the
+    // closing mark dominates -- and more seeds is not it.
+    //
+    // The trading edge ACCUMULATES: double the run and it doubles. The closing
+    // mark is a bounded position times a price walk, and a walk's spread grows
+    // as the square root of time, so doubling the run multiplies its sd by
+    // 1.41. Their ratio therefore grows as sqrt(run length), and there is a
+    // length past which the comparison is measuring the trading rather than
+    // where the price happened to be when the clock stopped. Seeds do not move
+    // that ratio at all: averaging n independent runs divides BOTH by sqrt(n).
+    //
+    //     edge(r)    = me  * r           r = run length / this one
+    //     mark_sd(r) = sdm * sqrt(r)
+    //     edge = k * mark_sd   =>   sqrt(r) = k * sdm / me
+    //
+    // k = 2 is the target: a mean twice the noise it sits in.
+    //
+    // BOTH GROWTH LAWS WERE CHECKED, not assumed. Going from 120,000 events to
+    // 1,815,598 -- 15.1x -- multiplied TabulatedMDP's own trading edge by 15.3
+    // (3197 -> 48978) and ConstantSpread's by 14.7, which is linear, and it
+    // multiplied fills and spread capture by the same. The closing mark's sd
+    // went up as the square root.
+    //
+    // THIS IS COMPUTED ON THE CHALLENGER ALONE, not on the paired difference,
+    // and the reason matters. The best baseline is chosen per run and it MOVES
+    // with run length: ConstantSpread at 120,000 events, AvellanedaStoikov at
+    // 480,000, InventorySkew at 1,815,598. A paired difference is then against
+    // a different opponent each time, and the mark half of it depends on how
+    // much of the two closing positions cancels -- TabulatedMDP ends on 36
+    // shares, ConstantSpread on 35 (which largely cancels), InventorySkew on 16
+    // (which does not). Computed on the difference, the answer swung from 1.8M
+    // events to 13.7M with the run length; computed on the challenger's own
+    // edge and its own mark, it does not move, because neither term depends on
+    // who it is being compared against.
+    {
+      const auto [me_own, sde_own] = power_report(challenger.edge);
+      const auto [mm_own, sdm_own] = power_report(challenger.mark);
+      (void)sde_own; (void)mm_own;
+      if (me_own <= 0.0) {
+        std::printf("    %s's P&L at a flat price is %+.1f: there is no edge here"
+                    " for a longer run to\n      accumulate, and the closing"
+                    " position is not what is costing it.\n",
+                    challenger.name.c_str(), me_own);
+      } else if (sdm_own > 0.0) {
+        const double root = 2.0 * sdm_own / me_own;
+        const double r    = root * root;
+        double mean_span  = 0.0;
+        for (double v : challenger.span_s) mean_span += v;
+        if (!challenger.span_s.empty())
+          mean_span /= static_cast<double>(challenger.span_s.size());
+        std::printf("    %s at a flat price %+.1f against its own price-walk sd %.1f\n",
+                    challenger.name.c_str(), me_own, sdm_own);
+        std::printf("      that reaches twice this sd at %.0f events, %.1f x this run",
+                    std::ceil(r * static_cast<double>(events)), r);
+        if (mean_span > 0.0)
+          std::printf(" (%.1f h of market time against %.1f)",
+                      r * mean_span / 3600.0, mean_span / 3600.0);
+        std::printf("\n");
+      }
+    }
+    if (!de.empty()) {
+      const BootstrapCI ce = block_bootstrap(de, 1, 8000);
+      std::printf("    at a FLAT PRICE (as if the mid never moved): mean %+.1f"
+                  "  95%% CI [%+.1f, %+.1f]%s\n", ce.mean, ce.lo, ce.hi,
+                  ce.usable() && ce.excludes_zero()
+                      ? (ce.mean > 0.0 ? "  \033[32m(excludes zero, positive)\033[0m"
+                                       : "  \033[31m(excludes zero, negative)\033[0m")
+                      : "  (spans zero)");
+    }
+  };
+
   auto test = [&](const Row& challenger, const Row& against) {
     std::vector<double> diff;
     diff.reserve(challenger.net.size());
@@ -495,6 +687,15 @@ int main(int argc, char** argv) {
     } else {
       std::printf("    \033[33mNOT PROVEN: the interval spans zero\033[0m\n");
     }
+
+    // WHAT THE INTERVAL IS RESOLVING, AND HOW MANY SEEDS IT WOULD TAKE.
+    //
+    // "Not proven" is not a result, it is a request for more information, and
+    // the two things worth knowing are how much of the spread comes from the
+    // closing position rather than from trading, and how many seeds the
+    // observed effect would need. Reporting neither leaves the reader to guess
+    // whether to run more seeds or to change the measurement.
+    paired_power(challenger, against, diff);
     return ci;
   };
 

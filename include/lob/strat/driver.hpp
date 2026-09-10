@@ -83,6 +83,27 @@ struct RunResult {
   }
   std::vector<double> per_fill_pnl;   // kept so runs can be differenced pairwise
   double              final_mid = 0.0;
+  // The mid the run OPENED on, so session P&L can be split into the part that
+  // depends on where the price ended and the part that does not. Session P&L is
+  //
+  //     realised cash  +  inventory x final_mid
+  //   = (realised cash + inventory x start_mid)  +  inventory x (final_mid - start_mid)
+  //     \------------- flat_pnl ------------/     \------ walk_exposure -----/
+  //
+  // and only the second term touches the final mid. The first is what the run
+  // would have made had the price never moved; the second is a position times a
+  // random walk, whose sign is a coin flip and whose scale grows as the square
+  // root of the run. Splitting on Attribution::total instead -- which is what
+  // apps/evaluate used to do -- does not decompose anything: attribution is a
+  // per-fill markout at one horizon and its residual against session P&L is not
+  // the closing position, it is everything the markout window missed.
+  double              start_mid = 0.0;
+  [[nodiscard]] double flat_pnl() const noexcept {
+    return stats.realised_pnl + static_cast<double>(stats.inventory) * start_mid;
+  }
+  [[nodiscard]] double walk_exposure() const noexcept {
+    return static_cast<double>(stats.inventory) * (final_mid - start_mid);
+  }
   // Peak absolute position reached during the run. A limit that is only
   // checked when the strategy is consulted is not a limit, and a comparison
   // between strategies that breached it by different amounts is a comparison
@@ -129,7 +150,8 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
   Simulator      sim{cfg};
   MarkoutTracker mk;
 
-  std::size_t   seen     = 0, requotes = 0;
+  std::uint64_t seen     = 0;
+  std::size_t   requotes = 0;
   OrderId       next_id  = dc.first_id;
   OrderId       bid_id   = 0, ask_id = 0;
   Ticks         cur_bid  = 0, cur_ask = 0;
@@ -157,8 +179,9 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
       mk.advance(v.now, true_mid);
     }
 
-    for (; seen < s.fills().size(); ++seen) {
-      const Fill& f = s.fills()[seen];
+    // Global fill indices, so the simulator can trim the log behind us.
+    for (; seen < s.fills_end(); ++seen) {
+      const Fill& f = s.fill_at(seen);
       if (!f.resting_mine && !f.aggressor_mine) continue;
       const Side our = f.resting_mine ? f.resting_side : opposite(f.resting_side);
       mk.on_fill(f.ts, f.price, f.qty, sign_of(our), f.resting_mine,
@@ -191,6 +214,8 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
     if (ask_id != 0 && ask_left <= 0) {
       ask_p.rest_ns = v.now - ask_at; places.push_back(ask_p); ask_id = 0;
     }
+
+    s.note_fills_read(seen);   // everything above is consumed; the log may slide
 
     if (std::llabs(s.stats().inventory) > peak) peak = std::llabs(s.stats().inventory);
 
@@ -248,6 +273,7 @@ RunResult run_strategy(Strat strat, SimConfig cfg, int n_events, DriverConfig dc
   r.requotes = requotes;
   r.span_ns   = last_ts > first_ts ? last_ts - first_ts : 0;
   r.final_mid = last_mid;
+  r.start_mid = static_cast<double>(cfg.flow.mid);
   r.peak_inventory = peak;
   r.placements = std::move(places);
   r.attr     = attribute(mk.fills(), dc.markout_idx, FeeSchedule{}, last_mid, sim.stats().inventory);

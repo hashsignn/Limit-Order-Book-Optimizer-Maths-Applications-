@@ -47,6 +47,8 @@ import pathlib
 import signal
 import sys
 import time
+
+from recorder_retry import run_with_retry
 from datetime import datetime, timezone
 
 try:
@@ -102,7 +104,10 @@ class Recorder:
         self.bytes_written += len(line) + 1
 
     # ---- capture --------------------------------------------------------
-    async def run(self, duration_seconds: float) -> None:
+    # One connection. Returns True if it ended because the clock ran out
+    # rather than because the connection died; tools/recorder_retry.py
+    # decides whether to come back and how long to wait first.
+    async def _session(self, duration_seconds: float) -> bool:
         self.outdir.mkdir(parents=True, exist_ok=True)
         started = time.time()
 
@@ -150,6 +155,11 @@ class Recorder:
 
         self._close_file()
         self._summary(time.time() - started)
+        return (time.time() - started) >= duration_seconds or self.stop
+
+    async def run(self, duration_seconds: float) -> None:
+        self.outdir.mkdir(parents=True, exist_ok=True)
+        await run_with_retry(self, duration_seconds)
 
     def _record(self, msg) -> None:
         # Everything after subscription is [CHAN_ID, payload].

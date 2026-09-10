@@ -5,10 +5,21 @@ on:
     branches: ["**"]
   pull_request:
 
+# Least privilege. The workflow inherits the repository's default token scope
+# otherwise, and nothing here writes anything.
+permissions:
+  contents: read
+
+# A second push cancels the first rather than running both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     name: ${{ matrix.compiler }} / ${{ matrix.preset }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -25,6 +36,12 @@ jobs:
             cc: gcc
             cxx: g++
             preset: asan
+          # tsan was defined in CMakePresets.json and run by nothing, so it
+          # would have stopped compiling without anyone noticing.
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            preset: tsan
     steps:
       - uses: actions/checkout@v4
 
@@ -49,8 +66,25 @@ jobs:
 
       # Sanitizer builds run the fast differential pass; the optimised jobs run
       # the thorough one, which is the same code over many more events.
+      # tsan skips `policy` and the long differential pass. Measured locally, the
+      # full suite under tsan takes 60 minutes and `policy` alone is 48 of them
+      # -- it is a value-iteration solve doing 23.8 million assertions, and
+      # every one of them is single-threaded. ThreadSanitizer finds data races;
+      # on a program with one thread it can only prove there are none to find,
+      # which this already knows. Its value here is as a TRIPWIRE for the day a
+      # recorder or a feed handler grows a thread, and that tripwire costs six
+      # minutes on everything else rather than an hour.
+      #
+      # src/tsc.cpp's lazy calibration is the specific thing waiting to be
+      # caught: non-atomic globals behind a first-call check, harmless today and
+      # a race the moment anything is threaded.
       - name: Test
-        run: ctest --preset ${{ matrix.preset }} -E "_long"
+        run: |
+          if [ "${{ matrix.preset }}" = "tsan" ]; then
+            ctest --preset ${{ matrix.preset }} -E "_long|^policy$"
+          else
+            ctest --preset ${{ matrix.preset }} -E "_long"
+          fi
 
       - name: Thorough differential book test
         if: matrix.preset == 'release'
@@ -59,14 +93,28 @@ jobs:
       # A longer fuzz pass than the one wired into ctest. Coverage-guided where
       # the clang runtime installed, blind brute force otherwise — either way
       # the targets run on every commit rather than when someone remembers.
+      # fuzz_bitstamp was omitted here and ran only at ctest's 20,000. The one
+      # target that parses bytes from a public network got a tenth of the
+      # fuzzing of the two that consume a POD this project built itself. It also
+      # wants a bigger max_len: a realistic JSON frame is far longer than 512
+      # bytes, so most inputs at that size never reach the decoder at all.
       - name: Extended fuzzing
         if: matrix.preset == 'release'
         run: |
-          ./build/${{ matrix.preset }}/fuzz_book     -runs=200000 -max_len=512
-          ./build/${{ matrix.preset }}/fuzz_matching -runs=200000 -max_len=512
+          ./build/${{ matrix.preset }}/fuzz_book      -runs=200000 -max_len=512
+          ./build/${{ matrix.preset }}/fuzz_matching  -runs=200000 -max_len=512
+          ./build/${{ matrix.preset }}/fuzz_bitstamp  -runs=200000 -max_len=4096
 
       # The measurement layer is the deliverable, so prove it runs — CI machines
       # are noisy and shared, so this checks that it works, not that it is fast.
+      # Nothing accidentally untracked. The .gitignore rules keep 249 MB of
+      # build output and calibration dumps out; this is the check that they
+      # still do, rather than a fact verified once.
+      - name: No untracked files
+        run: |
+          untracked=$(git ls-files --others --exclude-standard)
+          if [ -n "$untracked" ]; then echo "untracked:"; echo "$untracked"; exit 1; fi
+
       - name: Smoke-run the demo
         if: matrix.preset == 'release'
         run: |
@@ -75,3 +123,14 @@ jobs:
           ./build/${{ matrix.preset }}/bench_measure
           ./build/${{ matrix.preset }}/replay 200000 --verify
           ./build/${{ matrix.preset }}/bench_book
+
+      # clang-tidy. Three findings in the September audit -- a latent data race,
+      # an unchecked pointer dereference and a duplicate include -- are the kind
+      # it reports without being asked.
+      - name: clang-tidy
+        if: matrix.compiler == 'clang' && matrix.preset == 'release'
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y --no-install-recommends clang-tidy || exit 0
+          git ls-files '*.cpp' | grep -v '^fuzz/' \
+            | xargs -r clang-tidy -p build/${{ matrix.preset }} --quiet

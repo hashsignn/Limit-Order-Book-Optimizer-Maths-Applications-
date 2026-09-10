@@ -58,7 +58,10 @@ class JournalWriter {
  public:
   JournalWriter(const std::string& path, std::string_view type_name,
                 std::size_t batch_records = 4096)
-      : buf_(batch_records) {
+      // Clamped, because append() is noexcept and indexes this buffer directly:
+      // batch_records = 0 made `buf_[n_++] = r` a heap write past the end on the
+      // very first record.
+      : buf_(batch_records ? batch_records : 1) {
     JournalHeader hdr;
     hdr.record_size = static_cast<std::uint16_t>(sizeof(Record));
     hdr.type_hash   = type_hash(type_name);
@@ -72,30 +75,48 @@ class JournalWriter {
 
   void append(const Record& r) noexcept {
     buf_[n_++] = r;
+    ++total_;
     if (n_ == buf_.size()) flush();
   }
 
+  // WRITE ERRORS ARE STICKY, NOT DISCARDED.
+  //
+  // This used to be `std::fwrite(...)` with the return value dropped, and
+  // close() dropped fclose()'s too. A full disk, a quota or a closed pipe
+  // silently truncated the journal and the writer reported success. This file's
+  // own header promises that replaying a journal reproduces the same output
+  // "byte for byte", and a journal quietly missing its last 4,096 records is
+  // worse than no journal, because it is trusted.
+  //
+  // A destructor cannot throw, so the failure is recorded rather than raised and
+  // callers check failed() after close(). src/policy_table.cpp already gets the
+  // fclose half of this right; this is the same rule.
   void flush() noexcept {
-    if (n_ != 0 && f_ != nullptr) {
-      std::fwrite(buf_.data(), sizeof(Record), n_, f_);
-      n_ = 0;
-    }
+    if (n_ == 0 || f_ == nullptr) return;
+    if (std::fwrite(buf_.data(), sizeof(Record), n_, f_) != n_) failed_ = true;
+    n_ = 0;
   }
 
   void close() noexcept {
     if (f_ == nullptr) return;
     flush();
-    std::fclose(f_);
+    // Closing is where deferred write errors surface: the data may still be in
+    // the C library's buffer when fwrite returns.
+    if (std::fclose(f_) != 0) failed_ = true;
     f_ = nullptr;
   }
 
   [[nodiscard]] std::uint64_t written() const noexcept { return total_; }
+  // True if any write or the close failed. Check it after close(); a journal
+  // that reports this has fewer records on disk than written() counted.
+  [[nodiscard]] bool failed() const noexcept { return failed_; }
 
  private:
   std::vector<Record> buf_;
   std::size_t         n_     = 0;
-  std::uint64_t       total_ = 0;
-  std::FILE*          f_     = nullptr;
+  std::uint64_t       total_  = 0;
+  bool                failed_ = false;
+  std::FILE*          f_      = nullptr;
 };
 
 // Reads the whole journal into memory. Fine for the sizes Phase 0 deals with;
@@ -104,16 +125,18 @@ template <typename Record>
 [[nodiscard]] std::vector<Record> journal_read_all(const std::string& path,
                                                    std::string_view type_name) {
   JournalHeader hdr{};
-  std::FILE* f = journal_open_read(path, hdr);
+  // Owning handle: push_back below can throw bad_alloc on a large journal, and
+  // an explicit fclose after it would never run.
+  const std::unique_ptr<std::FILE, int (*)(std::FILE*)> f{journal_open_read(path, hdr),
+                                                          &std::fclose};
   if (hdr.record_size != sizeof(Record))
-    { std::fclose(f); throw std::runtime_error("journal record size mismatch: " + path); }
+    throw std::runtime_error("journal record size mismatch: " + path);
   if (hdr.type_hash != type_hash(type_name))
-    { std::fclose(f); throw std::runtime_error("journal record type mismatch: " + path); }
+    throw std::runtime_error("journal record type mismatch: " + path);
 
   std::vector<Record> out;
   Record r{};
-  while (std::fread(&r, sizeof(Record), 1, f) == 1) out.push_back(r);
-  std::fclose(f);
+  while (std::fread(&r, sizeof(Record), 1, f.get()) == 1) out.push_back(r);
   return out;
 }
 

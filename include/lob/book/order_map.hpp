@@ -24,10 +24,25 @@ class OrderMap {
   // Rounds up to a power of two with headroom, so the load factor stays under
   // ~0.5 and probe chains stay short.
   explicit OrderMap(std::size_t expected_orders) {
-    std::size_t cap = 16;
-    while (cap < expected_orders * 2) cap <<= 1;
+    const std::size_t cap = capacity_for(expected_orders);
     mask_ = cap - 1;
     slots_.assign(cap, Slot{});
+  }
+
+  // Power of two with 2x headroom, so the load factor stays under ~0.5 and
+  // probe chains stay short. Separated out so the arithmetic can be tested
+  // without allocating the table it describes.
+  //
+  // Compared against expected_orders directly. The previous form compared
+  // against `expected_orders * 2`, which overflows for a large request and
+  // leaves the capacity at 16 -- a table far too small for what was asked for,
+  // and now that insert() refuses a full table, one that silently drops orders.
+  [[nodiscard]] static constexpr std::size_t capacity_for(std::size_t expected_orders) noexcept {
+    constexpr std::size_t kCeiling = std::size_t{1} << (8 * sizeof(std::size_t) - 2);
+    std::size_t cap = 16;
+    while (cap < expected_orders && cap < kCeiling) cap <<= 1;
+    if (cap < kCeiling) cap <<= 1;              // the headroom, applied once
+    return cap;
   }
 
   // Splitmix64 finalizer. Exchange order ids are often sequential or blocked,
@@ -49,8 +64,23 @@ class OrderMap {
   }
 
   // Returns false if the key was already present (the caller treats that as a
-  // duplicate-order feed error rather than overwriting).
+  // duplicate-order feed error rather than overwriting), or if the table is
+  // full.
+  //
+  // CAPACITY IS FIXED AND THE FULL CASE IS REFUSED, NOT SPUN ON.
+  //
+  // find(), insert() and erase_at() are unbounded probe loops: on a full table
+  // an absent key never terminates. That is a hang, not a crash. It cannot
+  // happen in this repository, and the reason lives in another file --
+  // OrderBook's constructor passes the same max_orders to this map and to its
+  // order pool, and the map rounds up to a power of two of at least twice that,
+  // so live entries never exceed half the table. Real safety, held by a caller,
+  // stated nowhere. The guard below makes the class safe on its own terms.
+  //
+  // Growing instead would be worse: a rehash mid-session is a latency spike in
+  // exactly the place this structure exists to avoid one.
   bool insert(OrderId key, std::uint32_t value) noexcept {
+    if (size_ >= slots_.size()) return false;   // never spin
     std::size_t i = mix(key) & mask_;
     while (slots_[i].used) {
       if (slots_[i].key == key) return false;

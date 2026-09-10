@@ -20,8 +20,12 @@ constexpr std::size_t   kOrders = 512;
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size) {
   if (size < 4) return 0;
 
-  lob::OrderBook      book{kBase, kWindow, kOrders};
-  lob::MatchingEngine match{book, lob::SelfMatch::CancelResting};
+  lob::OrderBook book{kBase, kWindow, kOrders};
+  // All three modes, chosen from the input. Only CancelResting was ever
+  // entered, so Allow and CancelIncoming -- which differ in what happens to the
+  // aggressor's remainder -- were unreachable code as far as the fuzzer knew.
+  const auto mode = static_cast<lob::SelfMatch>(data[0] % 3);
+  lob::MatchingEngine match{book, mode};
   lobfuzz::ByteReader r{data, size};
 
   int applied = 0;

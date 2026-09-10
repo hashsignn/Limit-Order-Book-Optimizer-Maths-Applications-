@@ -28,7 +28,7 @@ def scan(path):
     # nothing about where the market was, and sizing the price window from them
     # would ask for a window a billion wide. A print is by definition a price
     # both sides agreed on.
-    lo = hi = None
+    lo = hi = first = None
     markers = []
     with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -66,12 +66,14 @@ def scan(path):
                     try:
                         v = float(line[j:k])
                         if v > 0:
+                            if first is None:
+                                first = v
                             lo = v if lo is None or v < lo else lo
                             hi = v if hi is None or v > hi else hi
                     except ValueError:
                         pass
     return dict(lines=n, created=created, deleted=deleted, changed=changed,
-                trades=trades, t0=t0, t1=t1, lo=lo, hi=hi, markers=markers)
+                trades=trades, t0=t0, t1=t1, lo=lo, hi=hi, first=first, markers=markers)
 
 
 def main() -> int:
@@ -97,7 +99,7 @@ def main() -> int:
 
     print(f"{d}: {pairs[0]}, {len(caps)} capture file(s), {len(snaps)} snapshot(s)\n")
     tot = dict(lines=0, created=0, deleted=0, trades=0)
-    lo = hi = None
+    lo = hi = first = None
     prev_end = None
     sessions = 0
     problems = []
@@ -109,6 +111,8 @@ def main() -> int:
         if r["lo"] is not None:
             lo = r["lo"] if lo is None else min(lo, r["lo"])
             hi = r["hi"] if hi is None else max(hi, r["hi"])
+            if first is None:
+                first = r["first"]
         span = (r["t1"] - r["t0"]) / 1e6 if r["t0"] and r["t1"] else 0.0
         print(f"  {c.name}")
         print(f"    {c.stat().st_size/1e6:8.1f} MB  {r['lines']:>9,} lines  "
@@ -144,9 +148,17 @@ def main() -> int:
         # recentred, so it has to reach from that opening price to the furthest
         # the market got in either direction -- which is not the same as half the
         # range, when the move is one-sided.
-        mid0 = (hi + lo) / 2
-        reach = max(abs(hi - lo), abs(lo - hi)) / mid0
-        print(f"  traded {lo:,.2f} .. {hi:,.2f}  ({100*reach:.2f}% end to end)")
+        # From the OPENING trade price, because that is where the window gets
+        # centred and it is never recentred. This read
+        # `max(abs(hi - lo), abs(lo - hi)) / ((hi + lo) / 2)` -- the same number
+        # twice, over the midpoint of the range, which is symmetric by
+        # construction and so cannot express the one-sided case the comment
+        # above describes. For a move that only goes up, the window must reach
+        # the whole way from the open to the high on one side.
+        open_px = first if first else (hi + lo) / 2
+        reach = max(hi - open_px, open_px - lo) / open_px
+        print(f"  traded {lo:,.2f} .. {hi:,.2f}, opened {open_px:,.2f}"
+              f"  ({100*reach:.2f}% furthest from the open)")
         need = max(0.02, reach * 1.5)          # 50% headroom over the observed move
         print(f"  -> run stats with  --band-pct {need:.2f}")
         print("     stats then prints the real touch excursion and the headroom left;")

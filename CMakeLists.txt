@@ -107,6 +107,14 @@ if(LOB_BUILD_TESTS)
     add_test(NAME ${t} COMMAND test_${t})
   endforeach()
 
+  # ctest runs from the build directory, so a test that wants a committed
+  # artefact needs the source path handed to it. test_policy loads
+  # policy/ethusd.bin: nothing verified that the shipped table still loads under
+  # the current build, which is exactly the failure PolicyTable's header check
+  # exists to detect and which only a manual run would have found.
+  set_tests_properties(policy PROPERTIES
+                       WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
   # One regression test per committed capture. Each asserts the same thing:
   # the book survived a real exchange session with zero invariant violations,
   # over a capture whose event_id chain is provably unbroken.

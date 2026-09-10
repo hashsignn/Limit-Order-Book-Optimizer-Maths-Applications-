@@ -5,6 +5,7 @@
 // Neither ever frees to the OS while running.
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -37,16 +38,25 @@ class Arena {
   // Returns nullptr when exhausted. Callers on the hot path must treat that as
   // a hard error and account for it, never silently fall back to the heap.
   [[nodiscard]] void* allocate(std::size_t bytes, std::size_t align) noexcept {
+    assert(align != 0 && (align & (align - 1)) == 0 && "align must be a power of two");
     const std::size_t cur     = reinterpret_cast<std::uintptr_t>(base_ + used_);
     const std::size_t aligned = (cur + align - 1) & ~(align - 1);
     const std::size_t pad     = aligned - cur;
-    if (used_ + pad + bytes > size_) return nullptr;
+    // Subtraction, not addition. `used_ + pad + bytes > size_` wraps for a
+    // `bytes` near SIZE_MAX and then hands back a pointer into a much smaller
+    // block.
+    if (pad > size_ - used_ || bytes > size_ - used_ - pad) return nullptr;
     used_ += pad + bytes;
     return base_ + used_ - bytes;
   }
 
   template <typename T, typename... Args>
   [[nodiscard]] T* create(Args&&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>) {
+    // Pool carries this assert and Arena did not, for the same reason: reset()
+    // just zeroes used_, so a destructor here would never run.
+    // arena.create<std::vector<int>>() compiled and leaked.
+    static_assert(std::is_trivially_destructible_v<T>,
+                  "Arena never runs destructors; use a trivially destructible T");
     void* p = allocate(sizeof(T), alignof(T));
     return p ? new (p) T(static_cast<Args&&>(args)...) : nullptr;
   }
@@ -103,6 +113,14 @@ class Pool {
   void release(T* p) noexcept {
     if (p == nullptr) return;
     auto* s = reinterpret_cast<Slot*>(p);
+    // A double release pushes the same slot onto the free list twice, so it is
+    // later ACQUIRED twice and two live objects alias -- silently. It also
+    // underflows in_use_ to SIZE_MAX, taking available() with it. Neither is
+    // detectable afterwards, so it is caught here, in a debug build, at the
+    // point of the mistake.
+    assert(s >= storage_ && s < storage_ + capacity_ && "pointer is not from this pool");
+    assert(in_use_ > 0 && "release without a matching acquire");
+    if (in_use_ == 0) return;             // and never underflow in release builds
     s->next = free_;
     free_   = s;
     --in_use_;

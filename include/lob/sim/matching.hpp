@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 #include "lob/book/order_book.hpp"
@@ -32,7 +33,18 @@ struct Fill {
   Side    resting_side   = Side::Bid;
   bool    resting_mine   = false;
   bool    aggressor_mine = false;
+  // Explicit, value-initialised padding, exactly as BookEvent carries. The five
+  // bytes the compiler would insert here are otherwise UNSPECIFIED, so two runs
+  // that agree on every field still differ under memcmp -- measured at 14 of
+  // 1,901 fills across two identical 60,000-event runs, with zero field
+  // differences. The simulation was deterministic; the struct was not
+  // byte-comparable, and this file's own header promises a run reproduces "byte
+  // for byte". That promise is only worth anything if a Fill can be compared,
+  // hashed or journalled as bytes.
+  std::uint8_t _pad[5]   = {};
 };
+static_assert(sizeof(Fill) == 48);
+static_assert(std::is_trivially_copyable_v<Fill>);
 
 struct SubmitResult {
   Qty       filled     = 0;   // traded immediately against resting liquidity
@@ -88,8 +100,37 @@ class MatchingEngine {
 
   BookError cancel(OrderId id) { return book_.remove(id); }
 
+  // The fill log is a SLIDING WINDOW, not an ever-growing vector.
+  //
+  // It used to grow for the life of the engine: every fill a run ever produced
+  // stayed resident, so memory scaled with run length rather than with anything
+  // observable. fuzz/fuzz_matching.cpp calls clear_fills() every 32 operations
+  // to work around it, and Simulator and the strategy driver both index into it
+  // from a saved position, which is why it could not simply be cleared.
+  //
+  // `base_` is the global index of fills_[0]. An index handed out earlier stays
+  // meaningful after the window slides, so a consumer can hold a watermark
+  // across a trim. Nothing is dropped until a caller says it has been read.
   [[nodiscard]] const std::vector<Fill>& fills() const noexcept { return fills_; }
-  void clear_fills() noexcept { fills_.clear(); }
+  [[nodiscard]] std::uint64_t fills_begin() const noexcept { return base_; }
+  [[nodiscard]] std::uint64_t fills_end() const noexcept {
+    return base_ + static_cast<std::uint64_t>(fills_.size());
+  }
+  // Fill at a GLOBAL index. Undefined before fills_begin(); the caller holds a
+  // watermark and is the one that decided what was safe to drop.
+  [[nodiscard]] const Fill& fill_at(std::uint64_t i) const noexcept {
+    return fills_[static_cast<std::size_t>(i - base_)];
+  }
+  // Drop everything before global index `i`. Idempotent, and a no-op for an `i`
+  // already behind the window.
+  void consume_through(std::uint64_t i) noexcept {
+    if (i <= base_) return;
+    const auto n = static_cast<std::size_t>(
+        std::min<std::uint64_t>(i - base_, static_cast<std::uint64_t>(fills_.size())));
+    fills_.erase(fills_.begin(), fills_.begin() + static_cast<std::ptrdiff_t>(n));
+    base_ += n;
+  }
+  void clear_fills() noexcept { base_ += fills_.size(); fills_.clear(); }
 
   [[nodiscard]] std::uint64_t self_matches_prevented() const noexcept { return smp_hits_; }
 
@@ -148,6 +189,7 @@ class MatchingEngine {
   OrderBook&        book_;
   SelfMatch         smp_;
   std::vector<Fill> fills_;
+  std::uint64_t     base_ = 0;   // global index of fills_[0]
   std::uint64_t     smp_hits_ = 0;
 };
 

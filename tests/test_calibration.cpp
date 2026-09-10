@@ -320,5 +320,115 @@ int main() {
     CHECK_NEAR(RunResult::budget_floor_s(dc.quote_every_ns), 0.1, 1e-12);
   }
 
+  // ---- session P&L splits EXACTLY into a flat-price part and a walk part ----
+  //
+  // apps/evaluate used to split it as Attribution::total and the residual
+  // against it, and call that residual the closing position's mark. It is not
+  // one. Attribution is a per-fill markout at a 100 ms horizon; its residual
+  // against session P&L is everything that window missed. Measured on this
+  // process at 480,000 events, seed 1000: the true walk term was 115.0 ticks x
+  // shares and the residual was -31,125.5, a factor of 270, and across eight
+  // seeds the residual's spread grew as n^0.85 where a bounded position on a
+  // random walk has to grow as the square root.
+  //
+  // The two identities below are what make the real split a split. They are
+  // exact, not approximate: no tolerance is needed and none is given beyond
+  // floating-point.
+  {
+    QuoteParams qp; qp.size = 10; qp.max_inventory = 50; qp.horizon = 1.0;
+    SimConfig c;
+    c.use_latency = false;
+    c.flow        = FlowConfig::ethusd_queue_reactive();
+    c.flow.seed   = 1000;
+    c.flow.mid    = 10'000;
+    const RunResult r = run_strategy(JoinTouch{qp}, c, 120'000);
+
+    CHECK_NEAR(r.start_mid, static_cast<double>(c.flow.mid), 1e-12);
+    // Only the walk term touches the closing mid, and it is exactly a position
+    // times a price difference.
+    CHECK_NEAR(r.walk_exposure(),
+               static_cast<double>(r.stats.inventory) * (r.final_mid - r.start_mid), 1e-9);
+    // The two parts sum to session P&L identically.
+    CHECK_NEAR(r.flat_pnl() + r.walk_exposure(), r.pnl(), 1e-6);
+    // A position times a price move cannot exceed the position reached times
+    // the whole move. The residual this replaced routinely does.
+    ::lobtest::report(std::fabs(r.walk_exposure()) <=
+                          static_cast<double>(r.peak_inventory)
+                              * std::fabs(r.final_mid - r.start_mid) + 1e-6,
+                      "the walk term is bounded by position x price move",
+                      __FILE__, __LINE__, std::to_string(r.walk_exposure()));
+  }
+
+  // ---- the modelled book is as deep as the real one, and the price falls ----
+  // ---- into the gap rather than stepping one tick --------------------------
+  //
+  // Two properties, one cause. The queue-reactive levels sit at consecutive
+  // ticks, so with four of them the modelled book was exactly three ticks deep
+  // behind the touch and the distance from the touch to the next price holding
+  // anything came out at 1.72 ticks. Measured, ethusd's is 5.62 and xrpusd's
+  // 4.21, and their occupancy is still 13 to 18% eleven ticks out where this
+  // model had nothing at all past three.
+  //
+  // That distance is exactly how far the price falls when a best queue clears,
+  // and reference_price_step used to move one tick regardless. Volatility is
+  // rate times step SQUARED, so the two together cost a factor of thirty in
+  // variance. See docs/KNOWN-ISSUES.md issue 9.
+  //
+  // On the old code this block reports a mean gap of 1.7 ticks and occupancy of
+  // zero at both depths.
+  {
+    FlowConfig fc = FlowConfig::ethusd_queue_reactive();
+    fc.seed = 99;
+    fc.mid  = 10'000;
+    FlowGenerator gen{fc};
+    OrderBook book{5'000, 10'240, 1 << 18};
+    MatchingEngine match{book};
+
+    std::size_t fills = 0;
+    double gap_sum = 0.0;
+    std::uint64_t samples = 0, occ8 = 0, occ12 = 0;
+    Ticks px[40];
+    Qty   qty[40];
+    for (int i = 0; i < 300'000; ++i) {
+      const BookEvent e = gen.next();
+      if (e.type == EventType::Aggress) {
+        (void)match.submit_market(e.ts, e.order_id, e.side, e.qty, /*mine=*/false);
+        for (std::size_t k = fills; k < match.fills().size(); ++k)
+          if (book.qty_of(match.fills()[k].resting_id) == 0)
+            gen.forget_order(match.fills()[k].resting_id);
+        fills = match.fills().size();
+      } else {
+        (void)book.apply(e);
+      }
+      gen.on_applied(e, book.qty_of(e.order_id));
+      gen.observe(book.has_bid(), book.best_bid(), book.has_ask(), book.best_ask());
+      // Every 97th event, which is coprime with nothing in the generator and so
+      // does not sample the process in step with any of its cycles.
+      if (i % 97 != 0 || !book.has_bid() || !book.has_ask()) continue;
+      for (int s = 0; s < 2; ++s) {
+        const Side side = (s == 0) ? Side::Bid : Side::Ask;
+        const std::uint32_t n = book.depth(side, 40, px, qty);
+        if (n < 2) continue;
+        ++samples;
+        gap_sum += static_cast<double>((s == 0) ? px[0] - px[1] : px[1] - px[0]);
+        for (std::uint32_t k = 1; k < n; ++k) {
+          const Ticks d = (s == 0) ? px[0] - px[k] : px[k] - px[0];
+          if (d == 8)  ++occ8;
+          if (d == 12) ++occ12;
+        }
+      }
+    }
+    CHECK(samples > 1000);
+    const double gap = gap_sum / static_cast<double>(samples);
+    const double o8  = 100.0 * static_cast<double>(occ8)  / static_cast<double>(samples);
+    const double o12 = 100.0 * static_cast<double>(occ12) / static_cast<double>(samples);
+    ::lobtest::report(gap > 3.0, "the touch is not one tick from the next occupied price",
+                      __FILE__, __LINE__, std::to_string(gap) + " ticks");
+    ::lobtest::report(o8 > 5.0, "the modelled book reaches eight ticks behind the touch",
+                      __FILE__, __LINE__, std::to_string(o8) + "%");
+    ::lobtest::report(o12 > 5.0, "the modelled book reaches twelve ticks behind the touch",
+                      __FILE__, __LINE__, std::to_string(o12) + "%");
+  }
+
   return lobtest::summary("calibration");
 }

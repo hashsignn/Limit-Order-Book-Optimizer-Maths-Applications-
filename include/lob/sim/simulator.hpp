@@ -18,6 +18,7 @@
 // the whole determinism argument in docs/00 collapses.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <vector>
@@ -81,6 +82,12 @@ class Simulator {
   template <typename Agent>
   void run(Agent&& agent, int n_events) {
     for (int i = 0; i < n_events; ++i) {
+      // Drop fills both we and the agent have finished with. Without an agent
+      // that reports its progress this trims nothing, so an agent written
+      // against the old interface behaves exactly as before -- it just does not
+      // get the memory back.
+      match_.consume_through(std::min(fills_seen_, agent_read_));
+
       const BookEvent e = gen_.next();
       now_ = e.ts;
 
@@ -107,27 +114,29 @@ class Simulator {
         }
       } else {
         (void)true_book_.apply(e);
+        deliver(e, now_);
       }
       ++stats_.market_events;
       gen_.on_applied(e, true_book_.qty_of(e.order_id));
       gen_.observe(true_book_.has_bid(), true_book_.best_bid(),
                    true_book_.has_ask(), true_book_.best_ask());
 
-      // 4. Schedule the agent's copy. An aggressive order reaches the agent as
-      //    the trades it caused, which is exactly what a real feed publishes —
+      // 4. Publish every execution the exchange has produced since we last
+      //    looked — whoever caused it. An aggressive order reaches the agent as
+      //    the trades it caused, which is exactly what a real feed publishes:
       //    the exchange sends executions, never the incoming order itself.
-      if (e.type == EventType::Aggress) {
-        for (std::size_t k = fills_seen_; k < match_.fills().size(); ++k) {
-          const Fill& f = match_.fills()[k];
-          BookEvent ex{};
-          ex.ts = e.ts; ex.seq = e.seq; ex.type = EventType::Execute;
-          ex.order_id = f.resting_id; ex.side = f.resting_side; ex.qty = f.qty;
-          deliver(ex, now_);
-        }
-        fills_seen_ = match_.fills().size();
-      } else {
-        deliver(e, now_);
-      }
+      //
+      //    UNCONDITIONALLY, and that is the fix. This used to run only inside
+      //    the `Aggress` branch, so a fill caused by the AGENT'S own order —
+      //    a limit that landed crossing, or a market order — was booked into
+      //    stats and never published. Until the next market Aggress happened
+      //    along, view_book_ still showed resting orders the agent's own order
+      //    had consumed, and then the backlog arrived stamped with that later
+      //    event's timestamp. In a run with no Aggress events it was never
+      //    published at all. The view is meant to LAG the truth by the inbound
+      //    latency; that made it wrong, which is the one thing the two-book
+      //    design exists to prevent.
+      publish_new_fills(e.seq);
 
       // 5. The agent decides, on what it currently knows.
       agent(AgentView{view_book_, view_fe_.get(), now_, stats_.inventory}, *this);
@@ -146,6 +155,13 @@ class Simulator {
   void send_cancel(OrderId id) {
     queue(Action{now_, arrival(), ActionType::Cancel, id, Side::Bid, 0, 0});
   }
+
+  // An agent that reads fills tells the simulator how far it has got, so the
+  // fill log can be trimmed. Global indices: pair it with fills_end().
+  void note_fills_read(std::uint64_t upto) noexcept { agent_read_ = upto; }
+  [[nodiscard]] std::uint64_t fills_begin() const noexcept { return match_.fills_begin(); }
+  [[nodiscard]] std::uint64_t fills_end() const noexcept { return match_.fills_end(); }
+  [[nodiscard]] const Fill& fill_at(std::uint64_t i) const noexcept { return match_.fill_at(i); }
 
   [[nodiscard]] const SimStats&  stats() const noexcept { return stats_; }
   [[nodiscard]] const OrderBook& true_book() const noexcept { return true_book_; }
@@ -182,12 +198,17 @@ class Simulator {
   void apply_action(const Action& a) {
     ++stats_.actions_applied;
     const std::size_t before = match_.fills().size();
+    // Stamped with the action's ARRIVAL time, not with the timestamp of the
+    // market event we happen to be inside. An action that reached the exchange
+    // at t=100 during an event at t=150 produced a fill dated 150, which is up
+    // to one inter-event gap of error in every markout computed from it.
+    const Nanos at = a.arrive_ts > 0 ? a.arrive_ts : now_;
     switch (a.type) {
       case ActionType::Limit:
-        (void)match_.submit_limit(now_, a.id, a.side, a.price, a.qty, /*mine=*/true);
+        (void)match_.submit_limit(at, a.id, a.side, a.price, a.qty, /*mine=*/true);
         break;
       case ActionType::Market:
-        (void)match_.submit_market(now_, a.id, a.side, a.qty, /*mine=*/true);
+        (void)match_.submit_market(at, a.id, a.side, a.qty, /*mine=*/true);
         break;
       case ActionType::Cancel:
         // The order may already have traded while the cancel was in flight.
@@ -196,6 +217,22 @@ class Simulator {
         break;
     }
     for (std::size_t i = before; i < match_.fills().size(); ++i) book_fill(match_.fills()[i]);
+  }
+
+  // Turn fills the exchange has produced into the executions a public feed
+  // would carry, and hand them to the agent's copy of the world. Each is
+  // delivered from the moment it HAPPENED (`f.ts`), not from now, so a fill
+  // caused by an order that landed between market events is not back-dated to
+  // the next one.
+  void publish_new_fills(SeqNum seq) {
+    for (std::uint64_t k = fills_seen_; k < match_.fills_end(); ++k) {
+      const Fill& f = match_.fill_at(k);
+      BookEvent ex{};
+      ex.ts = f.ts; ex.seq = seq; ex.type = EventType::Execute;
+      ex.order_id = f.resting_id; ex.side = f.resting_side; ex.qty = f.qty;
+      deliver(ex, f.ts);
+    }
+    fills_seen_ = match_.fills_end();
   }
 
   void book_fill(const Fill& f) {
@@ -239,7 +276,9 @@ class Simulator {
   FeatureEngine      view_fe_;
   InFlight           inflight_;
   std::deque<Delayed> pending_md_;
-  std::size_t        fills_seen_ = 0;
+  // Global fill indices, so a watermark survives the window sliding.
+  std::uint64_t      fills_seen_ = 0;   // published to the agent's view
+  std::uint64_t      agent_read_ = 0;   // what the agent says it has consumed
   Nanos              now_ = 0;
   SimStats           stats_{};
 };

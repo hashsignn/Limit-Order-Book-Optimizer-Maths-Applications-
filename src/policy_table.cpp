@@ -47,7 +47,19 @@ bool PolicyTable::save(const std::string& path, const std::vector<std::uint8_t>&
 }
 
 bool PolicyTable::load(const std::string& path, std::string* why) {
-  auto fail = [&](const std::string& m) { if (why) *why = m; policy_.clear(); return false; };
+  // Clears EVERYTHING. This used to clear policy_ only, so a truncated body
+  // left value_ holding kNumStates entries of whatever had been read plus
+  // zeros, and header_ describing the previous table. A caller that checks the
+  // return value is fine; one that inspects value_ afterwards reads a vector
+  // that looks valid. Every other check in this file exists to stop a wrong
+  // table answering a lookup, and this one left half a table behind.
+  auto fail = [&](const std::string& m) {
+    if (why) *why = m;
+    policy_.clear();
+    value_.clear();
+    header_ = TableHeader{};
+    return false;
+  };
 
   std::FILE* f = std::fopen(path.c_str(), "rb");
   if (f == nullptr) return fail("cannot open " + path);

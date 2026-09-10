@@ -52,7 +52,9 @@
       "n_orders": 1320,
       "dmax": 32.0,
       "inside_spread_excluded": 238,
-      "monotone": false
+      "monotone": false,
+      "k_over_se": 0.4566700114491387,
+      "identified": false
     },
     "ethusd": {
       "A": 0.0039669526036029855,
@@ -65,7 +67,9 @@
       "n_orders": 3959,
       "dmax": 32.0,
       "inside_spread_excluded": 207,
-      "monotone": false
+      "monotone": false,
+      "k_over_se": 2.626174444281932,
+      "identified": false
     },
     "xrpusd": {
       "A": 0.017436165331147484,
@@ -78,8 +82,10 @@
       "n_orders": 6008,
       "dmax": 32.0,
       "inside_spread_excluded": 380,
-      "monotone": true
+      "monotone": true,
+      "k_over_se": 5.526854253259348,
+      "identified": true
     }
   },
-  "caveat": "Ten minutes per instrument. Fill counts are 24-65 per instrument, so these are order-of-magnitude estimates. A-S has no queue term and these books sit at a one-tick spread almost always, where queue position rather than distance decides fills."
+  "caveat": "Ten minutes per instrument. Fill counts are 14-30 per instrument, so these are order-of-magnitude estimates. k is NOT identified on btcusd, ethusd -- the fit changes sign across cutoffs there, so use those numbers for nothing. A-S has no queue term and these books sit at a one-tick spread almost always, where queue position rather than distance decides fills."
 }

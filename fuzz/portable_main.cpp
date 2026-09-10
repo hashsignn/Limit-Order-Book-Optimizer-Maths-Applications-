@@ -15,6 +15,8 @@
 // interesting. It is a lower bound, not a substitute. What it buys is that the
 // targets run everywhere, on every commit, instead of only where someone
 // remembered to install a runtime.
+#include <atomic>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -23,9 +25,35 @@
 #include <string>
 #include <vector>
 
+#include <unistd.h>
+
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size);
 
 namespace {
+
+// The case in flight, so the handler below can name it. Written before each
+// case and read from a signal handler, hence the atomic; only async-signal-safe
+// calls are made from the handler itself.
+std::atomic<std::uint64_t> g_case_seed{0};
+long long g_case_index = -1;
+long long g_max_len    = 512;
+
+extern "C" void crash_handler(int sig) {
+  char buf[160];
+  const int n = std::snprintf(buf, sizeof buf,
+      "\n*** signal %d on case %lld ***\nreproduce with:  -replay_seed=%llu -max_len=%lld\n",
+      sig, g_case_index,
+      static_cast<unsigned long long>(g_case_seed.load(std::memory_order_relaxed)),
+      g_max_len);
+  if (n > 0) { const ssize_t w = ::write(2, buf, static_cast<std::size_t>(n)); (void)w; }
+  std::signal(sig, SIG_DFL);
+  std::raise(sig);                 // die the way we would have, so exit codes hold
+}
+
+void install_crash_handler() {
+  for (const int sig : {SIGSEGV, SIGABRT, SIGILL, SIGBUS, SIGFPE})
+    std::signal(sig, crash_handler);
+}
 
 // A crash under this driver must be reproducible. Every case is generated from
 // a seed that is printed, so a failure can be replayed exactly.
@@ -90,25 +118,50 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  long long runs = 200'000, seed = 20260904, max_len = 512;
+  long long runs = 200'000, seed = 20260904, max_len = 512, replay_seed = 0;
+  bool has_replay = false;
   for (int i = 1; i < argc; ++i) {
     if (flag_value(argv[i], "-runs", runs))    continue;
     if (flag_value(argv[i], "-seed", seed))    continue;
     if (flag_value(argv[i], "-max_len", max_len)) continue;
+    // Replay exactly the case a printed seed names, which is what makes the
+    // line above a reproducer rather than a note.
+    if (flag_value(argv[i], "-replay_seed", replay_seed)) { has_replay = true; continue; }
     // Anything else is a libFuzzer flag this driver has no equivalent for.
   }
   if (runs <= 0) runs = 200'000;
   if (max_len <= 4) max_len = 512;
 
+  if (has_replay) {
+    std::mt19937_64 case_rng{static_cast<std::uint64_t>(replay_seed)};
+    const std::vector<std::uint8_t> v = make_case(case_rng, static_cast<std::size_t>(max_len));
+    std::printf("replaying seed %llu (%zu bytes, max_len %lld)\n",
+                static_cast<unsigned long long>(replay_seed), v.size(), max_len);
+    LLVMFuzzerTestOneInput(v.data(), v.size());
+    std::printf("no crash\n");
+    return 0;
+  }
+
   std::printf("portable fuzz driver: %lld runs, max_len %lld, seed %llu (no coverage feedback)\n",
               runs, max_len, static_cast<unsigned long long>(seed));
   std::mt19937_64 rng{static_cast<std::uint64_t>(seed)};
 
+  // The current seed is published to a handler that runs when the target dies,
+  // so the reproducer survives the crash rather than dying with it.
+  //
+  // This file used to claim the seed was "reported on failure" and never print
+  // it anywhere. A target that hits __builtin_trap() kills the process, so a
+  // crash found on CI could not be replayed locally -- which removes most of
+  // the value of finding one. Printing every case instead would put 200,000
+  // lines in a CI log, so it is printed exactly once, when it matters.
+  g_max_len = max_len;
+  install_crash_handler();
+
   std::size_t total_bytes = 0;
   for (long long i = 0; i < runs; ++i) {
-    // The per-case seed is derived and reported on failure, so any crash this
-    // driver finds is reproducible without a corpus file.
     const std::uint64_t case_seed = rng();
+    g_case_index = i;
+    g_case_seed.store(case_seed, std::memory_order_relaxed);
     std::mt19937_64 case_rng{case_seed};
     const std::vector<std::uint8_t> v = make_case(case_rng, static_cast<std::size_t>(max_len));
     total_bytes += v.size();

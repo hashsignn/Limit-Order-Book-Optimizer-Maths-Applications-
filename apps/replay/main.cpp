@@ -38,6 +38,21 @@
 using namespace lob;
 
 namespace {
+// The cost of one clock read, MEASURED rather than written down. This was
+// `2.0 * to_nanos(35)` here, `to_nanos(30)` in apps/latency_demo and
+// `to_nanos(35)` again in bench/bench_book -- three hardcoded copies of one
+// measurable quantity, two of them disagreeing, in a repository whose argument
+// is that you measure rather than assume.
+[[nodiscard]] double measured_read_ns() {
+  constexpr int kN = 50'000;
+  const std::uint64_t s = tsc::now_serialized();
+  std::uint64_t sink = 0;
+  for (int i = 0; i < kN; ++i) sink += tsc::now();
+  const std::uint64_t e = tsc::now_serialized();
+  do_not_optimize(sink);
+  return static_cast<double>(tsc::to_nanos(e - s)) / kN;
+}
+
 void banner(const char* t) {
   std::printf("\n\033[1m%s\033[0m\n", t);
   for (std::size_t i = 0; i < std::strlen(t); ++i) std::putchar('-');
@@ -113,7 +128,7 @@ int replay_synthetic(int n, bool verify) {
   std::printf("  book  apply:   %s\n", per_event.summary().c_str());
   std::printf("  feature update: %s\n", feat_cost.summary().c_str());
   std::printf("  (each event pays ~%.0f ns of rdtsc overhead to be measured at all)\n",
-              2.0 * static_cast<double>(tsc::to_nanos(35)));
+              2.0 * measured_read_ns());
 
   banner("event mix");
   for (std::size_t t = 0; t < static_cast<std::size_t>(EventType::Count); ++t) {
@@ -160,8 +175,8 @@ int replay_synthetic(int n, bool verify) {
     const Features& f = fe.get();
     std::printf("\n  final features: imb %+.3f  deep_imb %+.3f  wmid %.2f (mid %.2f)\n",
                 f.imbalance, f.deep_imbalance, f.weighted_mid, f.mid);
-    std::printf("                  ofi_ewma %+.1f  vol_ewma %.4f ticks^2  rate %.0f evt/s\n",
-                f.ofi_ewma, f.vol_ewma, f.event_rate);
+    std::printf("                  ofi_decayed %+.1f  vol_ewma %.4f ticks^2  rate %.0f evt/s\n",
+                f.ofi_decayed, f.vol_ewma, f.event_rate);
   }
 
   if (verify) {
@@ -309,7 +324,7 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
   Histogram trade_size{1'000'000'000'000LL, 3};
   std::vector<Nanos> order_delay, trade_delay;
   std::uint64_t by_type[static_cast<std::size_t>(EventType::Count)] = {};
-  std::uint64_t applied = 0, rejected = 0, invariant_checks = 0;
+  std::uint64_t applied = 0, rejected = 0, invariant_checks = 0, seen_events = 0;
   Nanos first_ts = 0, last_ts = 0;
   Ticks mid_lo = 0, mid_hi = 0;
 
@@ -353,7 +368,13 @@ int replay_bitstamp(const char* capture, const char* snapshot_arg, bool verify,
         depth_hist.record(book.best_bid_qty() + book.best_ask_qty());
       }
 
-      if (verify && (applied % 10'000 == 0)) {
+      // Keyed on events SEEN, not on events applied. `applied` does not
+      // advance on a rejected event, so once it reached a multiple of 10,000
+      // this fired on every subsequent reject until the next success -- and
+      // check_invariants() is O(window x orders). It got slowest exactly when
+      // the capture was worst, which is when --verify is reached for.
+      ++seen_events;
+      if (verify && (seen_events % 10'000 == 0)) {
         std::string why;
         ++invariant_checks;
         if (!book.check_invariants(&why)) {
@@ -603,9 +624,13 @@ int main(int argc, char** argv) {
     else if (std::strcmp(a, "--bitstamp") == 0 && has_next) capture  = argv[++i];
     else if (std::strcmp(a, "--snapshot") == 0 && has_next) snapshot = argv[++i];
     else if (std::strcmp(a, "--price-decimals") == 0 && has_next)
-      { cfg.price_decimals = static_cast<unsigned>(std::atoi(argv[++i])); price_dp_set = true; }
+      { const int d = std::atoi(argv[++i]);
+        if (d < 0 || d > 18) { std::fprintf(stderr, "--price-decimals must be 0..18\n"); return 2; }
+        cfg.price_decimals = static_cast<unsigned>(d); price_dp_set = true; }
     else if (std::strcmp(a, "--qty-decimals") == 0 && has_next)
-      { cfg.qty_decimals = static_cast<unsigned>(std::atoi(argv[++i])); qty_dp_set = true; }
+      { const int d = std::atoi(argv[++i]);
+        if (d < 0 || d > 18) { std::fprintf(stderr, "--qty-decimals must be 0..18\n"); return 2; }
+        cfg.qty_decimals = static_cast<unsigned>(d); qty_dp_set = true; }
     else if (std::strcmp(a, "--band-ticks") == 0 && has_next)
       band = std::atoll(argv[++i]);
     else if (a[0] != '-') n = std::atoi(a);

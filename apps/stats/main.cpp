@@ -26,6 +26,8 @@
 //   mid.csv      the touch on a fixed grid, prices and sizes — the series
 //                markouts read forward into, the spread distribution, and the
 //                imbalance the MDP's state is built from.
+//   gap.csv      how far the touch is from the next occupied price, in ticks.
+//                The gap the price falls into when a best queue clears.
 //   depth.csv    mean resting size by tick distance from the touch. The shape
 //                that says whether a book is dense or sparse behind the touch.
 //   arrivals.csv gaps between consecutive events, in microseconds. Section 4
@@ -53,6 +55,7 @@ using namespace lob;
 namespace {
 
 constexpr std::uint32_t kProfileDepth = 40;   // levels each side for depth.csv
+constexpr std::uint32_t kGapMax       = 64;   // largest touch-to-next-level gap binned
 
 struct Rec {
   Nanos ts     = 0;   // when it joined the book
@@ -165,6 +168,18 @@ class Accumulator {
       const Side side = (s == 0) ? Side::Bid : Side::Ask;
       const Ticks same = (s == 0) ? book.best_bid() : book.best_ask();
       const std::uint32_t n = book.depth(side, kProfileDepth, px_buf, qty_buf);
+      if (n >= 2) {
+        // px_buf is ordered outward from the touch, so index 1 IS the next
+        // occupied price. Reading it off the same walk the depth profile uses
+        // keeps the two consistent -- an independent probe over the same book
+        // disagreed with the profile by a factor of two, and the cause was a
+        // different tool sampling a different window.
+        Ticks g = (s == 0) ? (px_buf[0] - px_buf[1]) : (px_buf[1] - px_buf[0]);
+        if (g < 0) g = 0;
+        const std::uint32_t b = g >= static_cast<Ticks>(kGapMax)
+                                    ? kGapMax : static_cast<std::uint32_t>(g);
+        ++gap_n_[static_cast<std::size_t>(s) * (kGapMax + 1) + b];
+      }
       for (std::uint32_t k = 0; k < n; ++k) {
         const Ticks dist = (s == 0) ? (same - px_buf[k]) : (px_buf[k] - same);
         if (dist < 0 || dist >= static_cast<Ticks>(kProfileDepth)) continue;
@@ -174,6 +189,18 @@ class Accumulator {
         ++prof_n_[idx];
       }
     }
+  }
+
+  // gap.csv: side, gap in ticks, how many grid samples showed it. The last row
+  // per side is the >= kGapMax bucket.
+  void write_gap(std::FILE* f) const {
+    std::fprintf(f, "side,gap_ticks,samples\n");
+    for (int s = 0; s < 2; ++s)
+      for (std::uint32_t k = 0; k <= kGapMax; ++k) {
+        const std::uint64_t v = gap_n_[static_cast<std::size_t>(s) * (kGapMax + 1) + k];
+        if (v == 0) continue;
+        std::fprintf(f, "%d,%u,%llu\n", s, k, static_cast<unsigned long long>(v));
+      }
   }
 
   void write_depth(std::FILE* f) const {
@@ -232,6 +259,12 @@ class Accumulator {
   std::unordered_map<OrderId, Rec> live_;
   std::vector<double>        prof_sum_ = std::vector<double>(2 * kProfileDepth, 0.0);
   std::vector<std::uint64_t> prof_n_   = std::vector<std::uint64_t>(2 * kProfileDepth, 0);
+  // How far the touch is from the next price with anything on it, per side, in
+  // ticks. This is the gap the price falls into when a best queue clears, and
+  // it is the one number the simulator's reference price has never had: it
+  // steps exactly one tick, because its modelled queues sit at consecutive
+  // ticks by construction. Bucket kGapMax holds everything at or beyond it.
+  std::vector<std::uint64_t> gap_n_ = std::vector<std::uint64_t>(2 * (kGapMax + 1), 0);
   std::uint64_t n_ord_ = 0, n_trd_ = 0, n_mid_ = 0, n_neg_dist_ = 0, n_abandoned_ = 0;
   std::uint64_t neg_hist_[4] = {};   // 1 tick, 2-4, 5-16, 17+
 };
@@ -285,6 +318,12 @@ int main(int argc, char** argv) {
   // not silent, but the book then describes a market that stopped existing.
   double band_pct = 0.02;
   int synthetic = 0;
+  // How much of the snapshot to decline to seed, as a percentage of the mid.
+  // 0.3 is the setting every capture statistic in this repository was measured
+  // at; apps/replay has always exposed it and this tool has not, which made a
+  // question it is the natural tool for -- how much of the book's shape is the
+  // guard's hole rather than the market's -- impossible to ask here.
+  double seed_guard_pct = 0.3;
   bool calibrated = false, queue_reactive = false;
   double excite = -1.0, excite_tau = -1.0, theta = -1.0, reinit = -1.0, alpha = -99.0;
   // Negative leaves the FlowConfig default in place; see apps/evaluate for why
@@ -310,6 +349,7 @@ int main(int argc, char** argv) {
       ++i;
     }
     else if (std::strcmp(argv[i], "--band-pct") == 0 && nx) band_pct = std::atof(argv[++i]);
+    else if (std::strcmp(argv[i], "--seed-guard-pct") == 0 && nx) seed_guard_pct = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--outdir")  == 0 && nx) dir = argv[++i];
     else if (std::strcmp(argv[i], "--warmup")  == 0 && nx) warmup_sec = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--grid-ms") == 0 && nx) grid_ms = std::atof(argv[++i]);
@@ -337,7 +377,7 @@ int main(int argc, char** argv) {
         "                       flow -- rates that depend on each queue's own\n"
         "                       size -- instead of fixed weights. Implies\n"
         "                       --calibrated.\n"
-        "      [--band-pct 0.02]\n"
+        "      [--band-pct 0.02] [--seed-guard-pct 0.3]\n"
         "\n"
         "  --capture-dir   every *_bitstamp.jsonl.gz in a directory, in name order.\n"
         "                  An hours-long recording rotates hourly and is seeded by a\n"
@@ -345,8 +385,17 @@ int main(int argc, char** argv) {
         "  --band-pct      half-width of the price window, as a fraction of the\n"
         "                  opening mid. Prices outside it are rejected. 2%% is fine\n"
         "                  for ten minutes and much too narrow for eight hours.\n"
+        "  --seed-guard-pct  how much of the snapshot NOT to seed, as a percentage\n"
+        "                  of the mid (0.3). Snapshot orders within this band of\n"
+        "                  the snapshot touch are dropped, because their deletes\n"
+        "                  happened before the capture began and nothing in the\n"
+        "                  stream would ever remove them. The cost is that the\n"
+        "                  band starts EMPTY and only refills from the stream, so\n"
+        "                  everything this tool reports about the shape of the\n"
+        "                  book BEHIND the touch depends on this number. Sweep it\n"
+        "                  before believing any of it.\n"
         "\n"
-        "Writes orders/trades/mid/depth/arrivals CSVs. --synthetic measures the\n"
+        "Writes orders/trades/mid/depth/arrivals/gap CSVs. --synthetic measures the\n"
         "simulator's own flow instead of a capture, which is what Phase 5's\n"
         "evaluation calibrates against.\n");
       return 2;
@@ -378,7 +427,8 @@ int main(int argc, char** argv) {
   std::FILE* f_mid = open_out(dir, name, "mid");
   std::FILE* f_dep = open_out(dir, name, "depth");
   std::FILE* f_arr = open_out(dir, name, "arrivals");
-  if (!f_ord || !f_trd || !f_mid || !f_dep || !f_arr) return 2;
+  std::FILE* f_gap = open_out(dir, name, "gap");
+  if (!f_ord || !f_trd || !f_mid || !f_dep || !f_arr || !f_gap) return 2;
   std::fprintf(f_ord, "t_ms,lifetime_ms,side,dist_ticks,spread_ticks,q_ahead,size,filled,cancelled\n");
   std::fprintf(f_trd, "t_ms,px,side,qty,bid,ask,dist_ticks\n");
   std::fprintf(f_mid, "t_ms,bid,ask,bid_qty,ask_qty\n");
@@ -530,7 +580,7 @@ int main(int argc, char** argv) {
     if (band < 4096) band = 4096;
     cfg.window_ticks = band;
     cfg.window_base  = mid0 - band / 2;
-    cfg.seed_guard   = static_cast<Ticks>(static_cast<double>(mid0) * 0.003);
+    cfg.seed_guard   = static_cast<Ticks>(static_cast<double>(mid0) * seed_guard_pct / 100.0);
 
     BitstampDecoder dec{cfg};
     OrderBook book{cfg.window_base, static_cast<std::uint32_t>(band), 1 << 21};
@@ -685,8 +735,9 @@ int main(int argc, char** argv) {
   }
 
   acc.write_depth(f_dep);
+  acc.write_gap(f_gap);
   if (std::FILE* f_qr = open_out(dir, name, "qr")) { qr.write(f_qr); std::fclose(f_qr); }
-  for (std::FILE* f : {f_ord, f_trd, f_mid, f_dep, f_arr}) std::fclose(f);
+  for (std::FILE* f : {f_ord, f_trd, f_mid, f_dep, f_arr, f_gap}) std::fclose(f);
   std::fprintf(stderr, "%s: %llu orders, %llu trades, %llu mid samples\n", name.c_str(),
                static_cast<unsigned long long>(acc.orders()),
                static_cast<unsigned long long>(acc.trades()),

@@ -46,6 +46,14 @@ struct BookTop {
 
 struct Features {
   // --- state ---
+  // False when the last update saw a one-sided or empty book. Everything from
+  // `bid` to `weighted_mid` below is then STALE -- it holds whatever the last
+  // two-sided book said, because there is no meaningful value to replace it
+  // with. There was no way to tell before, and `updates` still incremented, so
+  // a consumer could not distinguish "the mid is 9,991.5" from "the mid was
+  // 9,991.5 before the ask side emptied". A one-sided book is precisely the
+  // state a market maker must not quote into.
+  bool   two_sided    = false;
   Ticks  bid          = 0;
   Ticks  ask          = 0;
   Qty    bid_qty      = 0;
@@ -69,7 +77,12 @@ struct Features {
   // --- order flow imbalance ---
   double ofi_touch    = 0.0;   // this event's contribution at the touch
   double ofi_deep     = 0.0;   // summed over kOfiLevels
-  double ofi_ewma     = 0.0;   // decayed running sum, the usable signal
+  // A decayed running SUM, not an EWMA -- the update is (1-a)*prev + new, with
+  // no `a` on the new term, unlike vol_ewma below. That is deliberate and the
+  // comment at the update site explains why, but the two sat under the same
+  // `_ewma` suffix on scales roughly 145x apart at the default half-life, which
+  // invited them to be compared or normalised alike.
+  double ofi_decayed  = 0.0;   // decayed running sum, the usable signal
 
   // --- dynamics ---
   double vol_ewma     = 0.0;   // EWMA of squared mid changes, in ticks
@@ -85,12 +98,21 @@ struct FeatureConfig {
   // the intraday seasonality that a wall clock drags in.
   double ofi_halflife_events = 100.0;
   double vol_halflife_events = 500.0;
-  double rate_halflife_ns    = 1e9;    // this one IS a clock: it measures the clock
+  // A TIME CONSTANT, not a half-life -- and named as one now. The update below
+  // is alpha = 1 - exp(-dt / tau), with no log(2), while the two above do
+  // include it. So the actual half-life of event_rate is tau * ln 2, about
+  // 0.693 s, and the old name promised 1 s.
+  double rate_tau_ns         = 1e9;    // this one IS a clock: it measures the clock
 };
 
 class FeatureEngine {
  public:
   explicit FeatureEngine(FeatureConfig cfg = {}) : cfg_(cfg) {
+    // A non-positive half-life gives alpha >= 1 and an EWMA that diverges
+    // rather than decays. Nothing checked it.
+    if (cfg_.ofi_halflife_events <= 0.0) cfg_.ofi_halflife_events = 1.0;
+    if (cfg_.vol_halflife_events <= 0.0) cfg_.vol_halflife_events = 1.0;
+    if (cfg_.rate_tau_ns          <= 0.0) cfg_.rate_tau_ns        = 1e9;
     ofi_alpha_  = 1.0 - std::exp(-std::log(2.0) / cfg_.ofi_halflife_events);
     vol_alpha_  = 1.0 - std::exp(-std::log(2.0) / cfg_.vol_halflife_events);
   }
@@ -102,8 +124,9 @@ class FeatureEngine {
     snapshot(book, now);
 
     f_.updates++;
+    f_.two_sided = (now.n_bid > 0 && now.n_ask > 0);
 
-    if (now.n_bid > 0 && now.n_ask > 0) {
+    if (f_.two_sided) {
       f_.bid     = now.bid_px[0];
       f_.ask     = now.ask_px[0];
       f_.bid_qty = now.bid_qty[0];
@@ -136,7 +159,7 @@ class FeatureEngine {
       f_.ofi_deep = deep;
       // Decayed sum rather than a fixed window: no edge effects, one number of
       // state, and the half-life is the only parameter.
-      f_.ofi_ewma = (1.0 - ofi_alpha_) * f_.ofi_ewma + f_.ofi_deep;
+      f_.ofi_decayed = (1.0 - ofi_alpha_) * f_.ofi_decayed + f_.ofi_deep;
     } else {
       f_.ofi_touch = f_.ofi_deep = 0.0;
     }
@@ -151,7 +174,7 @@ class FeatureEngine {
     if (last_ts_ != 0 && ts > last_ts_) {
       f_.since_last = ts - last_ts_;
       const double dt_s  = static_cast<double>(f_.since_last) * 1e-9;
-      const double alpha = 1.0 - std::exp(-static_cast<double>(f_.since_last) / cfg_.rate_halflife_ns);
+      const double alpha = 1.0 - std::exp(-static_cast<double>(f_.since_last) / cfg_.rate_tau_ns);
       const double inst  = dt_s > 0.0 ? 1.0 / dt_s : 0.0;
       f_.event_rate = (1.0 - alpha) * f_.event_rate + alpha * inst;
     }

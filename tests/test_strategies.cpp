@@ -6,6 +6,7 @@
 #include "test_util.hpp"
 
 #include <cmath>
+#include <string>
 
 using namespace lob;
 
@@ -167,6 +168,12 @@ int main() {
       for (const Quote& q : qs) {
         // Never quote a crossed or locked pair.
         CHECK(q.bid < q.ask);
+        // And never quote THROUGH THE MARKET. This is the assertion that was
+        // missing: q.bid < q.ask forbids a self-crossed pair and says nothing
+        // about the book, so a strategy centred far from the mid passed it
+        // while emitting orders that took liquidity on arrival.
+        if (q.bid_on) CHECK(q.bid < b.best_ask());
+        if (q.ask_on) CHECK(q.ask > b.best_bid());
         // Respect the inventory limit: stop adding to a position at its bound.
         if (inv >=  p.max_inventory) CHECK(!q.bid_on);
         if (inv <= -p.max_inventory) CHECK(!q.ask_on);
@@ -174,6 +181,77 @@ int main() {
         CHECK(q.ask - q.bid >= 2 * p.min_half - 1);
       }
     }
+  }
+
+  // ---- the same sweep, on the SHIPPED DEFAULTS ----
+  // Every other block in this file builds its own QuoteParams, and apps/backtest
+  // does too. apps/evaluate does not: base_params() sets size and
+  // max_inventory and leaves the risk parameters alone. So the defaults were the
+  // one configuration nothing exercised, and they were the broken one.
+  {
+    OrderBook b = book_at(9'998, 10'002);
+    QuoteParams d;                       // defaults, deliberately untouched
+    d.size = 10; d.max_inventory = 50;   // as apps/evaluate sets them
+
+    // A market maker whose quote leaves the book at full inventory is crossing,
+    // not skewing. Assert the scale directly, so a bad default fails here rather
+    // than in a results table.
+    ::lobtest::report(d.skew_at_limit() < 20.0, "skew at the position limit is quotable",
+                      __FILE__, __LINE__,
+                      std::to_string(d.skew_at_limit()) + " ticks at inventory " +
+                      std::to_string(d.max_inventory));
+
+    for (const std::int64_t inv : {-60, -50, -25, -1, 0, 1, 25, 50, 60}) {
+      const AgentView v{b, f, 0, inv};
+      const Quote qs[] = {ConstantSpread{d, 1}.quote(v), InventorySkew{d, 1}.quote(v),
+                          AvellanedaStoikov{d}.quote(v), GLFT{d}.quote(v),
+                          ImbalanceSkew{d}.quote(v), JoinTouch{d}.quote(v)};
+      for (const Quote& q : qs) {
+        if (q.bid_on) ::lobtest::report(q.bid < b.best_ask(), "default params: bid never crosses",
+                                        __FILE__, __LINE__,
+                                        "inv=" + std::to_string(inv) + " bid=" + std::to_string(q.bid));
+        if (q.ask_on) ::lobtest::report(q.ask > b.best_bid(), "default params: ask never crosses",
+                                        __FILE__, __LINE__,
+                                        "inv=" + std::to_string(inv) + " ask=" + std::to_string(q.ask));
+      }
+    }
+  }
+
+  // ---- a one-sided book yields no quote at all ----
+  // best_bid() answers 0 for an empty side, so a mid taken from a one-sided book
+  // is half the other side's price. Every strategy must decline rather than
+  // quote around it.
+  {
+    OrderBook b{9'000, 2048, 4096};
+    (void)b.add(1, Side::Ask, 10'002, 100);       // asks only
+    QuoteParams d; d.size = 10; d.max_inventory = 50;
+    const AgentView v{b, f, 0, 0};
+    const Quote qs[] = {ConstantSpread{d, 1}.quote(v), InventorySkew{d, 1}.quote(v),
+                        AvellanedaStoikov{d}.quote(v), GLFT{d}.quote(v),
+                        ImbalanceSkew{d}.quote(v), JoinTouch{d}.quote(v)};
+    for (const Quote& q : qs) { CHECK(!q.bid_on); CHECK(!q.ask_on); }
+  }
+
+  // ---- GLFT's quotes must actually vary with inventory ----
+  // half_bid/half_ask are tested above as raw doubles, before assemble()'s
+  // clamp. That passed while min_half = 1 erased the entire inventory term and
+  // left the clamped quotes constant, so GLFT scored within 3% of
+  // ConstantSpread on 60,000 events. Assert the property that matters: the
+  // quotes, after clamping, are not the same at flat and at full inventory.
+  //
+  // On a ONE-TICK book, which is the regime this project exists for. A wide
+  // book hides the defect: at a 4-tick spread the mid is a whole tick, so even a
+  // clamped 1.0 against 1.2 lands on different ticks. At a one-tick spread the
+  // mid sits on a half tick and both clamp to the same quote.
+  {
+    OrderBook b = book_at(10'000, 10'001);
+    QuoteParams d; d.size = 10; d.max_inventory = 50;
+    const Quote flat = GLFT{d}.quote(AgentView{b, f, 0,  0});
+    const Quote lng  = GLFT{d}.quote(AgentView{b, f, 0, 50});
+    ::lobtest::report(flat.bid != lng.bid || flat.ask != lng.ask,
+                      "GLFT quotes vary with inventory after clamping", __FILE__, __LINE__,
+                      "flat " + std::to_string(flat.bid) + "/" + std::to_string(flat.ask) +
+                      "  long " + std::to_string(lng.bid) + "/" + std::to_string(lng.ask));
   }
 
   return lobtest::summary("strategies");

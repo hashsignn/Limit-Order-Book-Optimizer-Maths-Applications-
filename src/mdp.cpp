@@ -1,5 +1,7 @@
 #include "lob/policy/mdp.hpp"
 
+#include <cstdint>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -132,6 +134,24 @@ std::uint64_t MdpParams::hash() const noexcept {
   h = fnv(h, edge_ticks, sizeof edge_ticks);
   h = fnv(h, &inventory_penalty, sizeof inventory_penalty);
   h = fnv(h, &discount, sizeof discount);
+  // THE DISCRETISATION ITSELF, not just the numbers measured over it.
+  //
+  // kImbEdges and kQueueEdges are declared in include/lob/policy/state.hpp and
+  // again in tools/mdp_params.py, and state.hpp says outright that a drift
+  // means "the policy is solved against one book and applied to another".
+  // Nothing enforced it: PolicyTable's header check compares bucket COUNTS, and
+  // moving an edge leaves every count unchanged. So the solver would compute a
+  // correct policy over one bucketing and the executor would index it with
+  // another, and every lookup would return a real action for a different state.
+  //
+  // Folding the edges into the hash makes the artefact carry them: change an
+  // edge on either side and the hash changes, so apps/solve refuses a table
+  // solved under the old one. That is the same mechanism the rest of the header
+  // already uses, applied to the one field it was missing.
+  h = fnv(h, kImbEdges, sizeof kImbEdges);
+  h = fnv(h, kQueueEdges, sizeof kQueueEdges);
+  const std::int32_t shape[] = {kMaxInventory, kQueueBuckets, kQuoteLevels, kImbBuckets};
+  h = fnv(h, shape, sizeof shape);
   return h;
 }
 

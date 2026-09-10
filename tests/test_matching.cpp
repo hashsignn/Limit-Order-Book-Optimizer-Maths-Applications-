@@ -156,6 +156,39 @@ int main() {
     CHECK_EQ(r3.filled, 0);                         // nothing left; no spin, no crash
   }
 
+  // ---- the fill log is a sliding window, not an unbounded vector ----
+  // It used to grow for the life of the engine, so memory scaled with run
+  // length. fuzz/fuzz_matching.cpp calls clear_fills() every 32 operations
+  // purely to work around that. Nothing is dropped until a consumer says it has
+  // read it, and an index handed out earlier stays valid across the trim.
+  {
+    OrderBook b = make_book(); MatchingEngine m{b};
+    for (int i = 0; i < 200; ++i) {
+      put(b, static_cast<OrderId>(i + 1), Side::Ask, 10'005, 10);
+      (void)m.submit_market(1000 + i, static_cast<OrderId>(9000 + i), Side::Bid, 10);
+    }
+    CHECK_EQ(m.fills_begin(), 0U);
+    CHECK_EQ(m.fills_end(), 200U);
+    const Fill f150 = m.fill_at(150);          // note the value before trimming
+
+    m.consume_through(150);
+    CHECK_EQ(m.fills_begin(), 150U);
+    CHECK_EQ(m.fills_end(), 200U);             // the end index does not move
+    CHECK_EQ(m.fills().size(), 50U);           // but the window really shrank
+    // The same global index still names the same fill.
+    CHECK_EQ(m.fill_at(150).resting_id, f150.resting_id);
+    CHECK_EQ(m.fill_at(150).ts, f150.ts);
+
+    m.consume_through(150);                    // idempotent
+    CHECK_EQ(m.fills_begin(), 150U);
+    m.consume_through(10);                     // already behind the window
+    CHECK_EQ(m.fills_begin(), 150U);
+    m.consume_through(10'000);                 // past the end: drains it
+    CHECK_EQ(m.fills_begin(), 200U);
+    CHECK_EQ(m.fills().size(), 0U);
+    CHECK_EQ(m.fills_end(), 200U);
+  }
+
   // ---- the book is never left crossed after matching ----
   {
     OrderBook b = make_book(); MatchingEngine m{b};
