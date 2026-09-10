@@ -58,6 +58,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 
     std::int64_t d = 0;
     (void)lob::json::parse_decimal(v, 8, &d);
+    // Scales above 18 must be refused, not attempted; that branch was never
+    // entered because every call here passed 8.
+    if (lob::json::parse_decimal(v, 19, &d)) {
+      std::fprintf(stderr, "parse_decimal accepted a scale of 19\n");
+      __builtin_trap();
+    }
     std::uint64_t u = 0;
     (void)lob::json::parse_u64(v, &u);
   }
@@ -73,6 +79,23 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         __builtin_trap();
       }
     }
+  }
+
+  // ---- the two snapshot readers ----
+  // Both take raw snapshot text and both are called on file input by
+  // apps/replay and apps/tape BEFORE anything else runs -- detect_decimals sets
+  // the quoting precision and snapshot_touch centres the price window. Only
+  // load_snapshot was fuzzed, so the two functions that run first were the two
+  // that were never fuzzed at all.
+  {
+    unsigned pd = 0, qd = 0;
+    (void)lob::BitstampDecoder::detect_decimals(all, &pd, &qd);
+    if (pd > 18 || qd > 18) {
+      std::fprintf(stderr, "detect_decimals returned an unusable scale: %u/%u\n", pd, qd);
+      __builtin_trap();
+    }
+    lob::Ticks bb = 0, ba = 0;
+    (void)lob::BitstampDecoder::snapshot_touch(all, cfg(), &bb, &ba);
   }
 
   // ---- the decoder, and the book behind it ----

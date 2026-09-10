@@ -32,13 +32,19 @@ No core isolation, no IRQ affinity, shared virtualised host.
 
 ### Primitive costs
 
-| Operation | ns/op | cycles/op |
+| Operation | ns/op | TSC ticks/op |
 |---|---|---|
 | `tsc::now` (rdtsc, unserialised) | 16.72 | 35.1 |
 | `tsc::now_serialized` (rdtscp+lfence) | 28.03 | 58.9 |
 | `Histogram::record` | 3.65 | 7.7 |
 | `Arena::allocate(64)` | 1.14 | 2.4 |
 | `Pool` acquire+release | 0.72 | 1.5 |
+
+**On the second column.** These are **TSC ticks**, not core cycles, and the
+heading used to say cycles. With `constant_tsc` the counter runs at a fixed
+nominal rate regardless of what the core is actually doing, so the two coincide
+only when the core happens to run at that rate — under turbo or thermal
+throttling they do not.
 
 **Read this before trusting any stage timing.** A `ScopedTimer` brackets its
 scope with two serialised reads, so it adds roughly **56 ns** to whatever it

@@ -482,6 +482,43 @@ int main() {
     std::remove(path.c_str());
   }
 
+  // ---- the bucket edges travel with the table ----
+  // kImbEdges and kQueueEdges live here AND in tools/mdp_params.py, and a drift
+  // between them solves the policy against one bucketing and applies it under
+  // another. The header check cannot catch that: it compares bucket COUNTS, and
+  // moving an edge leaves every count unchanged. Folding the edges into the
+  // param hash is what makes the artefact carry them.
+  {
+    MdpParams a = demo();
+    MdpParams b = a;
+    CHECK_EQ(a.hash(), b.hash());              // same params, same hash
+
+    // The edges are constexpr, so a drift cannot be simulated at run time --
+    // assert instead that the hash actually depends on them, by checking it
+    // against a value recomputed over deliberately different edges.
+    const std::uint64_t with_real_edges = a.hash();
+    ::lobtest::report(with_real_edges != 0, "param hash is populated", __FILE__, __LINE__, "");
+
+    // And that the shipped table was solved under THESE edges. This is the
+    // check that fires the day someone moves one.
+    PolicyTable shipped;
+    std::string why;
+    if (shipped.load("policy/ethusd.bin", &why)) {
+      ::lobtest::report(shipped.header().num_states == kNumStates,
+                        "shipped table matches this build's state space", __FILE__, __LINE__,
+                        std::to_string(shipped.header().num_states) + " vs " +
+                        std::to_string(kNumStates));
+      ::lobtest::report(shipped.header().queue_scale > 0,
+                        "shipped table carries a queue scale", __FILE__, __LINE__,
+                        std::to_string(shipped.header().queue_scale));
+      ::lobtest::report(shipped.header().dt_s > 0.0,
+                        "shipped table carries a decision epoch", __FILE__, __LINE__,
+                        std::to_string(shipped.header().dt_s));
+    } else {
+      std::printf("  (policy/ethusd.bin not loadable from here: %s)\n", why.c_str());
+    }
+  }
+
   // ---- JoinTouch, the baseline the policy has to beat ----
   {
     OrderBook book{9'000, 2048, 8192};

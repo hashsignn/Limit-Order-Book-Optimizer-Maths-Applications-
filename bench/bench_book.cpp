@@ -70,8 +70,13 @@ int main() {
                                10'000 + ((i & 1) ? -1 : 1) * static_cast<Ticks>(1 + (i % 20)), 10));
     }));
 
-  // Cancel an order in the middle of a queue: the O(1) unlink claim.
-  r.push_back(bench("cancel (mid-queue)", kN, 7,
+  // Cancel from the HEAD of a queue: the O(1) unlink claim. Named
+  // "mid-queue" until an audit noticed the setup adds ids in order and the
+  // timed loop removes them in the same order, so it is always the current
+  // head. Both are O(1) for an intrusive doubly-linked list, so the claim
+  // stands -- but the head is the hottest pointer in the level, so this is the
+  // best case and the label said otherwise.
+  r.push_back(bench("cancel (queue head)", kN, 7,
     [] {
       auto b = std::make_unique<OrderBook>(kBase, kWindow, kOrders);
       for (std::size_t i = 0; i < kN + 1000; ++i)
@@ -196,13 +201,17 @@ int main() {
     std::printf("  per event: %s\n", h.summary().c_str());
     std::printf("  (includes ~%.0f ns of rdtsc overhead per event)\n",
                 2.0 * static_cast<double>(tsc::to_nanos(35)));
+    // Every error class, not errors[1]..errors[5]. CrossedBook is index 6 and
+    // Count is 7, so crossing rejections -- the one the synthetic generator most
+    // often produces -- were invisible in this total.
+    std::uint64_t rejected = 0;
+    for (std::size_t i = 1; i < static_cast<std::size_t>(BookError::Count); ++i)
+      rejected += b.stats().errors[i];
     std::printf("  accepted %llu, rejected %llu\n",
                 static_cast<unsigned long long>(b.stats().adds + b.stats().deletes +
                                                 b.stats().executes + b.stats().reduces +
                                                 b.stats().replaces),
-                static_cast<unsigned long long>(
-                    b.stats().errors[1] + b.stats().errors[2] + b.stats().errors[3] +
-                    b.stats().errors[4] + b.stats().errors[5]));
+                static_cast<unsigned long long>(rejected));
   }
 
   std::printf("\nMedian of 7 batches, 2 discarded. Warm cache, idle machine: a floor.\n");

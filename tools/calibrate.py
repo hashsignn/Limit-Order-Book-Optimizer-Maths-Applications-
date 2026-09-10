@@ -272,12 +272,39 @@ def main():
 
     figure(pairs, data, results, qres, a.dmax, out)
 
+    # Mark which estimates are usable, in the estimates themselves.
+    #
+    # k_stability_ratio already diagnoses this correctly -- btcusd's k runs
+    # 48.1, 49.5, 48.2, 0.02, -0.019, -0.001 across the six cutoffs, a sign
+    # change and four orders of magnitude -- and the instruments block shipped
+    # the point estimates beside it with nothing to say so. A consumer reading
+    # results["btcusd"]["k"] got 0.0199 against a standard error of 0.0436, less
+    # than half a standard error from zero, and no marker.
+    for p_, r_ in results.items():
+        st_ = stability.get(p_, {})
+        r_["k_over_se"] = (r_["k"] / r_["se_k"]) if r_["se_k"] else float("nan")
+        r_["identified"] = bool(
+            not st_.get("sign_change", True)
+            and np.isfinite(st_.get("ratio", float("nan")))
+            and abs(r_["k_over_se"]) >= 2.0)
+
+    # And derive the caveat from the data rather than writing it out. This said
+    # "Fill counts are 24-65 per instrument" as a literal while the file's own
+    # numbers were 15, 14 and 30 -- drifted, and drifted in the direction that
+    # made the estimates look better founded than they are.
+    counts = sorted(int(r_["fills"]) for r_ in results.values())
+    named = [p_ for p_, r_ in results.items() if not r_["identified"]]
+    unusable = ("" if not named else
+                " k is NOT identified on " + ", ".join(sorted(named)) +
+                " -- the fit changes sign across cutoffs there, so use those"
+                " numbers for nothing.")
     payload = {"model": "lambda(delta) = A * exp(-k * delta), delta in ticks from mid",
                "estimator": "per-order Poisson MLE, Newton-Raphson, observed-information SEs",
                "fit_range_ticks": a.dmax, "k_stability_ratio": stability,
                "instruments": results,
-               "caveat": "Ten minutes per instrument. Fill counts are 24-65 per instrument, "
-                         "so these are order-of-magnitude estimates. A-S has no queue term and "
+               "caveat": f"Ten minutes per instrument. Fill counts are "
+                         f"{counts[0]}-{counts[-1]} per instrument, so these are "
+                         f"order-of-magnitude estimates.{unusable} A-S has no queue term and "
                          "these books sit at a one-tick spread almost always, where queue "
                          "position rather than distance decides fills."}
     (out / "calibration.json").write_text(json.dumps(payload, indent=2))

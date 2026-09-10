@@ -213,6 +213,30 @@ measurement last. Then you can't tell whether a change helped.
 
 ---
 
+### Why Phase 5's criterion currently returns no signal
+
+Not merely unmet — uninformative, and the reason is worth stating where the
+criterion is.
+
+Dumping `policy/ethusd.bin` over all 14,080 states: **97.8% of the solved policy
+is `JoinTouch`'s rule exactly** — quote both sides at the touch, pull one side at
+the position limit. The two 1,280-state blocks that pull a side are precisely one
+whole inventory level each. Only 304 states (2.2%) differ, all of them "quote one
+side a tick behind", and reaching one needs `|inventory| >= 3` **while alone at
+the touch**. A 60,000-event run never gets there, which is why the comparison
+against `JoinTouch` returned a mean of exactly +0.0 with a confidence interval of
+[+0.0, +0.0]. At 250,000 events over 6 seeds it does break, by 3.4 ticks on one
+extra requote out of 4,491.
+
+So value iteration on this process converges to join-the-touch, and the criterion
+compares a policy against a baseline it reproduced. The open question is whether
+that is the truth about large-tick market making — where the decision is queue
+position rather than price, which is the premise the whole state design rests on
+— or an artefact of a state space too coarse to express anything else. The 2.2%
+of states that do differ are where to look. See `docs/KNOWN-ISSUES.md` 6.
+
+---
+
 ## Phase 6 — Shadow mode
 
 **No orders are sent to any venue in this phase, or in this project.** The point is to run

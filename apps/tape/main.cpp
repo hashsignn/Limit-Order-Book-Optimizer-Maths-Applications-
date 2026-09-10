@@ -166,6 +166,8 @@ int main(int argc, char** argv) {
   bool  own_hit = false;       // a print got through to our order
   int   own_fills = 0, own_placements = 0;
   Nanos own_placed_ts = 0;
+  // How long each derived fill took from placement. Reported below; it used to
+  // be accumulated and never read.
   std::vector<Nanos> fill_latencies;
 
   std::string_view line;
@@ -173,7 +175,10 @@ int main(int argc, char** argv) {
   const Nanos start_ns = static_cast<Nanos>(start_sec * 1e9);
   const Nanos span_ns  = static_cast<Nanos>(span_sec * 1e9);
   const Nanos warmup   = static_cast<Nanos>(warmup_sec * 1e9);
-  const Nanos frame_gap = static_cast<Nanos>(1e9 / (fps > 0 ? fps : 10.0));
+  // Guarded against negative as well as zero: a negative fps gave a negative
+  // frame_gap, so next_frame_at was always in the past and every event emitted
+  // a frame.
+  const Nanos frame_gap = static_cast<Nanos>(1e9 / (fps > 0.0 ? fps : 10.0));
   Nanos next_frame_at = 0;
 
   std::vector<Trade> pending;
@@ -253,7 +258,13 @@ int main(int argc, char** argv) {
       }
     }
 
-    if (rel < start_ns) continue;
+    // Clear the trade buffer on the pre-start path too. `pending` was only
+    // cleared when a frame was written, and no frame can be written before
+    // --start -- so every print between the end of warm-up and --start was held
+    // in memory and then dumped into frame zero. With the defaults that is 60
+    // seconds of trades in the first frame, and a large --start grows it
+    // without bound.
+    if (rel < start_ns) { pending.clear(); continue; }
     if (rel > start_ns + span_ns) break;
 
     // A frame on a fixed grid of market time, so playback runs at a constant
@@ -316,9 +327,22 @@ int main(int argc, char** argv) {
                static_cast<unsigned long long>(ds.chain_gaps),
                static_cast<unsigned long long>(ds.size_violations));
   std::fprintf(out, "}\n");
-  if (out != stdout) std::fclose(out);
+  // Closing is where deferred write errors surface, so a full disk produces a
+  // truncated tape reported as a failure rather than as success.
+  if (out != stdout && std::fclose(out) != 0) {
+    std::fprintf(stderr, "tape: writing %s failed\n", out_path);
+    return 1;
+  }
 
-  std::fprintf(stderr, "tape: %llu frames | own order placed %d times, %d derived fills\n",
-               static_cast<unsigned long long>(frames), own_placements, own_fills);
+  double median_fill_ms = 0.0;
+  if (!fill_latencies.empty()) {
+    std::sort(fill_latencies.begin(), fill_latencies.end());
+    median_fill_ms = static_cast<double>(fill_latencies[fill_latencies.size() / 2]) / 1e6;
+  }
+  std::fprintf(stderr,
+               "tape: %llu frames | own order placed %d times, %d derived fills"
+               " | median time to fill %.0f ms\n",
+               static_cast<unsigned long long>(frames), own_placements, own_fills,
+               median_fill_ms);
   return 0;
 }

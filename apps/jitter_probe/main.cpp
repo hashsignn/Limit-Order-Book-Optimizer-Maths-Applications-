@@ -19,6 +19,15 @@ using namespace lob;
 
 int main(int argc, char** argv) {
   const int seconds = argc > 1 ? std::atoi(argv[1]) : 5;
+  // A negative value reached from_nanos() and was cast to std::uint64_t, which
+  // is undefined and in practice produced a near-UINT64_MAX deadline: the probe
+  // spun until it was killed. This is the first tool a new contributor is told
+  // to run.
+  if (seconds <= 0) {
+    std::fprintf(stderr, "seconds must be a positive integer (got %s)\n",
+                 argc > 1 ? argv[1] : "0");
+    return 2;
+  }
 
   const auto& cal = tsc::init();
   std::printf("Jitter baseline — %d s on this machine\n", seconds);
