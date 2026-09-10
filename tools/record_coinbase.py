@@ -36,6 +36,8 @@ import pathlib
 import signal
 import sys
 import time
+
+from recorder_retry import run_with_retry
 from datetime import datetime, timezone
 
 try:
@@ -91,7 +93,10 @@ class Recorder:
         self.bytes_written += len(line) + 1
 
     # ---- capture --------------------------------------------------------
-    async def run(self, duration_seconds: float) -> None:
+    # One connection. Returns True if it ended because the clock ran out
+    # rather than because the connection died; tools/recorder_retry.py
+    # decides whether to come back and how long to wait first.
+    async def _session(self, duration_seconds: float) -> bool:
         self.outdir.mkdir(parents=True, exist_ok=True)
         started = time.time()
 
@@ -128,7 +133,12 @@ class Recorder:
             drain_task = asyncio.create_task(drain())
 
             # ---- step 2: the snapshot ----
-            snap = requests.get(REST_URL.format(product=self.product), timeout=30).json()
+            # Status- and shape-checked before use; see record_bitstamp.py.
+            resp = requests.get(REST_URL.format(product=self.product), timeout=30)
+            resp.raise_for_status()
+            snap = resp.json()
+            if not isinstance(snap.get("bids"), list) or not snap.get("asks"):
+                raise RuntimeError(f"unexpected snapshot shape: {sorted(snap)[:6]}")
             snap_seq = snap.get("sequence")
             if snap_seq is None:
                 sys.exit(f"snapshot has no sequence field: {list(snap)[:5]}")
@@ -169,6 +179,11 @@ class Recorder:
 
         self._close_file()
         self._summary(time.time() - started)
+        return (time.time() - started) >= duration_seconds or self.stop
+
+    async def run(self, duration_seconds: float) -> None:
+        self.outdir.mkdir(parents=True, exist_ok=True)
+        await run_with_retry(self, duration_seconds)
 
     def _record(self, msg: dict) -> None:
         seq = msg.get("sequence")

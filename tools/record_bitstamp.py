@@ -19,8 +19,20 @@ WHY TWO CHANNELS
     live_trades_<pair>   every trade, with buy_order_id and sell_order_id
 
     order_deleted does not say WHY the order left. A cancel and a fill look
-    identical. The only way to tell them apart is to join against live_trades
-    on the order id.
+    identical from that message alone.
+
+    This file used to say the only way to tell them apart was to join against
+    live_trades on the order id. Decoding a real capture showed otherwise, and
+    showed that the join would in fact be WRONG: every live_orders message
+    carries amount_traded, the size filled BY THIS EVENT, so the split is exact
+    and needs no clock -- while the two channels are not on the same clock at
+    all. In one capture the order channel ran ~570ms behind local time and the
+    trade channel ~90ms ahead of it. See include/lob/feed/bitstamp.hpp and
+    docs/02-data-and-protocols.md section 3.1.
+
+    Both channels are still recorded, for a different reason: live_trades is the
+    independent check on the split, and it is what apps/replay scores the book
+    reconstruction against -- a trade must print inside the touch.
 
     That distinction is not cosmetic. Volume cancelled ahead of you is free
     progress up the queue; volume TRADED ahead of you is progress plus the
@@ -55,6 +67,8 @@ import pathlib
 import signal
 import sys
 import time
+
+from recorder_retry import run_with_retry
 from datetime import datetime, timezone
 
 try:
@@ -123,32 +137,15 @@ class Recorder:
     # ---- capture --------------------------------------------------------
     async def run(self, duration_seconds: float) -> None:
         """Records for `duration_seconds` of WALL time, across as many sessions
-        as it takes. Returns when the clock runs out or ctrl-c is pressed."""
+        as it takes. Returns when the clock runs out or ctrl-c is pressed.
+
+        The retry loop this file used to carry inline now lives in
+        tools/recorder_retry.py, shared with the other two recorders -- which
+        had no reconnect handling at all, so a dropped connection three minutes
+        into an eight-hour run simply ended them."""
         self.outdir.mkdir(parents=True, exist_ok=True)
         started = time.time()
-        backoff = 1.0
-        while not self.stop and (time.time() - started) < duration_seconds:
-            remaining = duration_seconds - (time.time() - started)
-            try:
-                clean = await self._session(remaining)
-                backoff = 1.0 if clean else min(backoff * 2.0, 60.0)
-            except Exception as exc:                      # noqa: BLE001
-                print(f"  \033[33msession ended: {type(exc).__name__}: {exc}\033[0m", flush=True)
-                backoff = min(backoff * 2.0, 60.0)
-            if self.stop or (time.time() - started) >= duration_seconds:
-                break
-            # Every reconnect costs a REST snapshot, and that endpoint is rate
-            # limited. Backing off is not politeness, it is the difference
-            # between a capture and a throttled IP.
-            # Never sleep past the deadline: a capture asked for 8 hours should
-            # end at 8 hours, not at 8 hours plus whatever the backoff was.
-            nap = min(backoff, duration_seconds - (time.time() - started))
-            if nap <= 0:
-                break
-            print(f"  reconnecting in {nap:.0f}s "
-                  f"({(duration_seconds - (time.time() - started))/60:.0f} min left)", flush=True)
-            await asyncio.sleep(nap)
-
+        await run_with_retry(self, duration_seconds)
         self._close_file()
         self._summary(time.time() - started)
 
@@ -204,7 +201,15 @@ class Recorder:
             drain_task = asyncio.create_task(drain())
 
             # ---- snapshot: group=2 gives individual orders, not price levels ----
-            snap = requests.get(REST_BOOK.format(pair=self.pair), timeout=30).json()
+            # Status- and shape-checked before use. A capture is hours of wall
+            # time against a market that will not repeat, and an unchecked
+            # .json() on an HTML error page raises inside the recording loop --
+            # losing the run to a transient the retry above exists to survive.
+            resp = requests.get(REST_BOOK.format(pair=self.pair), timeout=30)
+            resp.raise_for_status()
+            snap = resp.json()
+            if not isinstance(snap.get("bids"), list) or not snap.get("asks"):
+                raise RuntimeError(f"unexpected snapshot shape: {sorted(snap)[:6]}")
             drain_task.cancel()
             try:
                 await drain_task
